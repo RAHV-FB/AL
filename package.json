@@ -1,0 +1,21 @@
+{
+  "name": "artificial-life",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Artificial Life — an offline, deterministic, interactive civilization simulator (TypeScript + Canvas 2D)",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "bench": "vitest run tests/perf.bench.test.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite": "^8.3.6",
+    "vite-plugin-singlefile": "^2.3.4",
+    "vitest": "^5.1.0"
+  }
+}
