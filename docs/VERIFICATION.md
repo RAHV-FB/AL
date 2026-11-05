@@ -67,3 +67,29 @@ These numbers therefore validate the **harness**, not the final simulation.
 ### Final release run
 
 *(Lead: paste the outputs of the checklist commands here after integration.)*
+
+## Results — integration run (2026-11-05, Linux container, Node 22, 4 vCPU)
+
+`npx vitest run --exclude tests/balance.report.test.ts --silent=false` → **17 test files, 229 tests passed, 0 failed.**
+
+Invariants (every preset, 3000 ticks, all checks passing):
+
+| preset | pop @3000 | peak | births | deaths | tribes | ms/tick |
+| --- | --- | --- | --- | --- | --- | --- |
+| eden | 1000 | 1000 | 850 | 0 | 38 | 3.26 |
+| fittest | 175 | 321 | 237 | 242 | 13 | 1.86 |
+| two-civs | 856 | 856 | 637 | 1 | 31 | 2.94 |
+| evolab | 805 | 805 | 626 | 1 | 30 | 2.18 |
+| collapse | 1400 | 1400 | 1240 | 0 | 39 | 4.25 |
+| plague-island | 857 | 857 | 758 | 106 | 32 | 2.66 |
+| predators | 970 | 970 | 759 | 1 | 37 | 2.44 |
+
+Performance (`tests/perf.bench.test.ts`): 1000 agents → mean **4.47 ms/tick** (p50 3.77, p95 8.72, max 32.9) ≈ 224 ticks/s; default eden population (~228) → 1.68 ms/tick.
+
+Long run (`tests/longrun.test.ts`): eden 20 000 ticks at 7.29 ms/tick, heap 28.4 → 24.4 MB; predators 20 000 ticks at 2.18 ms/tick, heap 27.4 → 38.3 MB (bounded; all state arrays within LIMITS).
+
+Determinism: identical seeds + identical interventions → identical hashes; replay of the intervention log reproduces the original hash; save → load → continue equals uninterrupted run.
+
+Browser: `npm run build && node scripts/browser-smoke.mjs` → single-file `dist/index.html` (358 kB) loaded via `file://`, no console errors, canvas rendered (590 distinct colours), screenshot at `docs/screenshot.png`.
+
+Balance note (12-day headless report, `npm run balance`): populations boom, then thin out in winter (days 9–11); most presets survive at reduced numbers, `collapse` collapses by design.
