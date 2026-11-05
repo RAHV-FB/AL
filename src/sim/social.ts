@@ -716,6 +716,7 @@ export function updateSocial(sim: Simulation): void {
       forgetDead(sim, a);
       continue;
     }
+    if (a.tribeId !== NONE && !liveTribe(sim, a.tribeId)) a.tribeId = NONE; // never point at a dead tribe
     if (a.age >= a.traits.maturityAge) {
       n++;
       sf += clamp01(a.skills.forage);
@@ -963,7 +964,7 @@ function tribePass(sim: Simulation, c: SocialCache): void {
       t.peakMembers = n;
     }
     if (n === 0) {
-      if (s.tick - t.foundedTick >= K.extinctGrace) markExtinct(sim, t, c);
+      if (s.tick - t.foundedTick >= K.extinctGrace && !hasPendingMember(sim, t.id)) markExtinct(sim, t, c);
       continue;
     }
     if (t.meanGenes.length !== GENE_COUNT) t.meanGenes = new Array(GENE_COUNT).fill(0);
@@ -1002,6 +1003,23 @@ function tribePass(sim: Simulation, c: SocialCache): void {
   }
 
   if (s.config.tribesEnabled) considerFission(sim, c);
+}
+
+/**
+ * True when an agent registered this tick (newborn / spawned, not yet flushed into state.agents)
+ * belongs to the tribe. Agents are appended in id order, so pending ones have ids above the last
+ * agent in the array; their lineage records (appended at registration) carry the tribe id.
+ */
+function hasPendingMember(sim: Simulation, tribeId: TribeId): boolean {
+  const agents = sim.state.agents;
+  const lineage = sim.state.lineage;
+  const maxId = agents.length ? agents[agents.length - 1].id : 0;
+  for (let i = lineage.length - 1; i >= 0; i--) {
+    const r = lineage[i];
+    if (r.id <= maxId) break;
+    if (r.deathTick === -1 && r.tribeId === tribeId) return true;
+  }
+  return false;
 }
 
 function markExtinct(sim: Simulation, t: Tribe, c: SocialCache): void {
