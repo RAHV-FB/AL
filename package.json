@@ -10,7 +10,9 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "bench": "vitest run tests/perf.bench.test.ts"
+    "bench": "vitest run tests/perf.bench.test.ts --silent=false",
+    "smoke:browser": "node scripts/browser-smoke.mjs",
+    "balance": "vitest run tests/balance.report.test.ts --silent=false"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
