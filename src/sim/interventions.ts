@@ -47,6 +47,19 @@ const isPoint = (x: unknown, y: unknown): boolean => typeof x === 'number' && Nu
 const fmt = (v: number): string => String(Math.round(v * 100) / 100);
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
 
+/** Largest float32 <= v, so values stored in Float32Arrays never exceed their clamp. */
+function f32AtMost(v: number): number {
+  const r = Math.fround(v);
+  return r <= v ? r : Math.fround(v - Math.abs(v) * 1.2e-7);
+}
+/** Upper bound for (base) fertility raised by fertilize. */
+const MAX_FERTILITY = f32AtMost(1.2);
+/** Clamp a fertility value to [0, 1.2], snapping float32 residue near zero to 0. */
+const clampFertility = (v: number): number => {
+  const c = clamp(v, 0, MAX_FERTILITY);
+  return c < 1e-6 ? 0 : c;
+};
+
 /** Food capacity of a tile (same formula as ecology.tileCapacity). */
 function capacity(sim: Simulation, i: number): number {
   const w = sim.state.world;
@@ -223,8 +236,8 @@ function spawn(sim: Simulation, iv: SpawnSpec): void {
         tribe.homeY = home.y;
       }
     } else if (typeof iv.tribe === 'number') {
-      const t = sim.getTribe(iv.tribe);
-      if (t && t.extinctTick === -1) {
+      const t = sim.getTribe(iv.tribe); // joinTribe revives a recently extinct tribe
+      if (t) {
         tribe = t;
         for (const a of made) joinTribe(sim, a, t.id);
       }
@@ -261,7 +274,7 @@ function addFood(sim: Simulation, x: number, y: number, r: number, amount: numbe
   let total = 0;
   forTilesInRadius(sim, x, y, brushRadius(sim, r), (i) => {
     const cur = food[i] >= 0 ? food[i] : 0;
-    const limit = Math.max(0, capacity(sim, i) * 1.5);
+    const limit = f32AtMost(Math.max(0, capacity(sim, i) * 1.5));
     const next = Math.max(cur, Math.min(cur + amt, limit));
     food[i] = next;
     total += next - cur;
@@ -287,8 +300,8 @@ function fertilize(sim: Simulation, x: number, y: number, r: number, amount: num
   let tiles = 0;
   forTilesInRadius(sim, x, y, brushRadius(sim, r), (i) => {
     if (TERRAIN_INFO[w.terrain[i] as TerrainType].maxFood <= 0) return; // barren by nature
-    w.fertility[i] = clamp(num(w.fertility[i], 0) + amt, 0, 1.2);
-    w.baseFertility[i] = clamp(num(w.baseFertility[i], 0) + amt, 0, 1.2);
+    w.fertility[i] = clampFertility(num(w.fertility[i], 0) + amt);
+    w.baseFertility[i] = clampFertility(num(w.baseFertility[i], 0) + amt);
     if (amt < 0) {
       const cap = Math.max(0, capacity(sim, i));
       if (!(w.food[i] <= cap)) w.food[i] = cap;
@@ -362,9 +375,10 @@ function disaster(sim: Simulation, kind: DisasterKind, x: number, y: number, r: 
   const radius = brushRadius(sim, num(r, 80));
   const inten = clamp(num(intensity, 0.7), 0.05, 1);
   const dur = Math.round(clamp(num(duration, 600), 1, 100000));
-  startDisaster(sim, kind, dx, dy, radius, inten, dur);
   const label = DISASTER_INFO[kind]?.label ?? kind;
+  // log the cause before startDisaster logs its immediate effects
   sim.log('intervention', kind === 'bloom' ? 'good' : 'bad', `${label} unleashed${radius === 0 ? ' worldwide' : ''}`, { x: dx, y: dy });
+  startDisaster(sim, kind, dx, dy, radius, inten, dur);
 }
 
 // ------------------------------------------------------------------ config

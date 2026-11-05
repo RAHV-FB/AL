@@ -24,18 +24,18 @@ export const DAY_START = 0.3;
 /** Mean temperature (°C-ish) through each season: spring, summer, autumn, winter. */
 export const SEASON_TEMPERATURE: readonly number[] = [14, 26, 12, -3];
 /** Plant-growth multiplier through each season: spring, summer, autumn, winter. */
-export const SEASON_GROWTH: readonly number[] = [1.35, 1.0, 0.7, 0.12];
+export const SEASON_GROWTH: readonly number[] = [1.3, 1.0, 0.8, 0.35];
 /** Year-round mean of the seasonal growth curve. */
-export const MEAN_SEASON_GROWTH = (1.35 + 1.0 + 0.7 + 0.12) / 4;
+export const MEAN_SEASON_GROWTH = (1.3 + 1.0 + 0.8 + 0.35) / 4;
 /** Half-width (in seasons) of the smooth blend centred on each season boundary. */
 const SEASON_BLEND = 0.25;
 /** Daily temperature swing (± °C) when the day/night cycle is on; coldest ≈ 03:30, warmest ≈ 15:30. */
 export const DAILY_TEMP_SWING = 4;
 
 /** Logistic regrowth rate r per tick. Grass (maxFood 10) at half capacity: r·5·0.5 ≈ 0.008 food/tick at seasonGrowth 1. */
-export const REGROWTH_RATE = 0.0032;
+export const REGROWTH_RATE = 0.0055;
 /** Seed rain on bare soil: food/tick per unit fertility (× growth modifiers × (1 − food/cap)). */
-export const SEED_RAIN = 0.0004;
+export const SEED_RAIN = 0.0012;
 /** Seed rain is multiplied by (1 + SEED_SPREAD·n), n = 0..1 richness of the 4 neighbours. */
 export const SEED_SPREAD = 3;
 /** Fraction of any excess above capacity lost per tick (overfilled tiles decay back to capacity). */

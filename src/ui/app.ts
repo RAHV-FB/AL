@@ -56,7 +56,7 @@ const DEATH_LABEL: Record<DeathCause, string> = {
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 interface DragState {
-  kind: 'pan' | 'paint' | 'click';
+  kind: 'pan' | 'paint' | 'click' | 'minimap';
   id: number;
   button: number;
   sx: number;
@@ -108,6 +108,8 @@ export class App {
   private ticksCounted = 0;
   private limitedUntil = 0;
   private needsApply = false;
+  /** Set when speed / pause changes so the next perf window is not judged. */
+  private perfDirty = true;
   private simError = false;
   private renderErrLogged = false;
   private panelErrLogged = false;
@@ -115,6 +117,7 @@ export class App {
   private unseenEvents = 0;
   private toastQueue: SimEvent[] = [];
   private lastToastT = 0;
+  private skippedToasts = 0;
   private helpOpen = false;
   private panelTicks = 0;
   private text: Record<string, string> = {};
@@ -147,11 +150,14 @@ export class App {
       showCamps: true,
       showLabels: true,
       showMinimap: true,
+      showLegend: true,
       brush: null,
     } as Record<string, unknown>;
     for (const [k, v] of Object.entries(storedView)) if (typeof v === 'boolean' && typeof view[k] === 'boolean') view[k] = v;
     const ov = store.get('overlay');
     if (ov && OVERLAYS.some((o) => o.value === ov)) view.overlay = ov;
+    // keep the renderer's minimap & legend clear of the bottom HUD strip
+    view.insets = { top: 0, right: 0, bottom: 34, left: 0 };
     this.view = view as unknown as ViewOptions;
     this.supportsMinimap = detectMinimap(this.renderer);
 
@@ -313,7 +319,7 @@ export class App {
   private buildHud(): void {
     const rail = h('div', { class: 'rail', role: 'toolbar', 'aria-label': 'Tools', 'data-tip-side': 'right' });
     for (const t of TOOLS) {
-      const b = h('button', { type: 'button', class: 'rail-btn', tip: `${t.name}  [${t.key}]\n${t.blurb}`, 'aria-label': `${t.name} (key ${t.key})`, onclick: () => this.setTool(t.id) }, icon(t.icon, 18), h('span', { class: 'k' }, t.key));
+      const b = h('button', { type: 'button', class: 'rail-btn', tip: `${t.name}  [${t.key}]\n${t.how}`, 'aria-label': `${t.name} (key ${t.key})`, onclick: () => this.setTool(t.id) }, icon(t.icon, 18), h('span', { class: 'k' }, t.key));
       this.railBtns.set(t.id, b);
       rail.append(b);
     }
@@ -321,10 +327,9 @@ export class App {
     el.paused = h('button', { type: 'button', class: 'hud-pill paused-pill', onclick: () => this.togglePause(), tip: 'Click or press Space to resume' }, icon('pause', 12), 'Paused');
     el.follow = h('button', { type: 'button', class: 'hud-pill follow-pill', onclick: () => this.stopFollow(), tip: 'Click, press F or pan the camera to stop following' });
     el.cursor = h('div', { class: 'cursor-info mono' });
-    el.hover = h('div', { class: 'hover-card' });
     el.toolHud = h('div', { class: 'tool-hud' });
     el.keysHint = h('button', { type: 'button', class: 'keys-hint', onclick: () => this.showHelp(true) }, h('kbd', null, 'H'), ' shortcuts');
-    this.stage.append(rail, h('div', { class: 'hud-top' }, el.paused, el.follow), el.toolHud, el.cursor, el.keysHint, el.hover);
+    this.stage.append(rail, h('div', { class: 'hud-top' }, el.paused, el.follow), el.toolHud, el.cursor, el.keysHint);
   }
 
   private buildHelp(): HTMLElement {
@@ -339,7 +344,7 @@ export class App {
         { class: 'key-grid' },
         h('div', null, h('h3', null, 'Time'), row(['Space'], 'Play / pause'), row(['.'], 'Advance one tick'), row(['<', '>'], 'Slower / faster'), h('h3', null, 'Camera'), row(['Wheel'], 'Zoom at cursor'), row(['Drag'], 'Pan (Inspect tool, or any click tool)'), row(['Right-drag'], 'Pan with any tool'), row(['W', 'A', 'S', 'D'], 'Pan (or arrow keys)'), row(['+', '−'], 'Zoom in / out'), row(['0'], 'Fit the whole world'), row(['F'], 'Follow selected agent')),
         h('div', null, h('h3', null, 'Tools'), row(['1', '–', '9'], 'Choose a tool'), ...TOOLS.map((t) => row([t.key], t.name)), row(['[', ']'], 'Brush smaller / larger (or Alt + wheel)'), row(['Shift', 'Click'], 'Smite (with Bless tool)')),
-        h('div', null, h('h3', null, 'Panels'), row(['O'], 'Cycle data overlay'), row(['Esc'], 'Deselect / close'), row(['H'], 'This help'), row(['Ctrl', 'S'], 'Save experiment'), row(['Ctrl', 'O'], 'Load experiment'), h('h3', null, 'Tips'), h('ul', { class: 'tips' }, h('li', null, 'Paint a wall across the map and watch the two halves drift apart genetically.'), h('li', null, 'Spawn "Warlike raiders" next to "Gentle foragers" and compare in the Stats tab.'), h('li', null, 'Hover any control for an explanation.'))),
+        h('div', null, h('h3', null, 'Panels'), row(['O'], 'Cycle data overlay'), row(['Esc'], 'Deselect / close'), row(['H'], 'This help'), row(['Ctrl', 'S'], 'Save experiment'), row(['Ctrl', 'O'], 'Load experiment'), h('h3', null, 'Tips'), h('ul', { class: 'tips' }, h('li', null, 'Paint a wall across the map and watch the two halves drift apart genetically.'), h('li', null, 'Spawn "Warlike raiders" next to "Gentle foragers" and compare in the Stats tab.'), h('li', null, 'While paused, each edit advances the world by a single tick so you can see it applied.'), h('li', null, 'Hover any control for an explanation.'))),
       ),
     );
     const back = h('div', { class: 'modal-back', onclick: (e: Event) => { if (e.target === back) this.showHelp(false); } }, modal);
@@ -417,6 +422,7 @@ export class App {
     const evs = sim.state.events;
     this.lastEventId = evs.length ? evs[evs.length - 1].id : 0;
     this.toastQueue = [];
+    this.skippedToasts = 0;
     this.unseenEvents = 0;
     this.el.expName.textContent = sc.name;
     this.el.expSeed.textContent = `seed ${sim.config.seed}`;
@@ -475,7 +481,7 @@ export class App {
       const state = deserializeState(text);
       sim = Simulation.fromState(state);
     } catch (err) {
-      console.warn('Invalid save file', err);
+      console.info('Rejected save file:', errMsg(err));
       this.toaster.show(errMsg(err), { kind: 'error', title: `"${file.name}" is not a valid Artificial Life save`, timeout: 9000 });
       return;
     }
@@ -556,6 +562,8 @@ export class App {
     this.running = !this.running;
     if (this.running) this.simError = false;
     this.tickAcc = 0;
+    this.perfDirty = true;
+    this.limitedUntil = 0;
     this.updateTransport();
   }
 
@@ -580,6 +588,7 @@ export class App {
     });
     this.tickAcc = 0;
     this.limitedUntil = 0;
+    this.perfDirty = true;
   }
 
   private updateTransport(): void {
@@ -646,10 +655,21 @@ export class App {
   }
 
   /** Smoothly move the camera centre to a world point. */
-  flyTo(x: number, y: number): void {
+  flyTo(x: number, y: number, zoomIn = true): void {
     this.stopFollow();
     this.flight = { fx: this.camera.x, fy: this.camera.y, tx: x, ty: y, t0: performance.now() };
-    if (this.camera.zoom < 1.2) this.camera.zoomAt(this.camera.viewW / 2, this.camera.viewH / 2, 1.6 / this.camera.zoom);
+    if (zoomIn && this.camera.zoom < 1.2) this.camera.zoomAt(this.camera.viewW / 2, this.camera.viewH / 2, 1.6 / this.camera.zoom);
+  }
+
+  /** World point under a screen point when it lies on the renderer's minimap (if the renderer has one). */
+  private minimapWorld(sx: number, sy: number): { x: number; y: number } | null {
+    if ((this.view as { showMinimap?: boolean }).showMinimap === false) return null;
+    const r = this.renderer as unknown as { minimapToWorld?: (x: number, y: number) => { x: number; y: number } | null };
+    try {
+      return typeof r.minimapToWorld === 'function' ? r.minimapToWorld(sx, sy) : null;
+    } catch {
+      return null;
+    }
   }
 
   setOverlay(k: OverlayKind): void {
@@ -667,8 +687,9 @@ export class App {
     for (const [tid, b] of this.railBtns) b.classList.toggle('on', tid === id);
     this.left.onToolChanged();
     this.painter.end();
-    this.el.toolHud.replaceChildren(icon(this.tool.icon, 13), h('span', null, this.tool.name), this.tool.brush ? h('span', { class: 'muted mono' }, ` · ${Math.round(this.settings.radius)} u`) : null);
+    this.refreshToolHud();
     this.canvas.dataset.tool = id;
+    this.updateCursor();
     if (reveal && id !== 'inspect' && !this.root.classList.contains('no-left')) this.left.openSection('tool');
   }
 
@@ -720,7 +741,7 @@ export class App {
     c.addEventListener('pointerleave', () => {
       this.pointer.inside = false;
       this.view.hoverId = -1;
-      this.el.hover.classList.remove('show');
+      this.updateCursorInfo();
     });
     c.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
     c.addEventListener('dblclick', (e) => {
@@ -745,7 +766,12 @@ export class App {
       /* ignore */
     }
     const base = { id: e.pointerId, button: e.button, sx: p.x, sy: p.y, lx: p.x, ly: p.y, moved: false };
-    if (e.button === 1 || e.button === 2) {
+    const mm = e.button === 0 ? this.minimapWorld(p.x, p.y) : null;
+    if (mm) {
+      this.drag = { kind: 'minimap', ...base };
+      this.stopFollow();
+      this.flyTo(mm.x, mm.y, false);
+    } else if (e.button === 1 || e.button === 2) {
       e.preventDefault();
       this.drag = { kind: 'pan', ...base };
     } else if (e.button === 0) {
@@ -789,6 +815,13 @@ export class App {
         this.painter.move(w.x, w.y, this.settings.radius, performance.now(), this.tool.airbrush);
         d.lx = p.x;
         d.ly = p.y;
+      } else if (d.kind === 'minimap') {
+        const mm = this.minimapWorld(p.x, p.y);
+        if (mm) {
+          this.flight = null;
+          this.camera.x = mm.x;
+          this.camera.y = mm.y;
+        }
       }
     }
     this.updateCursorInfo();
@@ -828,15 +861,22 @@ export class App {
   setRadius(r: number): void {
     this.settings.radius = Math.max(6, Math.min(320, Math.round(r)));
     this.left.sync();
-    this.setTool(this.tool.id, false);
+    this.refreshToolHud();
   }
+
+  private refreshToolHud(): void {
+    this.el.toolHud.replaceChildren(icon(this.tool.icon, 13), h('span', null, this.tool.name));
+    if (this.tool.brush) this.el.toolHud.append(h('span', { class: 'muted mono' }, `· ${Math.round(this.settings.radius)} u`));
+  }
+
+  private cursorStyle = 'default';
 
   private updateCursor(): void {
     const d = this.drag;
     let c = 'default';
-    if (d && d.kind === 'pan') c = 'grabbing';
+    if (d && (d.kind === 'pan' || d.kind === 'minimap')) c = 'grabbing';
     else if (this.tool.brush) c = 'crosshair';
-    else if (this.tool.id === 'bless') c = 'pointer';
+    this.cursorStyle = c;
     this.canvas.style.cursor = c;
   }
 
@@ -959,7 +999,7 @@ export class App {
   // ============================================================== frame loop
   private frame = (now: number): void => {
     requestAnimationFrame(this.frame);
-    const dt = this.lastFrame ? Math.min(100, Math.max(0, now - this.lastFrame)) : 16;
+    const dt = this.lastFrame ? Math.min(250, Math.max(0, now - this.lastFrame)) : 16;
     this.lastFrame = now;
     this.applyKeyPan(dt);
     if (this.drag?.kind === 'paint') this.painter.hold(this.settings.radius, performance.now(), this.tool.airbrush);
@@ -977,9 +1017,14 @@ export class App {
     if (now - this.lastPerf >= 1000) {
       const span = now - this.lastPerf;
       if (this.lastPerf) {
+        const tps = (this.ticksCounted * 1000) / span;
         this.setText('fps', String(Math.round((this.frames * 1000) / span)));
-        this.setText('tps', String(Math.round((this.ticksCounted * 1000) / span)));
+        this.setText('tps', String(Math.round(tps)));
+        // CPU-limited = the requested speed is not being met over the last second
+        const sp = SPEEDS[this.speedIdx];
+        if (this.running && sp > 0 && !this.perfDirty && tps < BASE_TPS * sp * 0.85) this.limitedUntil = now + 1100;
       }
+      this.perfDirty = false;
       this.frames = 0;
       this.ticksCounted = 0;
       this.lastPerf = now;
@@ -1011,7 +1056,6 @@ export class App {
             ticks++;
             n--;
             if (n > 0 && performance.now() - t0 > STEP_BUDGET_MS) {
-              this.limitedUntil = now + 1500;
               this.tickAcc = 0;
               break;
             }
@@ -1067,7 +1111,7 @@ export class App {
   private updateBrush(): void {
     const t = this.tool;
     const d = this.drag;
-    if (t.brush && this.pointer.inside && !(d && d.kind === 'pan') && !this.helpOpen) {
+    if (t.brush && this.pointer.inside && !(d && (d.kind === 'pan' || d.kind === 'minimap')) && !this.helpOpen && !(!d && this.minimapWorld(this.pointer.x, this.pointer.y))) {
       const w = this.camera.screenToWorld(this.pointer.x, this.pointer.y);
       const b = this.view.brush;
       const color = brushColor(t, this.settings);
@@ -1080,46 +1124,19 @@ export class App {
     } else this.view.brush = null;
   }
 
+  /** Hovered agent → view.hoverId (the renderer draws its name tag); details go to the status strip. */
   private updateHover(): void {
-    const card = this.el.hover;
-    const allow = this.pointer.inside && !this.drag && (this.tool.mode !== 'paint' || this.tool.id === 'remove') && !this.helpOpen;
+    const allow = this.pointer.inside && !this.drag && (this.tool.mode !== 'paint' || this.tool.id === 'remove') && !this.helpOpen && !this.minimapWorld(this.pointer.x, this.pointer.y);
     const a = allow ? this.renderer.pickAgent(this.sim, this.pointer.x, this.pointer.y) : null;
-    this.view.hoverId = a ? a.id : -1;
-    if (!a) {
-      card.classList.remove('show');
-      return;
-    }
-    const tribe = this.sim.getTribe(a.tribeId);
-    const hp = Math.round((a.health / Math.max(1, a.traits.maxHealth)) * 100);
-    const food = Math.round((a.food / Math.max(1, a.traits.maxFood)) * 100);
-    const key = `${a.id}|${a.action}|${a.thought}|${hp}|${food}|${a.tribeId}|${a.infection > 0}`;
-    if (card.dataset.key !== key) {
-      card.dataset.key = key;
-      card.replaceChildren(
-        h('div', { class: 'hc-name' }, h('span', { class: 'hc-dot', style: `background:hsl(${a.traits.hue},70%,60%)` }), a.name, h('span', { class: 'hc-gen' }, `gen ${a.generation}`)),
-        h('div', { class: 'hc-action' }, ACTION_LABEL[a.action] ?? a.action, a.thought ? h('span', { class: 'hc-thought' }, ` — ${a.thought.length > 64 ? a.thought.slice(0, 62) + '…' : a.thought}`) : null),
-        h(
-          'div',
-          { class: 'hc-meta' },
-          tribe ? h('span', { class: 'hc-tribe', style: `color:hsl(${tribe.hue},70%,68%)` }, tribe.name) : h('span', { class: 'muted' }, 'no tribe'),
-          h('span', { class: 'mono' }, `♥ ${hp}%`),
-          h('span', { class: 'mono' }, `◍ ${food}%`),
-          a.infection > 0 ? h('span', { class: 'hc-sick' }, 'infected') : null,
-        ),
-      );
-    }
-    const sw = this.stage.clientWidth;
-    const sh = this.stage.clientHeight;
-    const cw = card.offsetWidth || 200;
-    const ch = card.offsetHeight || 60;
-    let x = this.pointer.x + 16;
-    let y = this.pointer.y + 16;
-    if (x + cw > sw - 8) x = this.pointer.x - cw - 12;
-    if (y + ch > sh - 8) y = this.pointer.y - ch - 12;
-    card.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
-    card.classList.add('show');
+    const id = a ? a.id : -1;
+    if (id !== this.view.hoverId) {
+      this.view.hoverId = id;
+      this.updateCursorInfo();
+    } else if (a && this.frames % 6 === 0) this.updateCursorInfo();
+    this.canvas.style.cursor = a && !this.drag && this.tool.mode !== 'paint' ? 'pointer' : this.cursorStyle;
   }
 
+  /** Bottom status strip: hovered agent details, or the tile under the cursor. */
   private updateCursorInfo(): void {
     const el = this.el.cursor;
     if (!this.pointer.inside) {
@@ -1127,6 +1144,30 @@ export class App {
       return;
     }
     const sim = this.sim;
+    const a = this.view.hoverId !== -1 ? sim.getAgent(this.view.hoverId) : undefined;
+    if (a) {
+      const tribe = sim.getTribe(a.tribeId);
+      const hp = Math.round((a.health / Math.max(1, a.traits.maxHealth)) * 100);
+      const fed = Math.round((a.food / Math.max(1, a.traits.maxFood)) * 100);
+      const thought = a.thought ? ` — “${a.thought.length > 90 ? a.thought.slice(0, 88) + '…' : a.thought}”` : '';
+      const key = `a|${a.id}|${a.action}|${thought}|${hp}|${fed}|${tribe?.id}|${a.infection > 0}`;
+      if (this.text.cursor !== key) {
+        this.text.cursor = key;
+        el.replaceChildren(
+          h('span', { class: 'ci-dot', style: `background:hsl(${a.traits.hue},70%,60%)` }),
+          h('b', null, a.name),
+          h('span', { class: 'muted' }, ` gen ${a.generation} · `),
+          tribe ? h('span', { style: `color:hsl(${tribe.hue},70%,70%)` }, tribe.name) : h('span', { class: 'muted' }, 'no tribe'),
+          h('span', { class: 'muted' }, ' · '),
+          h('span', { class: 'ci-act' }, ACTION_LABEL[a.action] ?? a.action),
+          h('span', { class: 'muted' }, thought),
+          h('span', { class: 'ci-vitals' }, `  ♥ ${hp}%  ◍ ${fed}%`),
+          a.infection > 0 ? h('span', { class: 'ci-sick' }, '  infected') : '',
+        );
+      }
+      el.classList.add('show');
+      return;
+    }
     const w = this.camera.screenToWorld(this.pointer.x, this.pointer.y);
     const i = sim.tileIndex(w.x, w.y);
     if (i < 0) {
@@ -1218,7 +1259,7 @@ export class App {
         if (this.tab !== 'events') this.unseenEvents += count;
         fresh.reverse();
         this.toastQueue.push(...fresh);
-        if (this.toastQueue.length > 3) this.toastQueue.splice(0, this.toastQueue.length - 3);
+        if (this.toastQueue.length > 2) this.skippedToasts += this.toastQueue.splice(0, this.toastQueue.length - 2).length;
       }
     }
     const badge = this.el.evBadge;
@@ -1228,14 +1269,15 @@ export class App {
       badge.classList.toggle('show', Boolean(label));
     }
     const now = performance.now();
-    if (this.toastQueue.length && now - this.lastToastT > 1300) {
+    if (this.toastQueue.length && now - this.lastToastT > 2000) {
       const ev = this.toastQueue.shift()!;
       this.lastToastT = now;
-      const more = this.toastQueue.length;
+      const more = this.toastQueue.length + this.skippedToasts;
+      this.skippedToasts = 0;
       this.toaster.show(ev.message, {
         kind: 'major',
-        title: `${ev.category.charAt(0).toUpperCase()}${ev.category.slice(1)} · tick ${fmtInt(ev.tick)}${more ? `  (+${more} more)` : ''}`,
-        timeout: 6000,
+        title: `${ev.category.charAt(0).toUpperCase()}${ev.category.slice(1)} · tick ${fmtInt(ev.tick)}${more ? `  · +${more} more in Events` : ''}`,
+        timeout: 5000,
         onClick: () => {
           if (ev.agentId !== undefined && this.sim.getAgent(ev.agentId)) this.handlersSelect(ev.agentId);
           else if (ev.x !== undefined && ev.y !== undefined) this.flyTo(ev.x, ev.y);

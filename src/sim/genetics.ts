@@ -218,9 +218,9 @@ export const REPRO = {
   maxSiblingLinks: 3,
 };
 
-/** Minimum stomach fraction (food / maxFood) to breed: 0.6 (fertility 0) … 0.35 (fertility 1). */
+/** Minimum stomach fraction (food / maxFood) to breed: 0.72 (fertility 0) … 0.5 (fertility 1). */
 export function mateFoodThreshold(t: Traits): number {
-  return 0.6 - 0.25 * unit(t.fertility);
+  return 0.72 - 0.22 * unit(t.fertility);
 }
 
 /**

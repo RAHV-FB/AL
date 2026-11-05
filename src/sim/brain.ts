@@ -28,7 +28,8 @@ import { escapeImpassable, halt, moveToward, stepDir } from './steering';
 
 // ------------------------------------------------------------------ tuning
 const MAX_NEIGHBOURS = 48;
-const LOCAL_SCAN_TILES = 3;
+/** Exact scan radius (tiles) around the agent; complements ecology.findFood's sparse long-range lattice. */
+const LOCAL_SCAN_TILES = 5;
 const FOOD_MEMORY_TTL = 5000;
 const DANGER_MEMORY_TTL = 1500;
 const DANGER_RADIUS = 60;
@@ -163,7 +164,7 @@ function pct(v: number): number {
 }
 
 function hungerLabel(h: number): string {
-  return h >= 0.8 ? 'Starving' : h >= 0.55 ? 'Hungry' : h >= 0.3 ? 'Peckish' : 'Sated';
+  return h >= 0.8 ? 'Starving' : h >= 0.6 ? 'Very hungry' : h >= 0.35 ? 'Hungry' : h >= 0.15 ? 'Peckish' : 'Sated';
 }
 
 function terrainName(sim: Simulation, x: number, y: number): string {
@@ -352,7 +353,9 @@ function considerFood(a: Agent, x: number, y: number, food: number, bonus: numbe
   const dx = x - a.x;
   const dy = y - a.y;
   const d = Math.sqrt(dx * dx + dy * dy);
-  const sc = (food * bonus * (1 - 0.8 * dangerAt(a, x, y, tick))) / (1 + d / 60);
+  let sc = (food * bonus) / (1 + d / 60);
+  if (!(sc > fScore)) return; // danger can only lower the score
+  if (a.memory.danger.length) sc *= 1 - 0.8 * dangerAt(a, x, y, tick);
   if (sc > fScore) {
     fScore = sc;
     fX = x;
@@ -486,10 +489,10 @@ function perceive(sim: Simulation, a: Agent, b: Agent): void {
     const myChild = kin === 1 && (b.parents[0] === a.id || b.parents[1] === a.id);
     if (myChild && !bAdult && kids.length < 4) kids.push(b);
     // needy friend / kin / own child (I share when I have surplus)
-    if (P.surplus >= 3) {
+    if (P.surplus >= 4) {
       const bh = hungerOf(b);
       const juvenileChild = myChild && !bAdult;
-      if (bh > 0.5 || (juvenileChild && bh > 0.35)) {
+      if (juvenileChild ? bh > 0.35 : kin > 0 ? bh > 0.55 : bh > 0.65 && P.surplus >= 8) {
         const kinF = juvenileChild ? 2.2 : kin > 0 ? 1.5 : 1;
         const sc = bh * kinF * (0.6 + 0.4 * prox);
         if (sc > P.needyScore) {
@@ -786,7 +789,7 @@ export function think(sim: Simulation, a: Agent): void {
 
   // ================================================================ utilities
   const hungerDrive = Math.pow(hunger, 1.4) * 1.25 + (hunger > 0.75 ? (hunger - 0.75) * 2 : 0);
-  const foodDrive = hungerDrive * (1 + 0.25 * skForage);
+  const foodDrive = hungerDrive * (1 + 0.25 * skForage) * (0.75 + 0.25 * clamp(tr.efficiency, 0.3, 1.5));
   U.fill(0);
 
   // idle: loiter at camp when content
@@ -797,7 +800,10 @@ export function think(sim: Simulation, a: Agent): void {
 
   // explore: curious, fast, perceptive, unsociable agents; or hungry with no food in sight
   const curiosity = 0.5 * (clamp01((tr.perception - 25) / 115) + clamp01((tr.speed - 0.5) / 1.7));
+  // aggressive adults with no victim in sight prowl the land looking for prey
+  const prowl = adult && !P.prey && aggEff > 0.7 ? (aggEff - 0.7) * (0.3 + 0.7 * hunger) * 0.8 * (1 - 0.6 * fatigue) * (1 - 0.5 * night) : 0;
   U[I_EXPLORE] =
+    prowl +
     (0.04 + 0.2 * curiosity) * (1 - 0.5 * soc) * (1 - 0.7 * fatigue) * (adult ? 1 : 0.25) * (1 - 0.6 * night) +
     (!haveFoodTarget && hunger > 0.25 ? hunger * 0.55 : 0) +
     (role === 'explorer' ? 0.1 : 0);
@@ -857,16 +863,19 @@ export function think(sim: Simulation, a: Agent): void {
       }
     }
     if (P.prey && adult) {
+      // predation pays off for aggressive, strong agents — especially when plants are scarce
       const scarce = !haveFoodTarget || fScore < 1.5;
       const u =
-        aggEff *
-          (0.1 + 0.8 * Math.pow(hunger, 1.3) * (scarce ? 1.2 : 0.7)) *
+        1.5 *
+          Math.pow(aggEff, 1.5) *
+          (0.1 + 0.9 * hunger) *
           clamp(P.preyScore, 0, 1.2) *
           (0.8 + 0.4 * skCombat) *
-          (0.4 + 0.6 * hp) +
+          (0.4 + 0.6 * hp) *
+          (scarce ? 1.3 : 1) +
         (P.preyHostile ? 0.18 * Math.min(1.5, aggEff) : 0) +
         (role === 'warrior' ? 0.06 : 0) -
-        0.15 * Math.min(1, altEff) -
+        0.2 * Math.min(1, altEff) -
         0.2 * fatigue;
       if (u > best) {
         best = u;
@@ -907,7 +916,7 @@ export function think(sim: Simulation, a: Agent): void {
     // go home: night (if sociable), cold, fear, wounds, homesickness
     const far = clamp01((campDist - 35) / 150);
     U[I_HOME] =
-      (night * (0.2 + 0.6 * soc) + chill * 0.12 * soc + fear * 0.3 + (hp < 0.45 ? 0.15 : 0)) * far +
+      ((night * (0.2 + 0.6 * soc) + chill * 0.12 * soc) * (1 - 0.7 * hunger) + fear * 0.3 + (hp < 0.45 ? 0.15 : 0)) * far +
       soc * 0.1 * clamp01((campDist - 250) / 400);
     // deposit carried surplus into the stockpile
     if (a.carried >= Math.min(6, cap * 0.3)) {
@@ -1110,7 +1119,12 @@ export function think(sim: Simulation, a: Agent): void {
       a.targetX = exX;
       a.targetY = exY;
       const dir = compass(exX - a.x, exY - a.y);
-      thought = !haveFoodTarget && hunger > 0.25 ? `${hl} (${pct(hunger)}%), no food in sight — searching ${dir}` : `Restless — exploring to the ${dir}`;
+      thought =
+        !haveFoodTarget && hunger > 0.25
+          ? `${hl} (${pct(hunger)}%), no food in sight — searching ${dir}`
+          : prowl > 0.12
+            ? `Prowling ${dir} in search of prey`
+            : `Restless — exploring to the ${dir}`;
       break;
     }
     case I_IDLE:
@@ -1273,6 +1287,7 @@ function actEat(sim: Simulation, a: Agent): void {
       a.targetX = fX;
       a.targetY = fY;
       a.actionTicks = 0;
+      a.thought = 'Patch grazed bare — moving to the next one';
       return;
     }
     forgetFoodNear(a, a.x, a.y);
@@ -1323,7 +1338,7 @@ function actForage(sim: Simulation, a: Agent): void {
     a.actionTicks = 0;
     a.targetX = a.x;
     a.targetY = a.y;
-    if (!onTarget) a.thought = 'Grabbing a bite on the way';
+    a.thought = onTarget ? `Arrived — eating at a ${terrainName(sim, a.x, a.y)} patch` : 'Grabbing a bite on the way';
     actEat(sim, a);
     return;
   }

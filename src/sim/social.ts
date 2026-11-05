@@ -58,10 +58,10 @@ export const SOCIAL_TUNING = {
   alliance: 0.6,
   allianceEnd: 0.3,
   // combat
-  /** Damage per exchange = baseDamage × combat power × random(0.6..1.4) × bias. */
-  baseDamage: 12,
+  /** Damage per exchange = baseDamage × combat power × random(0.6..1.4) × bias (brain strikes every ~15 ticks). */
+  baseDamage: 16,
   /** Defender's counter-blow as a fraction of a full hit. */
-  retaliation: 0.55,
+  retaliation: 0.5,
   /** Each nearby defending tribe-mate / kin adds this fraction of a full hit. */
   helperHit: 0.35,
   maxHelpers: 3,
@@ -76,8 +76,8 @@ export const SOCIAL_TUNING = {
   // sharing
   giftAffinityReceiver: 0.15,
   giftAffinityGiver: 0.05,
-  /** Max tribe-relation gain of a cross-tribe gift (scaled by size up to 20 food). */
-  giftRelation: 0.03,
+  /** Max tribe-relation gain of a cross-tribe gift (scaled by size up to 20 food, diminishing toward +1). */
+  giftRelation: 0.008,
   // relationships (per agent update, i.e. every agentPeriod ticks)
   nonKinDecay: 0.97,
   kinDecay: 0.99,
@@ -86,14 +86,23 @@ export const SOCIAL_TUNING = {
   skillDecay: 0.992,
   neighbourRadius: 40,
   bondRadius: 30,
-  bondDelta: 0.008,
-  bondMax: 3,
+  bondDelta: 0.01,
+  bondMax: 4,
   // tribes
   foundSociability: 0.45,
-  foundProb: 0.15,
+  /** Fallback founding companions need at least this much familiarity (otherwise affinity > 0.2 or kin). */
+  foundFamiliarity: 0.05,
+  foundProb: 0.1,
   joinProb: 0.4,
+  /** Nearby-tribe attraction needed to join (neutral member 0.3, friend / kin 1, grudge -2). */
+  joinScore: 0.6,
+  /** Members of tribes this small drift into a strongly liked, larger neighbouring tribe. */
+  assimilateBelow: 5,
+  assimilateScore: 2,
   maxFounding: 14,
-  maxLivingTribes: 40,
+  /** Spontaneous founding stops at this many living tribes; fission may go up to maxLivingTribes. */
+  maxFoundedTribes: 32,
+  maxLivingTribes: 48,
   leaveSociability: 0.35,
   /** Deposit / withdraw range around the camp (world units). */
   campRadius: 24,
@@ -116,9 +125,11 @@ export const SOCIAL_TUNING = {
   territoryMin: 0.35,
   campInfluence: 2,
   /** Relation loss per contested tile per territory pass (× scarcity, aggression). */
-  borderFriction: 0.0015,
+  borderFriction: 0.0006,
+  /** Contested tiles counted per tribe pair (caps friction for long shared borders). */
+  borderCap: 40,
   // roles
-  roleMin: 0.12,
+  roleMin: 0.08,
 } as const;
 
 const K = SOCIAL_TUNING;
@@ -231,6 +242,15 @@ function clamp01(v: number): number {
 
 function pairKey(a: number, b: number): number {
   return a < b ? a * 1048576 + b : b * 1048576 + a;
+}
+
+/** "the Varn-kin" — but scenario names such as "The Wolf Pack" are used as-is. */
+function the(t: Tribe): string {
+  return /^the\s/i.test(t.name) ? t.name : `the ${t.name}`;
+}
+
+function cap(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 function meanRelation(a: Tribe, b: Tribe): number {
@@ -379,20 +399,20 @@ function checkDiplomacy(sim: Simulation, ta: Tribe, tb: Tribe): void {
   if (!c.wars.has(key)) {
     if (m < K.warDeclare) {
       c.wars.add(key);
-      sim.log('conflict', 'major', `War: the ${ta.name} and the ${tb.name} are now at war.`, where);
+      sim.log('conflict', 'major', `War: ${the(ta)} and ${the(tb)} are now at war.`, where);
     }
   } else if (m > K.peace) {
     c.wars.delete(key);
-    sim.log('conflict', 'good', `Peace: the ${ta.name} and the ${tb.name} have ended their war.`, where);
+    sim.log('conflict', 'good', `Peace: ${the(ta)} and ${the(tb)} have ended their war.`, where);
   }
   if (!c.alliances.has(key)) {
     if (m > K.alliance) {
       c.alliances.add(key);
-      sim.log('tribe', 'good', `Alliance: the ${ta.name} and the ${tb.name} have become allies.`, where);
+      sim.log('tribe', 'good', `Alliance: ${the(ta)} and ${the(tb)} have become allies.`, where);
     }
   } else if (m < K.allianceEnd) {
     c.alliances.delete(key);
-    sim.log('tribe', 'info', `The alliance between the ${ta.name} and the ${tb.name} has lapsed.`, where);
+    sim.log('tribe', 'info', `The alliance between ${the(ta)} and ${the(tb)} has lapsed.`, where);
   }
 }
 
@@ -466,7 +486,7 @@ function handleKill(sim: Simulation, killer: Agent, victim: Agent): void {
     const key = pairKey(tk.id, tv.id);
     if (!c.feuds.has(key)) {
       c.feuds.add(key);
-      sim.log('conflict', 'bad', `First blood: ${killer.name} of the ${tk.name} killed ${victim.name} of the ${tv.name}.`, {
+      sim.log('conflict', 'bad', `First blood: ${killer.name} of ${the(tk)} killed ${victim.name} of ${the(tv)}.`, {
         x: victim.x,
         y: victim.y,
         agentId: killer.id,
@@ -476,7 +496,7 @@ function handleKill(sim: Simulation, killer: Agent, victim: Agent): void {
   }
   const k = killer.stats.kills;
   if (k === 5 || k === 10 || k === 20 || k === 50 || k === 100) {
-    sim.log('conflict', k >= 10 ? 'major' : 'bad', `${killer.name}${tk ? ` of the ${tk.name}` : ''} has now killed ${k} others.`, {
+    sim.log('conflict', k >= 10 ? 'major' : 'bad', `${killer.name}${tk ? ` of ${the(tk)}` : ''} has now killed ${k} others.`, {
       x: killer.x,
       y: killer.y,
       agentId: killer.id,
@@ -598,7 +618,9 @@ export function shareFood(sim: Simulation, giver: Agent, receiver: Agent, amount
   const tg = liveTribe(sim, giver.tribeId);
   const tr = liveTribe(sim, receiver.tribeId);
   if (tg && tr && tg !== tr) {
-    changeTribeRelation(sim, tg, tr, K.giftRelation * (0.3 + 0.7 * Math.min(1, total / 20)) * Math.max(0.2, coopMul(sim)));
+    const rel = meanRelation(tg, tr);
+    const gain = K.giftRelation * (0.3 + 0.7 * Math.min(1, total / 20)) * Math.max(0.2, coopMul(sim)) * (rel > 0 ? 1 - rel : 1);
+    changeTribeRelation(sim, tg, tr, gain);
   }
   return total;
 }
@@ -766,7 +788,7 @@ function agentUpdate(sim: Simulation, a: Agent, c: SocialCache): void {
   bond(sim, a, nb);
   if (!sim.state.config.tribesEnabled) return;
   if (a.tribeId === NONE) considerJoinOrFound(sim, a, nb);
-  else considerLeaving(sim, a);
+  else considerLeaving(sim, a, nb);
 }
 
 function maintainRelationships(sim: Simulation, a: Agent): void {
@@ -808,13 +830,13 @@ function assignRole(a: Agent, c: SocialCache): void {
   const g = a.genes;
   const sk = a.skills;
   const gene = (i: number) => clamp01(g[i]);
+  // comparative advantage: skill relative to the population mean + innate bias from genes
   const scores: Record<Role, number> = {
     none: K.roleMin,
-    forager: 0.12 + 1.5 * (clamp01(sk.forage) - c.meanForage) + 0.3 * (gene(G.efficiency) - 0.5),
+    forager: 1.5 * (clamp01(sk.forage) - c.meanForage) + 0.4 * (gene(G.efficiency) - 0.5),
     warrior: 1.5 * (clamp01(sk.combat) - c.meanCombat) + 0.5 * (gene(G.aggression) - 0.5) + 0.2 * (gene(G.size) - 0.5),
-    caretaker:
-      1.5 * (clamp01(sk.social) - c.meanSocial) + 0.5 * (gene(G.altruism) - 0.5) + 0.25 * Math.min(1, a.stats.shared / 100) - 0.03,
-    explorer: 0.3 * (gene(G.perception) - 0.5) + 0.3 * (gene(G.speed) - 0.5) + 1.0 * (moveRate(a) - c.meanMove),
+    caretaker: 1.5 * (clamp01(sk.social) - c.meanSocial) + 0.5 * (gene(G.altruism) - 0.5) + 0.25 * Math.min(1, a.stats.shared / 100),
+    explorer: 0.35 * (gene(G.perception) - 0.5) + 0.35 * (gene(G.speed) - 0.5) + 1.0 * (moveRate(a) - c.meanMove),
   };
   if (a.role !== 'none') scores[a.role] += 0.04; // hysteresis
   let best: Role = 'none';
@@ -828,17 +850,16 @@ function countLivingTribes(sim: Simulation): number {
   return n;
 }
 
-function considerJoinOrFound(sim: Simulation, a: Agent, nb: Agent[]): void {
-  const mat = a.traits.maturityAge;
-  if (a.age < 0.5 * mat) return;
-  const soc = clamp01(a.traits.sociability);
-  const coop = 0.4 + 0.6 * coopMul(sim);
-
-  // ---- join a tribe whose members nearby a likes (or that is well represented and not resented)
+/**
+ * Score the living tribes represented among `nb` by a's feelings toward their members
+ * (friend / kin +1, neutral +0.3, grudge -2) into tribeScoreIds / tribeScores. Returns the index
+ * of the best tribe scoring at least `min` (ignoring `exclude`), or -1.
+ */
+function bestNearbyTribe(sim: Simulation, a: Agent, nb: Agent[], exclude: TribeId, min: number): number {
   tribeScoreIds.length = 0;
   tribeScores.length = 0;
   for (const o of nb) {
-    if (o.tribeId === NONE || !liveTribe(sim, o.tribeId)) continue;
+    if (o.tribeId === NONE || o.tribeId === exclude || !liveTribe(sim, o.tribeId)) continue;
     const r = getRelationship(a, o.id);
     let v = 0.3;
     if (r) {
@@ -855,13 +876,24 @@ function considerJoinOrFound(sim: Simulation, a: Agent, nb: Agent[]): void {
   }
   let bestIdx = -1;
   for (let i = 0; i < tribeScores.length; i++) {
-    if (tribeScores[i] >= 1 && (bestIdx < 0 || tribeScores[i] > tribeScores[bestIdx])) bestIdx = i;
+    if (tribeScores[i] >= min && (bestIdx < 0 || tribeScores[i] > tribeScores[bestIdx])) bestIdx = i;
   }
+  return bestIdx;
+}
+
+function considerJoinOrFound(sim: Simulation, a: Agent, nb: Agent[]): void {
+  const mat = a.traits.maturityAge;
+  if (a.age < 0.5 * mat) return;
+  const soc = clamp01(a.traits.sociability);
+  const coop = 0.4 + 0.6 * coopMul(sim);
+
+  // ---- join a tribe whose members nearby a likes (or that is well represented and not resented)
+  const bestIdx = bestNearbyTribe(sim, a, nb, NONE, K.joinScore);
   if (bestIdx >= 0) {
     if (sim.rng.chance(Math.min(1, K.joinProb * soc * coop))) {
       const t = sim.getTribe(tribeScoreIds[bestIdx])!;
       joinTribe(sim, a, t.id);
-      addHistory(sim, a, `Joined the ${t.name}`);
+      addHistory(sim, a, `Joined ${the(t)}`);
     }
     return; // a tribe is close by: do not found a rival one right next to it
   }
@@ -875,35 +907,46 @@ function considerJoinOrFound(sim: Simulation, a: Agent, nb: Agent[]): void {
     const r = getRelationship(a, o.id);
     if (r && r.affinity < K.grudge) continue;
     const friendly = r !== undefined && (r.kin > 0 || r.affinity > 0.2);
-    if (!friendly && clamp01(o.traits.sociability) <= K.foundSociability) continue;
+    const familiar = r !== undefined && r.affinity >= K.foundFamiliarity && clamp01(o.traits.sociability) > K.foundSociability;
+    if (!friendly && !familiar) continue;
     eligible.push(o);
     if (eligible.length >= K.maxFounding) break;
   }
   if (eligible.length < 2) return;
-  if (countLivingTribes(sim) >= K.maxLivingTribes) return;
+  if (countLivingTribes(sim) >= K.maxFoundedTribes) return;
   if (!sim.rng.chance(Math.min(1, K.foundProb * soc * coop))) return;
 
   const first = sim.state.nextTribeId === 1;
   const t = foundTribe(sim, a, eligible.slice());
-  addHistory(sim, a, `Founded the ${t.name} with ${eligible.length} others`);
-  for (const o of eligible) addHistory(sim, o, `Helped ${a.name} found the ${t.name}`);
+  addHistory(sim, a, `Founded ${the(t)} with ${eligible.length} others`);
+  for (const o of eligible) addHistory(sim, o, `Helped ${a.name} found ${the(t)}`);
   sim.log(
     'tribe',
     first ? 'major' : 'good',
     first
-      ? `The first tribe has formed: ${a.name} gathered ${eligible.length} others into the ${t.name}.`
-      : `${a.name} founded the ${t.name} with ${eligible.length} others.`,
+      ? `The first tribe has formed: ${a.name} gathered ${eligible.length} others into ${the(t)}.`
+      : `${a.name} founded ${the(t)} with ${eligible.length} others.`,
     { x: t.homeX, y: t.homeY, agentId: a.id, tribeId: t.id },
   );
 }
 
-function considerLeaving(sim: Simulation, a: Agent): void {
+function considerLeaving(sim: Simulation, a: Agent, nb: Agent[]): void {
   const t = liveTribe(sim, a.tribeId);
   if (!t) {
     a.tribeId = NONE; // tribe vanished (extinct / dropped): become unaffiliated
     return;
   }
   const soc = clamp01(a.traits.sociability);
+  // assimilation: members of a dwindling band drift into a larger, well-liked neighbouring tribe
+  if (t.members < K.assimilateBelow && nb.length) {
+    const idx = bestNearbyTribe(sim, a, nb, t.id, K.assimilateScore);
+    const other = idx >= 0 ? sim.getTribe(tribeScoreIds[idx]) : undefined;
+    if (other && other.members > t.members && tribeRelation(sim, t.id, other.id) > K.warHostile && sim.rng.chance(0.25 * soc)) {
+      joinTribe(sim, a, other.id);
+      addHistory(sim, a, `Left ${the(t)} (a dwindling band) to join ${the(other)}`);
+      return;
+    }
+  }
   const hungry = a.food < 0.3 * a.traits.maxFood;
   const famine = hungry && t.stockpile < Math.max(1, t.members) * 2;
   let p = 0;
@@ -911,7 +954,7 @@ function considerLeaving(sim: Simulation, a: Agent): void {
   if (famine) p += 0.03 * (1 - soc) * (1 - soc);
   if (p <= 0 || !sim.rng.chance(p)) return;
   leaveTribe(sim, a);
-  addHistory(sim, a, famine ? `Left the starving ${t.name}` : `Left the ${t.name} to live alone`);
+  addHistory(sim, a, famine ? `Left ${the(t)} during a famine` : `Left ${the(t)} to live alone`);
 }
 
 // ------------------------------------------------------------------ tribe pass
@@ -958,7 +1001,7 @@ function tribePass(sim: Simulation, c: SocialCache): void {
     if (n > t.peakMembers) {
       for (const m of [25, 50, 100, 200]) {
         if (t.peakMembers < m && n >= m) {
-          sim.log('tribe', m >= 50 ? 'major' : 'good', `The ${t.name} have grown to ${m} members.`, { x: t.homeX, y: t.homeY, tribeId: t.id });
+          sim.log('tribe', m >= 50 ? 'major' : 'good', `${cap(the(t))} have grown to ${m} members.`, { x: t.homeX, y: t.homeY, tribeId: t.id });
         }
       }
       t.peakMembers = n;
@@ -970,7 +1013,7 @@ function tribePass(sim: Simulation, c: SocialCache): void {
     if (t.meanGenes.length !== GENE_COUNT) t.meanGenes = new Array(GENE_COUNT).fill(0);
     for (let i = 0; i < GENE_COUNT; i++) t.meanGenes[i] = g.genes[i] / n;
     g.foodFrac /= n;
-    g.scarcity = clamp01((0.6 - g.foodFrac) / 0.5) * (t.stockpile < n * 5 ? 1 : 0.5);
+    g.scarcity = clamp01((0.45 - g.foodFrac) / 0.35) * (t.stockpile < n * 5 ? 1 : 0.5);
 
     // stockpile: slow spoilage, hard cap, never negative / NaN
     let st = Number.isFinite(t.stockpile) ? t.stockpile * spoil : 0;
@@ -1041,7 +1084,7 @@ function markExtinct(sim: Simulation, t: Tribe, c: SocialCache): void {
   const terr = s.world.territory;
   for (let i = 0; i < terr.length; i++) if (terr[i] === t.id) terr[i] = -1;
   const days = (s.tick - t.foundedTick) / Math.max(1, s.config.dayLength);
-  sim.log('tribe', t.peakMembers >= 10 ? 'major' : 'bad', `The ${t.name} have died out after ${days.toFixed(1)} days (peak ${t.peakMembers} members).`, {
+  sim.log('tribe', t.peakMembers >= 10 ? 'major' : 'bad', `${cap(the(t))} have died out after ${days.toFixed(1)} days (peak ${t.peakMembers} members).`, {
     x: t.homeX,
     y: t.homeY,
     tribeId: t.id,
@@ -1154,9 +1197,9 @@ function split(sim: Simulation, parent: Tribe, founder: Agent, faction: Agent[],
   const rel = scarcity > 0.5 ? 0 : 0.25;
   nt.relations[parent.id] = rel;
   parent.relations[nt.id] = rel;
-  addHistory(sim, founder, `Led ${others.length} followers away from the ${parent.name} to found the ${nt.name}`);
-  for (const m of others) addHistory(sim, m, `Followed ${founder.name} to found the ${nt.name}`);
-  sim.log('tribe', 'major', `The ${nt.name} split from the ${parent.name} (${faction.length} members led by ${founder.name}).`, {
+  addHistory(sim, founder, `Led ${others.length} followers away from ${the(parent)} to found ${the(nt)}`);
+  for (const m of others) addHistory(sim, m, `Followed ${founder.name} to found ${the(nt)}`);
+  sim.log('tribe', 'major', `${cap(the(nt))} split from ${the(parent)} (${faction.length} members led by ${founder.name}).`, {
     x: nt.homeX,
     y: nt.homeY,
     agentId: founder.id,
@@ -1282,6 +1325,8 @@ function territoryPass(sim: Simulation, c: SocialCache): void {
     if (!ta || !tb) continue;
     const sa = c.groups.get(ta.id)?.scarcity ?? 0;
     const sb = c.groups.get(tb.id)?.scarcity ?? 0;
-    changeTribeRelation(sim, ta, tb, -K.borderFriction * Math.min(e.n, 60) * (0.4 + sa + sb) * agg);
+    // aggressive peoples (mean aggression gene) bristle more at shared borders
+    const ferocity = (0.5 + (ta.meanGenes[G.aggression] ?? 0.5) + (tb.meanGenes[G.aggression] ?? 0.5)) / 1.5;
+    changeTribeRelation(sim, ta, tb, -K.borderFriction * Math.min(e.n, K.borderCap) * (0.4 + sa + sb) * agg * ferocity);
   }
 }

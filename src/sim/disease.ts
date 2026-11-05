@@ -12,7 +12,7 @@
  *  - Progression (every tick): continuous health drain + random acute crises
  *    (∝ virulence × (1 − 0.75·immunity) × lethality × vulnerability), energy loss,
  *    natural healing partly suppressed. Death (health ≤ 0) → killAgent(a, 'disease').
- *    Tuned so untreated mortality ≈ 30% at virulence 0.6 / immunity 0.5 / default config.
+ *    Tuned (with lifecycle healing) so mortality ≈ 20–35% at virulence 0.6 / immunity 0.5 / default config.
  *  - Recovery grants acquired immunity for DISEASE.immuneMin..immuneMax ticks.
  *
  * Determinism: randomness only via sim.rng. Module state (WeakMap) only drives
@@ -44,14 +44,14 @@ export const DISEASE = {
   /** Infection-chance reduction from the immunity trait: × (1 − k·immunity). */
   immunityResistance: 0.8,
   /** Continuous health loss per tick, as a fraction of maxHealth per unit severity. */
-  drain: 0.002,
+  drain: 0.0024,
   /** Per-tick chance (per unit severity) of an acute crisis. */
-  crisisChance: 0.008,
+  crisisChance: 0.0095,
   /** Crisis damage range as a fraction of maxHealth. */
   crisisMin: 0.12,
   crisisMax: 0.32,
   /** Fraction of natural healing (since the last disease update) blocked while infected. */
-  healSuppression: 0.75,
+  healSuppression: 0.8,
   /** Stamina lost per tick per unit virulence. */
   energyDrain: 0.0012,
   /** Acquired immunity after recovery (ticks). */

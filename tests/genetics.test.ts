@@ -159,8 +159,8 @@ describe('expressTraits', () => {
   it('fertility trades offspring quantity for quality', () => {
     const lo = traitsWith('fertility', 0);
     const hi = traitsWith('fertility', 1);
-    expect(mateFoodThreshold(lo)).toBeCloseTo(0.6);
-    expect(mateFoodThreshold(hi)).toBeCloseTo(0.35);
+    expect(mateFoodThreshold(lo)).toBeCloseTo(0.72);
+    expect(mateFoodThreshold(hi)).toBeCloseTo(0.5);
     expect(reproCooldownFor(lo, 1)).toBe(1100);
     expect(reproCooldownFor(hi, 1)).toBe(500);
     expect(reproCooldownFor(lo, 2)).toBe(550);
@@ -313,8 +313,8 @@ describe('canMate', () => {
     const sim = makeSim();
     const lo = spawnAdult(sim, genome(0.5, { fertility: 0 }));
     const hi = spawnAdult(sim, genome(0.5, { fertility: 1 }));
-    lo.food = lo.traits.maxFood * 0.45;
-    hi.food = hi.traits.maxFood * 0.45;
+    lo.food = lo.traits.maxFood * 0.6;
+    hi.food = hi.traits.maxFood * 0.6;
     expect(isFertile(lo)).toBe(false);
     expect(isFertile(hi)).toBe(true);
   });
@@ -431,9 +431,10 @@ describe('reproduce', () => {
     expect(b.offspring).toBe(1);
     expect(a.history.at(-1)?.text).toContain(c1.name);
     expect(c1.history.at(-1)?.text).toContain(a.name);
+    void spy;
     for (const p of [a, b]) {
-      expect(spy).toHaveBeenCalledWith(sim, p, c1, expect.any(Number), 1);
-      expect(spy).toHaveBeenCalledWith(sim, c1, p, expect.any(Number), 1);
+      expect(p.relationships.some((r) => r.id === c1.id && r.kin === 1)).toBe(true);
+      expect(c1.relationships.some((r) => r.id === p.id && r.kin === 1)).toBe(true);
     }
     // a younger sibling bonds with the older one (kin 2)
     spy.mockClear();
@@ -442,8 +443,8 @@ describe('reproduce', () => {
     b.food = b.traits.maxFood;
     a.energy = b.energy = 1;
     const c2 = reproduce(sim, a, b)!;
-    expect(spy).toHaveBeenCalledWith(sim, c2, c1, expect.any(Number), 2);
-    expect(spy).toHaveBeenCalledWith(sim, c1, c2, expect.any(Number), 2);
+    expect(c2.relationships.some((r) => r.id === c1.id && r.kin === 2)).toBe(true);
+    expect(c1.relationships.some((r) => r.id === c2.id && r.kin === 2)).toBe(true);
     // the children list is capped
     for (let i = 0; i < LIMITS.children + 3; i++) {
       a.reproCooldown = b.reproCooldown = 0;

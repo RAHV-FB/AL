@@ -423,11 +423,13 @@ describe('tribe stockpile', () => {
 });
 
 describe('tribe dynamics', () => {
-  it('a cluster of sociable agents founds a tribe and logs it', () => {
+  it('a cluster of sociable agents that socialised founds a tribe and logs it', () => {
     const sim = makeSim(3);
     const cluster = Array.from({ length: 10 }, (_, i) =>
       spawn(sim, 300 + Math.cos(i) * 12, 300 + Math.sin(i) * 12, { sociability: 0.9 }),
     );
+    // what the brain's 'socialize' action produces: mutual warm ties
+    for (const a of cluster) for (const b of cluster) if (a !== b) adjustRelationship(sim, a, b, 0.25);
     expect(sim.state.tribes.length).toBe(0);
     stepSocial(sim, 600);
     const living = sim.state.tribes.filter((t) => t.extinctTick === -1);
@@ -439,6 +441,18 @@ describe('tribe dynamics', () => {
     expect(t.peakMembers).toBeGreaterThanOrEqual(t.members);
     expect(t.meanGenes.length).toBe(cluster[0].genes.length);
     expect(sim.state.events.some((e) => e.category === 'tribe' && e.tribeId === t.id)).toBe(true);
+  });
+
+  it('sociable strangers living side by side bond through familiarity and eventually form a tribe', () => {
+    const sim = makeSim(13);
+    const cluster = Array.from({ length: 10 }, (_, i) =>
+      spawn(sim, 300 + Math.cos(i) * 12, 300 + Math.sin(i) * 12, { sociability: 0.9 }),
+    );
+    stepSocial(sim, 120);
+    expect(sim.state.tribes.length).toBe(0); // no instant tribes between strangers
+    stepSocial(sim, 2400);
+    expect(cluster.filter((a) => a.tribeId !== NONE).length).toBeGreaterThanOrEqual(5);
+    expect(sim.state.events.some((e) => e.category === 'tribe' && /first tribe/.test(e.message))).toBe(true);
   });
 
   it('loners (low sociability) do not found tribes', () => {
@@ -456,6 +470,18 @@ describe('tribe dynamics', () => {
     stepSocial(sim, 900);
     expect(newcomer.tribeId).toBe(t.id);
     expect(t.members).toBe(6);
+  });
+
+  it('members of a dwindling band drift into a larger, well-liked neighbouring tribe', () => {
+    const sim = makeSim(12);
+    const big = Array.from({ length: 8 }, (_, i) => spawn(sim, 300 + i * 3, 300, { sociability: 0.9 }));
+    const tb = foundTribe(sim, big[0], big.slice(1));
+    const small = [spawn(sim, 305, 306, { sociability: 0.9 }), spawn(sim, 310, 306, { sociability: 0.9 })];
+    const ts = foundTribe(sim, small[0], [small[1]]);
+    for (const a of small) for (const b of big) adjustRelationship(sim, a, b, 0.5);
+    stepSocial(sim, 1500);
+    expect(small.every((a) => a.tribeId === tb.id)).toBe(true);
+    expect(ts.extinctTick).not.toBe(-1);
   });
 
   it('marks extinction when the last member dies and frees the territory', () => {

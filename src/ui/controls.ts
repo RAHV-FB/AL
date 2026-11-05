@@ -7,7 +7,7 @@ import { SCENARIOS } from '../sim/presets';
 import { DISASTER_KINDS, type DisasterKind, type ScenarioDef, type SimConfig } from '../sim/types';
 import type { OverlayKind, ViewOptions } from '../render/renderer';
 import type { App } from './app';
-import { chips, fmtInt, h, icon, section, slider, toggle, type SliderCtl, type ToggleCtl } from './dom';
+import { append, chips, fmtInt, h, icon, section, slider, toggle, type SliderCtl, type ToggleCtl } from './dom';
 import { TERRAIN_ORDER, TOOLS, terrainColor, toolHelp, type ToolId } from './tools';
 
 export const OVERLAYS: { value: OverlayKind; label: string; tip: string }[] = [
@@ -26,7 +26,8 @@ const VIEW_TOGGLES: { key: string; label: string; tip: string }[] = [
   { key: 'showRelations', label: 'Relationships', tip: 'Lines from the selected agent to friends, enemies and kin.' },
   { key: 'showCamps', label: 'Tribe camps', tip: 'Camp markers (with food stockpiles) for every tribe.' },
   { key: 'showLabels', label: 'Name labels', tip: 'Agent names when zoomed in.' },
-  { key: 'showMinimap', label: 'Minimap', tip: 'Overview map in the corner of the world view.' },
+  { key: 'showMinimap', label: 'Minimap', tip: 'Overview map in the corner of the world view. Click or drag on it to move the camera.' },
+  { key: 'showLegend', label: 'Overlay legend', tip: 'Colour legend for the active data overlay.' },
 ];
 
 const CONFIG_TOGGLES: { key: 'overgrazing' | 'seasons' | 'dayNight' | 'tribesEnabled'; label: string; tip: string }[] = [
@@ -37,17 +38,12 @@ const CONFIG_TOGGLES: { key: 'overgrazing' | 'seasons' | 'dayNight' | 'tribesEna
 ];
 
 const GLOBAL_EVENTS: { kind: DisasterKind; label: string; tip: string; sev: number; days: number }[] = [
-  { kind: 'drought', label: 'Global drought', tip: 'Plant regrowth collapses across the entire world. Who survives the famine?', sev: 1, days: 1 },
-  { kind: 'plague', label: 'Global plague', tip: 'Infects agents everywhere with a contagious disease. Immunity genes suddenly matter.', sev: 1, days: 0.5 },
-  { kind: 'bloom', label: 'Global abundance', tip: 'Food bursts to capacity everywhere and regrowth is boosted — watch the baby boom.', sev: 1, days: 1 },
+  { kind: 'drought', label: 'Drought', tip: 'Plant regrowth collapses across the entire world. Who survives the famine?', sev: 1, days: 1 },
+  { kind: 'plague', label: 'Plague', tip: 'Infects agents everywhere with a contagious disease. Immunity genes suddenly matter.', sev: 1, days: 0.5 },
+  { kind: 'bloom', label: 'Abundance', tip: 'Food bursts to capacity everywhere and regrowth is boosted — watch the baby boom.', sev: 1, days: 1 },
   { kind: 'coldsnap', label: 'Ice age', tip: 'A world-wide cold snap: temperature plunges, raising metabolic costs and stunting growth.', sev: 1, days: 2 },
-  { kind: 'blight', label: 'Global blight', tip: 'Destroys standing food and damages soil fertility everywhere.', sev: 1, days: 0.5 },
+  { kind: 'blight', label: 'Blight', tip: 'Destroys standing food and damages soil fertility everywhere.', sev: 1, days: 0.5 },
 ];
-
-const TOOL_TIPS: Partial<Record<ToolId, string>> = {
-  inspect: 'Click: select · Drag: pan · Double-click: follow · Esc: deselect',
-  bless: 'Click: heal & feed · Shift-click: smite',
-};
 
 export interface LeftSidebar {
   el: HTMLElement;
@@ -74,7 +70,7 @@ export function buildLeftSidebar(app: App): LeftSidebar {
     value: app.settings.radius,
     help: 'Size of the brush circle in world units (one tile = ' + app.sim.state.world.tileSize + ' units). Shortcut: [ and ] or Alt + mouse wheel.',
     fmt: (v) => `${Math.round(v)} u`,
-    onInput: (v) => (app.settings.radius = v),
+    onInput: (v) => app.setRadius(v),
   });
   const opts: Partial<Record<ToolId, HTMLElement>> = {};
 
@@ -105,8 +101,6 @@ export function buildLeftSidebar(app: App): LeftSidebar {
   const intensity = slider({ label: 'Intensity', min: 0.1, max: 1, step: 0.05, value: app.settings.intensity, help: 'How severe the disaster is (0.1 = mild, 1 = catastrophic).', onInput: (v) => (app.settings.intensity = v) });
   const duration = slider({ label: 'Duration', min: 0.25, max: 12, step: 0.25, value: app.settings.durationDays, help: 'How long the disaster lasts, in in-game days.', fmt: (v) => `${v} day${v === 1 ? '' : 's'}`, onInput: (v) => (app.settings.durationDays = v) });
   opts.disaster = h('div', null, h('div', { class: 'sub-title' }, 'Disaster type'), disasterPick.el, intensity.el, duration.el);
-  opts.inspect = h('div', { class: 'hint' }, TOOL_TIPS.inspect ?? '');
-  opts.bless = h('div', { class: 'hint' }, TOOL_TIPS.bless ?? '');
 
   const optWrap = h('div', { class: 'tool-opts' });
   for (const t of TOOLS) {
@@ -135,7 +129,7 @@ export function buildLeftSidebar(app: App): LeftSidebar {
         'button',
         {
           type: 'button',
-          class: `btn ev-btn ev-${g.kind}`,
+          class: `btn gev-btn gev-${g.kind}`,
           tip: `${g.tip} (${info.label} with radius 0 = whole world)`,
           onclick: () => {
             const sim = app.sim;
@@ -148,46 +142,45 @@ export function buildLeftSidebar(app: App): LeftSidebar {
               intensity: gSev.value,
               duration: Math.max(1, Math.round(gDur.value * sim.config.dayLength)),
             });
-            app.toaster.show(`${g.label} unleashed for ${gDur.value} day${gDur.value === 1 ? '' : 's'} at ${Math.round(gSev.value * 100)}% severity.`, { kind: g.kind === 'bloom' ? 'good' : 'bad', title: `${info.icon} ${g.label}` });
+            app.toaster.show(`World-wide ${g.label.toLowerCase()} unleashed for ${gDur.value} day${gDur.value === 1 ? '' : 's'} at ${Math.round(gSev.value * 100)}% severity.`, { kind: g.kind === 'bloom' ? 'good' : 'bad', title: `${info.icon} Global event: ${g.label}` });
           },
         },
-        h('span', { class: 'ev-ic' }, info.icon),
+        h('span', { class: 'gev-ic' }, info.icon),
         h('span', null, g.label),
       ),
     );
   }
-  globSec.body.append(gSev.el, gDur.el, gGrid);
+  globSec.body.append(h('p', { class: 'hint tight' }, 'World-wide events strike every corner of the map at once (radius 0).'), gSev.el, gDur.el, gGrid);
 
   // ================================================================ EXPERIMENTS
   const expSec = section('experiments', 'Experiments', 'flask', true);
-  const cards = new Map<string, HTMLElement>();
-  const cardList = h('div', { class: 'exp-cards' });
-  let expanded = '';
-  const setExpanded = (id: string) => {
-    expanded = expanded === id ? '' : id;
-    for (const [cid, c] of cards) c.classList.toggle('expanded', cid === expanded);
-  };
-  for (const sc of SCENARIOS) {
-    const card = h(
-      'div',
-      { class: 'exp-card' },
+  const expBtns = new Map<string, HTMLButtonElement>();
+  const expGrid = h('div', { class: 'exp-grid' });
+  const detail = h('div', { class: 'exp-detail' });
+  const showDetail = (id: string) => {
+    const sc = SCENARIOS.find((x) => x.id === id) ?? app.scenario;
+    const running = sc.id === app.scenario.id;
+    for (const [cid, b] of expBtns) b.classList.toggle('sel', cid === sc.id);
+    detail.classList.toggle('is-running', running);
+    detail.replaceChildren();
+    append(detail, [
+      h('div', { class: 'exp-detail-head' }, h('span', { class: 'exp-detail-name' }, sc.name), running ? h('span', { class: 'badge run' }, 'running') : null),
+      h('div', { class: 'exp-detail-tag' }, sc.tagline),
+      sc.description ? h('p', null, sc.description) : null,
+      sc.lookFor && sc.lookFor.length ? h('div', { class: 'sub-title' }, 'What to look for') : null,
+      sc.lookFor && sc.lookFor.length ? h('ul', { class: 'lookfor' }, ...sc.lookFor.map((l) => h('li', null, l))) : null,
       h(
         'button',
-        { type: 'button', class: 'exp-card-head', onclick: () => setExpanded(sc.id), 'aria-label': `${sc.name}: show details` },
-        h('span', { class: 'exp-card-name' }, sc.name, h('span', { class: 'badge running-badge' }, 'running')),
-        h('span', { class: 'exp-card-tag' }, sc.tagline),
+        { type: 'button', class: 'btn primary wide', onclick: () => app.startScenario(sc), tip: running ? 'Start this experiment again from tick 0 with its default seed.' : 'Start this experiment from tick 0 with its default seed.' },
+        icon(running ? 'restart' : 'play', 13),
+        running ? 'Restart from the beginning' : 'Start this experiment',
       ),
-      h(
-        'div',
-        { class: 'exp-card-body' },
-        h('p', null, sc.description),
-        sc.lookFor && sc.lookFor.length ? h('div', { class: 'sub-title' }, 'What to look for') : null,
-        sc.lookFor && sc.lookFor.length ? h('ul', { class: 'lookfor' }, ...sc.lookFor.map((l) => h('li', null, l))) : null,
-        h('button', { type: 'button', class: 'btn primary wide', onclick: () => app.startScenario(sc), tip: 'Start this experiment from tick 0 with its default seed.' }, icon('play', 13), 'Start experiment'),
-      ),
-    );
-    cards.set(sc.id, card);
-    cardList.append(card);
+    ]);
+  };
+  for (const sc of SCENARIOS) {
+    const b = h('button', { type: 'button', class: 'exp-btn', onclick: () => showDetail(sc.id) }, h('span', { class: 'exp-dot' }), h('span', { class: 'exp-btn-name' }, sc.name), h('span', { class: 'exp-btn-tag' }, sc.tagline));
+    expBtns.set(sc.id, b);
+    expGrid.append(b);
   }
   const seedInput = h('input', { type: 'number', class: 'text mono seed-input', min: 0, max: 4294967295, step: 1, 'aria-label': 'Seed', tip: 'The random seed. The same seed always produces the same world and — without interventions — exactly the same history.' });
   const replayBtn = h(
@@ -205,10 +198,10 @@ export function buildLeftSidebar(app: App): LeftSidebar {
     const v = Number(seedInput.value);
     return Number.isFinite(v) && seedInput.value !== '' ? Math.max(0, Math.floor(v)) >>> 0 : app.sim.config.seed;
   };
-  const nowRunning = h('div', { class: 'now-running' });
   expSec.body.append(
-    nowRunning,
-    cardList,
+    h('p', { class: 'hint tight' }, 'Curated worlds with their own rules. Pick one to read what it explores, then start it.'),
+    expGrid,
+    detail,
     h(
       'div',
       { class: 'seed-row' },
@@ -227,7 +220,7 @@ export function buildLeftSidebar(app: App): LeftSidebar {
   const vt = h('div', { class: 'toggles' });
   const viewRec = app.view as unknown as Record<string, unknown>;
   for (const t of VIEW_TOGGLES) {
-    if (t.key === 'showMinimap' && !app.supportsMinimap) continue;
+    if ((t.key === 'showMinimap' || t.key === 'showLegend') && !app.supportsMinimap) continue;
     const ctl = toggle({ label: t.label, value: Boolean(viewRec[t.key]), help: t.tip, onChange: (v) => { viewRec[t.key] = v; app.saveView(); } });
     viewToggles.push(ctl);
     vt.append(ctl.el);
@@ -336,7 +329,7 @@ export function buildLeftSidebar(app: App): LeftSidebar {
     fileInput,
   );
 
-  el.append(expSec.el, toolSec.el, globSec.el, viewSec.el, paramSec.el, ioSec.el);
+  el.append(toolSec.el, globSec.el, expSec.el, viewSec.el, paramSec.el, ioSec.el);
 
   // ================================================================ lifecycle hooks
   const onToolChanged = () => {
@@ -382,12 +375,8 @@ export function buildLeftSidebar(app: App): LeftSidebar {
 
   const onSimChanged = () => {
     const sc: ScenarioDef = app.scenario;
-    nowRunning.replaceChildren(
-      h('div', { class: 'now-label' }, 'Now running'),
-      h('div', { class: 'now-name' }, sc.name),
-      h('div', { class: 'now-tag' }, sc.tagline),
-    );
-    for (const [id, c] of cards) c.classList.toggle('active', id === sc.id);
+    for (const [id, b] of expBtns) b.classList.toggle('running', id === sc.id);
+    showDetail(sc.id);
     seedInput.value = String(app.sim.config.seed);
     pendingTick.clear();
     for (const k of Object.keys(pending)) delete (pending as Record<string, unknown>)[k];

@@ -19,19 +19,22 @@ export interface ToolDef {
   /** Repeats while the mouse is held still (accumulating effects). */
   airbrush: boolean;
   color: string;
-  blurb: string;
+  /** How to use the tool. */
+  how: string;
+  /** What it does (fallback when the simulation provides no INTERVENTION_HELP entry). */
+  what: string;
 }
 
 export const TOOLS: ToolDef[] = [
-  { id: 'inspect', key: '1', name: 'Inspect', icon: 'inspect', mode: 'select', brush: false, airbrush: false, color: '', blurb: 'Click an agent to select it and open the Inspector (mind, genes, family, relationships). Drag to pan. Double-click an agent to follow it with the camera.' },
-  { id: 'spawn', key: '2', name: 'Spawn agents', icon: 'spawn', mode: 'click', brush: true, airbrush: false, color: 'rgba(46,230,208,0.95)', blurb: 'Click to drop a group of new adult agents inside the brush circle, using the genome from the Population Designer below. Choose whether they found a new tribe, join one, or stay unaffiliated.' },
-  { id: 'remove', key: '3', name: 'Remove agents', icon: 'remove', mode: 'paint', brush: true, airbrush: true, color: 'rgba(255,93,108,0.95)', blurb: 'Click or drag to remove every agent inside the brush. They are recorded as "removed" deaths in the statistics.' },
-  { id: 'addFood', key: '4', name: 'Add food', icon: 'food', mode: 'paint', brush: true, airbrush: true, color: 'rgba(124,230,110,0.95)', blurb: 'Click or drag to scatter food on the ground inside the brush (each tile is capped at its capacity). Hold still to keep adding.' },
-  { id: 'removeFood', key: '5', name: 'Remove food', icon: 'nofood', mode: 'paint', brush: true, airbrush: true, color: 'rgba(245,177,76,0.95)', blurb: 'Click or drag to strip all standing food inside the brush. Plants regrow over time at the tile\'s normal rate.' },
-  { id: 'fertilize', key: '6', name: 'Fertilize', icon: 'sprout', mode: 'paint', brush: true, airbrush: true, color: 'rgba(190,240,90,0.95)', blurb: 'Click or drag to enrich the soil. Fertility raises how much food each tile can hold and how fast it regrows — and repairs overgrazed land.' },
-  { id: 'terrain', key: '7', name: 'Paint terrain', icon: 'terrain', mode: 'paint', brush: true, airbrush: false, color: 'rgba(210,220,236,0.95)', blurb: 'Click or drag to repaint terrain. Walls and deep water split populations (try it to watch speciation); forest and grassland create new gardens.' },
-  { id: 'disaster', key: '8', name: 'Disaster', icon: 'bolt', mode: 'click', brush: true, airbrush: false, color: 'rgba(228,91,214,0.95)', blurb: 'Click to unleash the chosen disaster centred on the cursor, covering the brush circle, with the intensity and duration below.' },
-  { id: 'bless', key: '9', name: 'Bless / Smite', icon: 'heart', mode: 'click', brush: false, airbrush: false, color: '', blurb: 'Click an agent to bless it: fully healed and fed. Shift-click an agent to smite it (instant death). Drag to pan.' },
+  { id: 'inspect', key: '1', name: 'Inspect', icon: 'inspect', mode: 'select', brush: false, airbrush: false, color: '', how: 'Click an agent to select it; drag to pan; double-click an agent to follow it with the camera.', what: 'The Inspector shows its needs, current decision and the utility of every option, genes, family, relationships and life story.' },
+  { id: 'spawn', key: '2', name: 'Spawn agents', icon: 'spawn', mode: 'click', brush: true, airbrush: false, color: 'rgba(46,230,208,0.95)', how: 'Click the map to drop a group inside the brush circle. Design their genome and tribe below.', what: 'Creates new adult agents with the chosen genetics.' },
+  { id: 'remove', key: '3', name: 'Remove agents', icon: 'remove', mode: 'paint', brush: true, airbrush: true, color: 'rgba(255,93,108,0.95)', how: 'Click or drag over agents.', what: 'Removes every agent inside the brush circle (counted as "removed" deaths).' },
+  { id: 'addFood', key: '4', name: 'Add food', icon: 'food', mode: 'paint', brush: true, airbrush: true, color: 'rgba(124,230,110,0.95)', how: 'Click or drag; hold the button still to keep adding.', what: 'Adds food to every tile under the brush.' },
+  { id: 'removeFood', key: '5', name: 'Remove food', icon: 'nofood', mode: 'paint', brush: true, airbrush: true, color: 'rgba(245,177,76,0.95)', how: 'Click or drag to create a famine zone. Plants regrow over time.', what: 'Strips all standing food from the tiles under the brush.' },
+  { id: 'fertilize', key: '6', name: 'Fertilize', icon: 'sprout', mode: 'paint', brush: true, airbrush: true, color: 'rgba(190,240,90,0.95)', how: 'Click or drag; hold still to keep enriching. Repairs overgrazed land.', what: 'Raises soil fertility so tiles hold more food and regrow faster.' },
+  { id: 'terrain', key: '7', name: 'Paint terrain', icon: 'terrain', mode: 'paint', brush: true, airbrush: false, color: 'rgba(210,220,236,0.95)', how: 'Click or drag to paint. Walls and deep water split populations — try it and watch them drift apart.', what: 'Reshapes the land under the brush.' },
+  { id: 'disaster', key: '8', name: 'Disaster', icon: 'bolt', mode: 'click', brush: true, airbrush: false, color: 'rgba(228,91,214,0.95)', how: 'Click to unleash it centred on the cursor, covering the brush circle.', what: 'Starts a disaster with the chosen intensity and duration.' },
+  { id: 'bless', key: '9', name: 'Bless / Smite', icon: 'heart', mode: 'click', brush: false, airbrush: false, color: '', how: 'Click an agent to bless it; Shift-click to smite it. Drag to pan.', what: 'Bless fully heals, feeds and rests one agent; smite kills it instantly.' },
 ];
 
 export const toolById = (id: ToolId): ToolDef => TOOLS.find((t) => t.id === id) ?? TOOLS[0];
@@ -101,17 +104,20 @@ export function brushColor(tool: ToolDef, s: ToolSettings): string {
   return tool.color || 'rgba(255,255,255,0.8)';
 }
 
-/** Long help text for the active tool (shown in the help box). */
+/** Help text for the active tool: how to use it, what it does, and the current choice. */
 export function toolHelp(tool: ToolDef, s: ToolSettings): { title: string; lines: string[] } {
-  const lines: string[] = [tool.blurb];
+  const lines: string[] = [tool.how];
+  const sim = simHelpFor(tool.id);
+  lines.push(sim.length ? sim.join(' ') : tool.what);
   if (tool.id === 'terrain') {
     const info = TERRAIN_INFO[s.terrain];
-    lines.push(`${info.name}: ${info.description}${info.passable ? ` Movement ×${info.moveCost}.` : ''}`);
+    lines.push(`${info.name}: ${info.description}${info.passable ? ` Movement speed ×${info.moveCost}.` : ''}`);
   } else if (tool.id === 'disaster') {
     const d = DISASTER_INFO[s.disaster];
     lines.push(`${d.icon} ${d.label}: ${d.help}`);
+  } else if (tool.id === 'remove') {
+    lines.push('Removed agents count as "removed" deaths in the statistics.');
   }
-  for (const extra of simHelpFor(tool.id)) if (!lines.includes(extra)) lines.push(extra);
   return { title: tool.name, lines };
 }
 

@@ -98,7 +98,7 @@ export class PopulationDesigner {
     }
     this.spreadSlider = slider({ label: 'Variation (spread)', min: 0, max: 0.3, step: 0.01, value: this.spread, help: 'Standard deviation of random variation around the gene means. 0 = identical clones; higher = a more diverse founding population for selection to act on.', onInput: (v) => (this.spread = v) });
     this.tribeSelect = h('select', { class: 'select', 'aria-label': 'Tribe affiliation', onchange: () => this.readTribe() });
-    this.nameInput = h('input', { type: 'text', class: 'text', placeholder: 'Tribe name (optional)', maxlength: 24, oninput: () => (this.tribeName = this.nameInput.value.trim()) });
+    this.nameInput = h('input', { type: 'text', class: 'text', placeholder: 'Name (optional)', maxlength: 24, oninput: () => (this.tribeName = this.nameInput.value.trim()) });
     this.swatch = h('span', { class: 'designer-swatch' });
     this.preview = h('div', { class: 'designer-preview mono' });
     this.el = h(

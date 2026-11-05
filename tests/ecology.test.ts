@@ -4,6 +4,7 @@ import { DEFAULT_CONFIG } from '../src/sim/config';
 import { TERRAIN_INFO } from '../src/sim/constants';
 import {
   AGENT_FOOD_PER_TICK,
+  REGROWTH_RATE,
   FERTILITY_MAX,
   FERTILITY_MIN,
   MAX_OVERFILL,
@@ -160,7 +161,7 @@ describe('ecology: environment clock', () => {
     expect(maxDT).toBeLessThan(0.1);
     expect(maxDL).toBeLessThan(0.03);
     for (let s = 0; s < 4; s++) expect(tempSum[s] / tempN[s]).toBeCloseTo(SEASON_TEMPERATURE[s], 0);
-    expect(SEASON_GROWTH).toEqual([1.35, 1.0, 0.7, 0.12]);
+    expect(SEASON_GROWTH).toEqual([1.3, 1.0, 0.8, 0.35]);
   });
 
   it('honours dayNight/seasons toggles and tempOffset', () => {
@@ -197,14 +198,14 @@ describe('ecology: environment clock', () => {
 });
 
 describe('ecology: resources', () => {
-  it('logistic regrowth: ~0.006–0.01 food/tick for grass at half capacity, bounded by capacity', () => {
+  it('logistic regrowth: ~0.012–0.02 food/tick for grass at half capacity, bounded by capacity', () => {
     const sim = makeSim({ config: { seasons: false }, fill: 0.5 });
     const i = 15 * 40 + 20;
     const before = sim.state.world.food[i];
     advance(sim, 4); // every tile is processed exactly once per 4 ticks (4× step)
     const rate = (sim.state.world.food[i] - before) / 4;
-    expect(rate).toBeGreaterThan(0.006);
-    expect(rate).toBeLessThan(0.01);
+    expect(rate).toBeGreaterThan(0.012);
+    expect(rate).toBeLessThan(0.02);
 
     const food = sim.state.world.food;
     advance(sim, 6000, () => {
@@ -472,9 +473,9 @@ describe('ecology: robustness & aggregates', () => {
     w.fertility.fill(0.5);
     for (let y = 0; y < 30; y++) for (let x = 0; x < 10; x++) w.fertility[y * 40 + x] = 0; // ocean tiles excluded
     expect(averageFertility(sim)).toBeCloseTo(0.5, 6);
-    // 900 grass tiles × MSY (0.0032 × 10 × 0.5 / 4) / 0.09 per agent
+    // 900 grass tiles × MSY (REGROWTH_RATE × 10 × 0.5 / 4) / 0.09 per agent
     const k = estimateCarryingCapacity(sim);
-    expect(k).toBe(Math.round((900 * 0.0032 * 10 * 0.5) / 4 / AGENT_FOOD_PER_TICK));
+    expect(k).toBe(Math.round((900 * REGROWTH_RATE * 10 * 0.5) / 4 / AGENT_FOOD_PER_TICK));
     sim.state.config.foodRegen = 2;
     expect(estimateCarryingCapacity(sim)).toBeCloseTo(2 * k, -1);
 
@@ -484,7 +485,7 @@ describe('ecology: robustness & aggregates', () => {
     const summer = estimateCarryingCapacity(seasonal);
     seasonal.state.tick = 3.5 * 3 * 600; // mid-winter
     updateEnvironment(seasonal);
-    expect(estimateCarryingCapacity(seasonal)).toBeLessThan(summer * 0.2);
+    expect(estimateCarryingCapacity(seasonal)).toBeLessThan(summer * 0.45);
     expect(estimateCarryingCapacity(seasonal, true)).toBeGreaterThan(summer * 0.7);
   });
 

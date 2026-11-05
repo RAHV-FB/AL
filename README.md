@@ -47,8 +47,13 @@ Each preset is a declarative `ScenarioDef` in `src/sim/presets.ts`. It sets the 
 
 | Preset | Idea | Watch for |
 | --- | --- | --- |
-| **Garden of Eden** (`eden`) | Abundant resources, few threats | Fast population growth, then hitting the carrying capacity |
-| TBD | *Lead: fill in from `presets.ts` once the Persistence & Experiments module lands (5+ presets planned, e.g. scarcity, divided worlds by river or mountains, plague, war of tribes)* | |
+| **Garden of Eden** (`eden`) | Abundant food, gentle genomes, three friendly tribes, no random disasters | Near-exponential growth up to the population cap; tribes splitting as they grow |
+| **Survival of the Fittest** (`fittest`) | Scarce food, harsh metabolism, high aggression bias, very diverse genomes | Early starvation crash, then survivors with shifted traits (speed rises); frequent fights |
+| **Two Civilizations** (`two-civs`) | River-divided island: peaceful foragers (west) vs. warlike raiders (east) | Territory borders forming at the fords, wars, raids and which strategy outlasts the other |
+| **Evolution Laboratory** (`evolab`) | High mutation, strict mate compatibility, recurring regional droughts / cold snaps / blooms | Gene-distribution heatmaps drifting under shifting pressure; reproductive isolation |
+| **Civilization Collapse** (`collapse`) | Lush world, one big tribe, overgrazing on; scheduled drought + blight (day 8) and cold snap (day 10) | Overshoot, soil degradation (fertility overlay), starvation collapse, possible recovery |
+| **Plague Island** (`plague-island`) | Crowded sociable archipelago, epidemic on day 3 | SIR epidemic waves, immunity and virulence evolving, sociable clusters hit hardest |
+| **Wolves Among Sheep** (`predators`) | A small band of giant aggressive raiders among many peaceful foragers | Predation once food tightens, fleeing herds, raiders' fate when prey thins out |
 
 ## How the simulation works
 
@@ -113,7 +118,7 @@ There are 12 genes, each in [0, 1]. They are expressed as traits in `genetics.ex
   - **cold snap:** the temperature plunges
 - **Disease** spreads between nearby agents. Infected agents carry a virulence and lose health. Survivors gain temporary immunity, and the immunity gene lowers the risk. `diseaseVirulence` scales contagion and lethality.
 
-> Exact coefficients live in the module headers (`src/sim/*.ts`). Some modules (behavior, social, ecology, disasters/disease) were still being finished when this README was written. The section above describes their contracts in `src/sim/types.ts`. **TBD for the lead:** re-check the specifics once those modules land.
+> Exact coefficients live in the module headers and exported tuning objects (`VITALS`/`REPRO` in lifecycle/genetics, `SOCIAL_TUNING`, `DISEASE`, `DISASTER_TUNING`, `REGROWTH_RATE`/`SEASON_GROWTH` in ecology).
 
 ## Architecture
 
@@ -151,7 +156,7 @@ Derived indexes (`agentById`, `tribeById`, `lineageById` and the spatial hash) l
 
 - **Same seed + same interventions at the same ticks ⇒ the same simulation.** `Simulation.hash()` fingerprints the state, and `tests/determinism.test.ts` checks it at several checkpoints.
 - **Every user intervention is recorded** with its tick in `state.interventionLog`. **Restart & replay** recreates the run from the scenario and seed and re-applies the log.
-- **Save files** are JSON snapshots of `SimState`. Typed arrays are base64-encoded, and the file carries a format `version` (`SAVE_VERSION`). Loading validates the file and rebuilds the indexes, and save → load → continue is identical to never saving (TBD: tested once `persistence.ts` lands).
+- **Save files** are JSON snapshots of `SimState`. Typed arrays are base64-encoded, and the file carries a format `version` (`SAVE_VERSION`). Loading validates the file and rebuilds the indexes, and save → load → continue is identical to never saving (covered by `tests/determinism.test.ts` and `tests/persistence.test.ts`).
 - **Caveat:** replays are bit-exact within the same build and JS engine. Different browser engines may round `Math.sin`, `Math.exp` and similar functions differently in the last bit, so a replay could drift slightly across browsers.
 
 ## Testing and verification

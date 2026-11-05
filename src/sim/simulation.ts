@@ -207,8 +207,9 @@ export class Simulation {
     updateDisease(this);
     updateSocial(this);
 
-    // 9. births / deaths
+    // 9. births / deaths (re-index so the next tick starts from the same index a loaded save would build)
     this.flush();
+    this.spatial.rebuild(s.agents);
 
     // 10. stats
     updateStats(this);
