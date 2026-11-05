@@ -213,6 +213,8 @@ export interface Agent {
   fear?: number;
   /** Ticks since last meal (brain/lifecycle). */
   sinceMeal?: number;
+  /** Health right after the last disease update (disease.ts; infection suppresses natural healing). */
+  diseaseHp?: number;
 }
 
 export interface LineageRecord {
