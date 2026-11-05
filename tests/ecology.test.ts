@@ -361,6 +361,7 @@ describe('ecology: findFood', () => {
     // out of range / nothing worth eating
     expect(findFood(sim, centre(sim, 30, 25).x, centre(sim, 30, 25).y, 30)).toBeNull();
     // standing on food: prefers the current tile
+    food[10 * W + 16] = 7;
     food[10 * W + 10] = 6;
     expect(findFood(sim, me.x, me.y, 50)).toEqual({ ...centre(sim, 10, 10), food: 6 });
     expect(findFood(sim, NaN, 5, 60)).toBeNull();
