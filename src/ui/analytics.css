@@ -513,7 +513,7 @@
 .insp-trait,
 .insp-util {
   display: grid;
-  grid-template-columns: 72px 1fr auto;
+  grid-template-columns: 86px 1fr auto;
   align-items: center;
   gap: 6px;
   min-width: 0;

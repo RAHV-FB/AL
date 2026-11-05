@@ -462,8 +462,9 @@ abstract class XYChart<D extends { x: ArrayLike<number> }> extends CanvasChart<D
         ctx.restore();
         ctx.fillStyle = th.muted;
         ctx.textAlign = 'right';
-        ctx.textBaseline = 'bottom';
-        ctx.fillText(r.label, f.x + f.w - 2, y - 2);
+        const below = y - f.y < 12; // too close to the top edge: label under the line
+        ctx.textBaseline = below ? 'top' : 'bottom';
+        ctx.fillText(r.label, f.x + f.w - 2, below ? y + 2 : y - 2);
       }
     }
     return f;

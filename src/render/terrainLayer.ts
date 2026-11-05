@@ -46,7 +46,7 @@ function makeCanvas(w: number, h: number): HTMLCanvasElement {
 const SEASON_VEG: number[][][] = [
   [[88, 160, 70], [34, 106, 54], [112, 142, 72]],
   [[100, 150, 58], [30, 94, 44], [134, 132, 66]],
-  [[150, 134, 60], [128, 86, 40], [146, 116, 64]],
+  [[158, 140, 62], [158, 96, 38], [150, 118, 62]],
   [[136, 146, 136], [50, 78, 70], [128, 128, 122]],
 ];
 
@@ -317,7 +317,6 @@ export class TerrainLayer {
               g += n * 11;
               b += n * 8;
               lum = (hash3(px, py, 9) - 0.5) * 0.14;
-              if (dd > 0) break;
               break;
             }
             case TERRAIN.Grass: {
@@ -349,12 +348,12 @@ export class TerrainLayer {
               g += n * 16 + (crag - 0.5) * 20;
               b += n * 16 + (crag - 0.5) * 22;
               lum = (crag - 0.5) * 0.6 + (hash3(px, py, 27) - 0.5) * 0.24;
-              if (e > 0.72) {
+              if (e > 0.74) {
                 // snowy peaks
-                const f = Math.min(1, (e - 0.72) * 4);
-                r += (225 - r) * f;
-                g += (230 - g) * f;
-                b += (236 - b) * f;
+                const f = Math.min(0.85, (e - 0.74) * 3.2);
+                r += (208 - r) * f;
+                g += (214 - g) * f;
+                b += (224 - b) * f;
               }
               break;
             }

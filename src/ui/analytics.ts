@@ -570,6 +570,8 @@ export function createAnalyticsPanel(container: HTMLElement): AnalyticsPanel {
     const lastS = samples[n - 1];
     if (lastS) {
       const acts = (Object.entries(lastS.actions) as [ActionKind, number][]).filter((e) => e[1] > 0).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
+      const hgt = `${Math.max(60, acts.length * 18 + 4)}px`;
+      if (actChart.el.style.height !== hgt) actChart.el.style.height = hgt; // resize observer repaints
       actChart.setData({ bars: acts.map(([k, v]) => ({ label: k, value: Math.round(v) })) }, key);
     }
     roleChart.setData(

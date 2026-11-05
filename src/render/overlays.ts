@@ -215,7 +215,7 @@ export class OverlayLayer {
     for (let i = 0; i < g.length; i++) {
       let v = g[i] * norm;
       v = v > 1 ? 1 : v;
-      v = Math.sqrt(v);
+      if (disease) v = Math.sqrt(v);
       const li = ((v * 255) | 0) * 4;
       const o = i * 4;
       d[o] = lut[li];

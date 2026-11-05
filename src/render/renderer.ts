@@ -13,7 +13,7 @@ import { Camera } from './camera';
 import { TerrainLayer } from './terrainLayer';
 import { OverlayLayer } from './overlays';
 import { DisasterFx } from './effects';
-import { AgentPainter, agentRadius, miniBars, tribeHueOf } from './agents';
+import { AgentPainter, agentRadius, miniBars } from './agents';
 import { Minimap } from './minimap';
 import { hueColor } from './colors';
 
@@ -131,6 +131,11 @@ export class Renderer {
     return this.minimap.hit(sx, sy, sim.worldW, sim.worldH);
   }
 
+  /** Alias of minimapToWorld (UI feature detection looks for this name). */
+  minimapHit(sx: number, sy: number): { x: number; y: number } | null {
+    return this.minimapToWorld(sx, sy);
+  }
+
   /** Minimap placement in CSS px (visible=false when hidden). */
   get minimapRect(): { x: number; y: number; w: number; h: number; visible: boolean } {
     return this.minimap.rect;
@@ -196,13 +201,12 @@ export class Renderer {
     const b = cam.visibleBounds(10, this.bounds);
     const px = 1 / z;
 
-    // soft glow around the world edge
-    ctx.shadowColor = 'rgba(70,110,200,0.35)';
-    ctx.shadowBlur = 24 * dpr;
-    ctx.fillStyle = '#0b1222';
-    ctx.fillRect(0, 0, WW, WH);
-    ctx.shadowBlur = 0;
-    ctx.shadowColor = 'transparent';
+    // soft halo around the world edge (cheap stacked strokes, no shadowBlur)
+    ctx.strokeStyle = 'rgba(70,110,200,0.07)';
+    for (let k = 1; k <= 3; k++) {
+      ctx.lineWidth = k * 7 * px;
+      ctx.strokeRect(0, 0, WW, WH);
+    }
 
     this.terrain.draw(ctx, WW, WH);
     this.drawSeason(ctx, env, WW, WH);
@@ -214,7 +218,7 @@ export class Renderer {
 
     this.overlays.draw(ctx, sim, view.overlay, z);
     this.fx.drawWorld(ctx, time, z, b.x0, b.y0, b.x1, b.y1);
-    if (view.showCamps) this.drawCampsWorld(ctx, sim, z, time);
+    if (view.showCamps) this.drawCampsWorld(ctx, sim, z, time, false);
 
     const sel = view.selectedId >= 0 ? sim.getAgent(view.selectedId) : undefined;
     this.updateTrail(sel);
@@ -223,6 +227,7 @@ export class Renderer {
     this.painter.collect(sim, z, b.x0, b.y0, b.x1, b.y1);
     this.painter.draw(ctx, sim, z, night, view.overlay === 'disease', time);
     this.stats.agentsDrawn = this.painter.visN;
+    if (view.showCamps) this.drawCampsWorld(ctx, sim, z, time, true);
 
     if (view.brush) this.drawBrush(ctx, view.brush, z, time);
 
@@ -329,7 +334,8 @@ export class Renderer {
 
   // ------------------------------------------------------------ camps
 
-  private drawCampsWorld(ctx: CanvasRenderingContext2D, sim: Simulation, z: number, time: number): void {
+  /** Camp ground ring (`marker` false, drawn under agents) or hexagon marker + stockpile gauge (`marker` true, over agents). */
+  private drawCampsWorld(ctx: CanvasRenderingContext2D, sim: Simulation, z: number, time: number, marker: boolean): void {
     const b = this.bounds;
     const px = 1 / z;
     for (const t of sim.state.tribes) {
@@ -338,20 +344,23 @@ export class Renderer {
       const y = t.homeY;
       if (!Number.isFinite(x) || !Number.isFinite(y) || x < b.x0 - 40 || x > b.x1 + 40 || y < b.y0 - 40 || y > b.y1 + 40) continue;
       const hue = t.hue;
-      const R = 16;
-      ctx.fillStyle = hueColor(hue, 0.7, 0.5, 0.13);
-      ctx.beginPath();
-      ctx.arc(x, y, R, 0, TAU);
-      ctx.fill();
-      ctx.strokeStyle = hueColor(hue, 0.85, 0.66, 0.7);
-      ctx.lineWidth = 1.2 * px;
-      this.dash[0] = 4 * px;
-      this.dash[1] = 3 * px;
-      ctx.setLineDash(this.dash);
-      ctx.lineDashOffset = -time * 0.004 * px;
-      ctx.stroke();
-      ctx.setLineDash(this.noDash);
-      ctx.lineDashOffset = 0;
+      if (!marker) {
+        const R = 16;
+        ctx.fillStyle = hueColor(hue, 0.7, 0.5, 0.13);
+        ctx.beginPath();
+        ctx.arc(x, y, R, 0, TAU);
+        ctx.fill();
+        ctx.strokeStyle = hueColor(hue, 0.85, 0.66, 0.7);
+        ctx.lineWidth = 1.2 * px;
+        this.dash[0] = 4 * px;
+        this.dash[1] = 3 * px;
+        ctx.setLineDash(this.dash);
+        ctx.lineDashOffset = -time * 0.004 * px;
+        ctx.stroke();
+        ctx.setLineDash(this.noDash);
+        ctx.lineDashOffset = 0;
+        continue;
+      }
       // hexagon marker (min ~9px on screen)
       const s = Math.max(4.5, 9 * px);
       ctx.beginPath();
@@ -398,7 +407,7 @@ export class Renderer {
   }
 
   private drawCampLabels(ctx: CanvasRenderingContext2D, sim: Simulation, z: number, vw: number, vh: number): void {
-    if (z < 0.55) return;
+    if (z < 0.33) return;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     const px = 1 / z;
@@ -601,7 +610,6 @@ export class Renderer {
     ctx.fillText(sub, x + 7, y + 17);
     ctx.textBaseline = 'alphabetic';
     miniBars(ctx, a, x + w / 2, y + h - 7, w - 14);
-    if (a.tribeId >= 0 && !tribe) void tribeHueOf;
   }
 
   private drawBrush(ctx: CanvasRenderingContext2D, br: NonNullable<ViewOptions['brush']>, z: number, time: number): void {

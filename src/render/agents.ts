@@ -52,7 +52,6 @@ export class AgentPainter {
   private pos = new Int32Array(HUE_BUCKETS + 1);
   private ringCounts = new Int32Array(HUE_BUCKETS + 1);
   private bodyColors = bucketPalette(0.7, 0.6);
-  private bodyColorsDim = bucketPalette(0.55, 0.5);
   private ringColors = bucketPalette(0.95, 0.6);
   private glowWarm = glowSprite(255, 236, 190);
   private glowSick = glowSprite(140, 255, 80);
@@ -193,7 +192,7 @@ export class AgentPainter {
     }
     // bodies
     const counts = this.counts;
-    const pal = night > 0.5 ? this.bodyColors : this.bodyColors;
+    const pal = this.bodyColors;
     for (let b = 0; b < HUE_BUCKETS; b++) {
       const s = counts[b];
       const e = counts[b + 1];
@@ -255,7 +254,6 @@ export class AgentPainter {
       ctx.arc(cx, cy, cr, 0, TAU);
     }
     if (anyCarry) ctx.fill();
-    void this.bodyColorsDim;
   }
 
   /**
@@ -288,7 +286,15 @@ export class AgentPainter {
         const sx = (a.x - camX) * zoom + hx;
         const sy = (a.y - camY) * zoom + hy;
         const rs = this.rad[k] * zoom;
-        drawGlyph(ctx, a, sx + rs * 0.85 + 3, sy - rs * 0.85 - 4, Math.min(9, 4 + zoom * 0.5), time);
+        if (!GLYPH_ACTIONS.has(a.action)) continue;
+        const gx = sx + rs * 0.8 + 5;
+        const gy = sy - rs * 0.8 - 5;
+        const gs = Math.min(11, 6 + zoom * 0.45);
+        ctx.fillStyle = 'rgba(6,9,18,0.72)';
+        ctx.beginPath();
+        ctx.arc(gx, gy, gs * 0.78, 0, TAU);
+        ctx.fill();
+        drawGlyph(ctx, a, gx, gy, gs, time);
       }
     }
     if (labels) {
@@ -319,6 +325,8 @@ export class AgentPainter {
     }
   }
 }
+
+const GLYPH_ACTIONS = new Set(['eat', 'attack', 'flee', 'mate', 'rest', 'share', 'deposit', 'withdraw', 'socialize']);
 
 /** Two stacked micro bars: health (green→red) and stomach (amber). */
 export function miniBars(ctx: CanvasRenderingContext2D, a: Agent, cx: number, y: number, w: number): void {
