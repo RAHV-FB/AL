@@ -440,7 +440,8 @@ export function describeNow(sim: Simulation): string[] {
     else add(5, 4, `${active.length} disasters are under way, among them ${what(active[0])} (${daysLeftText(active[0], tick, dl)}).`);
   }
 
-  // 7. the latest major event of the last two days
+  // 7. the latest major event of the last two days, unless a sentence above already covers it (the war it
+  // declared, the epidemic, the disaster under way)
   const evs = s.events;
   let latest: SimEvent | null = null;
   for (let i = evs.length - 1; i >= 0; i--) {
@@ -450,6 +451,13 @@ export function describeNow(sim: Simulation): string[] {
       latest = e;
       break;
     }
+  }
+  const said = (order: number) => lines.some((l) => l.order === order);
+  if (latest) {
+    const m = latest.message;
+    if (latest.category === 'conflict' && /\bwar\b/i.test(m) && lines.some((l) => l.order === 3 && /at war/.test(l.text))) latest = null;
+    else if (latest.category === 'disease' && said(4)) latest = null;
+    else if (latest.category === 'disaster' && said(5) && !/meteor/i.test(m)) latest = null;
   }
   if (latest && latest.message) {
     const msg = latest.message.trim();

@@ -38,7 +38,7 @@ export const INTERVENTION_HELP: Record<Intervention['kind'], string> = {
   removeFood: 'Remove all standing food from the tiles under the brush.',
   paintTerrain: 'Paint terrain onto the map. Agents left on impassable tiles move to the nearest open ground, or die if there is none nearby.',
   fertilize: 'Make the soil under the brush richer, so it holds more food and regrows faster. Negative amounts make it poorer.',
-  disaster: 'Start a drought, blight, plague, meteor, cold snap or abundance around a point. Radius 0 covers the whole world.',
+  disaster: 'Start a drought, blight, plague, meteor, cold snap or abundance around a point. Radius 0 covers the whole world, except for a meteor, which always strikes one spot.',
   setConfig: 'Change settings such as mutation rate, plant regrowth or aggression while the simulation runs.',
   boostAgent: 'Fully heal, feed and rest one agent.',
 };
@@ -509,7 +509,7 @@ function paintTerrain(sim: Simulation, x: number, y: number, r: number, terrain:
 
   let msg = `Painted ${plural(changed, 'tile')} of ${info.name.toLowerCase()}`;
   if (moved) msg += `, ${plural(moved, 'agent')} displaced`;
-  if (doomed.length) msg += `, ${doomed.length} trapped and killed`;
+  if (doomed.length) msg += `, ${moved ? doomed.length : plural(doomed.length, 'agent')} trapped and killed`;
   sim.log('intervention', doomed.length ? 'bad' : 'info', `${msg}.`, { x, y });
 }
 
@@ -523,8 +523,9 @@ function disaster(sim: Simulation, kind: DisasterKind, x: number, y: number, r: 
   const inten = clamp(num(intensity, 0.7), 0.05, 1);
   const dur = Math.round(clamp(num(duration, 600), 1, 100000));
   const label = DISASTER_INFO[kind]?.label ?? kind;
-  // log the cause before startDisaster logs its immediate effects
-  sim.log('intervention', kind === 'bloom' ? 'good' : 'bad', `${label} triggered${radius === 0 ? ' worldwide' : ''}.`, { x: dx, y: dy });
+  // log the cause before startDisaster logs its immediate effects (a meteor is never world-wide:
+  // startDisaster gives a radius-0 meteor its default impact radius)
+  sim.log('intervention', kind === 'bloom' ? 'good' : 'bad', `${label} triggered${radius === 0 && kind !== 'meteor' ? ' worldwide' : ''}.`, { x: dx, y: dy });
   startDisaster(sim, kind, dx, dy, radius, inten, dur);
 }
 
