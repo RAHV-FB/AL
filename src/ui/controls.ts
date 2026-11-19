@@ -13,7 +13,7 @@ export const OVERLAYS: { value: OverlayKind; label: string; tip: string }[] = [
   { value: 'food', label: 'Food', tip: 'Food standing on each tile. Brighter means more. Watch grazed land and regrowth.' },
   { value: 'fertility', label: 'Fertility', tip: 'How much food each tile can hold and how fast it regrows. Overgrazing wears it down.' },
   { value: 'density', label: 'Density', tip: 'Where agents crowd together.' },
-  { value: 'territory', label: 'Territory', tip: 'Land claimed by each tribe, in tribe colours.' },
+  { value: 'territory', label: 'Territory', tip: 'Land claimed by each tribe, in tribe colors.' },
   { value: 'disease', label: 'Disease', tip: 'Infected agents and where the disease spreads.' },
   { value: 'climate', label: 'Climate', tip: 'Where droughts, blights, abundance and cold snaps change plant growth.' },
 ];

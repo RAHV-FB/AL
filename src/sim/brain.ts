@@ -1897,8 +1897,17 @@ export function think(sim: Simulation, a: Agent): void {
       if (raid) {
         a.targetX = raid.homeX;
         a.targetY = raid.homeY;
-        // setting out: commit to the march (a trek), across fords and through the night
-        if (raidTrek !== raid) a.trek = { x: raid.homeX, y: raid.homeY, until: tick + RAID_TREK_TICKS, kind: 'raid', tribe: raid.id };
+        // setting out: commit to the march (a trek), across fords and through the night. A raider already on the
+        // march that turns to another enemy camp keeps its deadline: the raid still ends RAID_TREK_TICKS after it
+        // set out (restarting the clock at every change of camp let marches run on for up to 8 days)
+        if (raidTrek !== raid) {
+          const tk = a.trek;
+          if (raidTrek !== null && tk !== undefined && tk.kind === 'raid') {
+            tk.x = raid.homeX;
+            tk.y = raid.homeY;
+            tk.tribe = raid.id;
+          } else a.trek = { x: raid.homeX, y: raid.homeY, until: tick + RAID_TREK_TICKS, kind: 'raid', tribe: raid.id };
+        }
         const by = !clearPath(sim, a.x, a.y, raid.homeX, raid.homeY) ? ', the long way round by a ford or pass' : '';
         thought = `At war, raiding the camp of ${theName(raid)}${P.allyN > 1 ? ` with ${P.allyN} others` : ''}${by}`;
         break;

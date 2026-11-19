@@ -677,7 +677,7 @@ export class LineChart extends XYChart<LineData> {
       if (!Number.isFinite(v)) continue;
       this.marker(ctx, th, X, this.sy(v), s.color);
       let val = (s.format ?? yFmt)(v);
-      if (s.band) val += ` ± ${(s.format ?? yFmt)((s.band.hi[i] - s.band.lo[i]) / 2)}`;
+      if (s.band) val += `, spread ${(s.format ?? yFmt)((s.band.hi[i] - s.band.lo[i]) / 2)}`;
       html += tipRow(s.color, s.name, val);
     }
     return html;

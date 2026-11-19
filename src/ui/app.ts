@@ -34,6 +34,8 @@ const CLOSE_ZOOM = 5;
 const EVENT_TOAST_GAP = 8000;
 /** Space on the right of the map kept for the zoom buttons (renderer legend stays clear). */
 const ZOOM_COL = 56;
+/** Room kept above the minimap for the renderer's map legend (connections and territory edges, 115 px with its gap). */
+const LEGEND_ZONE = 120;
 
 type Tab = 'stats' | 'inspector' | 'events';
 
@@ -1064,6 +1066,7 @@ export class App {
     }
     this.painter.end();
     this.toolPanel.onToolChanged();
+    this.stage.classList.toggle('tool-open', id !== 'inspect');
     this.canvas.dataset.tool = id;
     this.updateCursor();
     if (id !== 'inspect') this.el.hover?.classList.remove('show');
@@ -1668,17 +1671,37 @@ export class App {
     card.style.transform = `translate(${Math.round(Math.max(4, x))}px, ${Math.round(Math.max(4, y))}px)`;
   }
 
-  /** Keep the hint box and zoom buttons clear of the minimap wherever the renderer puts it. */
+  /** Keep the hint box, zoom buttons and tool options clear of the minimap wherever the renderer puts it. */
   private layoutHud(): void {
-    const rect = (this.renderer as unknown as { minimapRect?: { x: number; y: number; w: number; h: number; visible: boolean } }).minimapRect;
+    const r = this.renderer as unknown as {
+      minimapRect?: { x: number; y: number; w: number; h: number; visible: boolean };
+      connectionsLegendRect?: { y: number; visible: boolean };
+    };
+    const rect = r.minimapRect;
     const vw = this.camera.viewW;
-    const key = rect ? `${rect.visible}|${Math.round(rect.x)}|${Math.round(rect.w)}|${Math.round(rect.h)}|${vw}` : `none|${vw}`;
+    const vh = this.camera.viewH;
+    const ties = (this.view as { showConnections?: boolean; showCamps?: boolean }).showConnections !== false || this.view.showCamps;
+    const leg = r.connectionsLegendRect;
+    // a legend taller than the room kept for it (a future renderer change) lays the panel out again
+    const tall = !!rect && !!leg && leg.visible && leg.y < rect.y - LEGEND_ZONE ? Math.round(leg.y) : 0;
+    const key = rect ? `${rect.visible}|${Math.round(rect.x)}|${Math.round(rect.y)}|${Math.round(rect.w)}|${Math.round(rect.h)}|${vw}|${vh}|${ties}|${tall}` : `none|${vw}|${vh}`;
     if (key === this.hudKey) return;
     this.hudKey = key;
-    const left = rect && rect.visible && rect.x < vw / 2 ? Math.round(rect.x + rect.w + 12) : 14;
+    const onLeft = !!rect && rect.visible && rect.x < vw / 2;
+    const left = onLeft ? Math.round(rect!.x + rect!.w + 12) : 14;
     this.el.hint.style.left = `${left}px`;
     const onRight = rect && rect.visible && rect.x >= vw / 2;
     this.el.zoom.style.right = onRight ? `${Math.round(vw - rect.x + 10)}px` : '';
+    // the options panel stops above the minimap and the connections legend drawn just above it
+    // (read from the style sheet: the panel is often hidden here, with no layout of its own)
+    const panel = this.toolPanel.el;
+    const ps = getComputedStyle(panel);
+    const pLeft = parseFloat(ps.left) || 0;
+    const pTop = parseFloat(ps.top) || 0;
+    if (onLeft && rect!.x < pLeft + (parseFloat(ps.width) || 0)) {
+      const legendTop = !ties ? rect!.y : tall ? Math.min(tall, rect!.y - LEGEND_ZONE) : rect!.y - LEGEND_ZONE;
+      panel.style.maxHeight = `${Math.max(180, Math.round(legendTop - pTop - 10))}px`;
+    } else panel.style.maxHeight = '';
   }
 
   private setText(key: string, value: string): void {

@@ -463,6 +463,8 @@ canvas.world { position: absolute; inset: 0; width: 100%; height: 100%; display:
 .gene-grid .wide { grid-column: 1 / -1; }
 
 .pills { position: absolute; top: 10px; left: 50%; z-index: 3; display: flex; gap: 8px; transform: translateX(-50%); }
+/* with a tool's options open, the pills centre on the map right of the panel (62px + 296px wide) */
+.stage.tool-open .pills { left: calc(50% + 179px); }
 .pill {
   appearance: none;
   display: inline-flex;
@@ -638,9 +640,12 @@ canvas.world { position: absolute; inset: 0; width: 100%; height: 100%; display:
 .st-item.on:hover { background: transparent; }
 .st-item-name { font-size: 13.5px; font-weight: 500; }
 .st-item.on .st-item-name { color: var(--accent); }
-.st-item-tag { color: var(--muted); font-size: 12px; line-height: 1.4; }
-.st-detail { padding: 0 10px 12px; }
-.st-desc { margin: 2px 0 0; color: var(--text); line-height: 1.55; }
+/* one line each, so the whole list fits; the selected one's full line is in its details below */
+.st-item-tag { max-width: 100%; overflow: hidden; color: var(--muted); font-size: 12px; line-height: 1.4; white-space: nowrap; text-overflow: ellipsis; }
+.st-detail { padding: 16px 0 8px; }
+.st-name { font-size: 15px; }
+.st-tagline { margin: 3px 0 0; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+.st-desc { margin: 10px 0 0; color: var(--text); line-height: 1.55; }
 .st-detail h3 { margin: 14px 0 4px; font-size: 13px; color: var(--muted); font-weight: 500; }
 .st-look { margin: 0; padding-left: 18px; line-height: 1.5; }
 .st-look li { margin: 3px 0; }

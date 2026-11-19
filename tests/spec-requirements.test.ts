@@ -34,7 +34,7 @@ import {
   type TerrainType,
 } from '../src/sim/types';
 import { DEFAULT_SETTINGS, TOOLS, brushIntervention, toolHelp } from '../src/ui/tools';
-import { OVERLAYS } from '../src/ui/controls';
+import { CONFIG_TOGGLES, OVERLAYS, VIEW_TOGGLES } from '../src/ui/controls';
 
 // ------------------------------------------------------------------ file access (no @types/node)
 
@@ -210,24 +210,19 @@ describe('README matches the code', () => {
     expect(README).toContain(`the ${WORDS[SCENARIOS.length]} experiments`);
   });
 
-  it('lists every tool with its key and name, every overlay, global event and toggle of the sidebar', () => {
+  it('lists every tool with its key and name, every data layer, map toggle, world rule, parameter and disaster of the UI', () => {
     const squash = (v: string): string => v.toLowerCase().replace(/[\s/]+/g, '');
     const readme = squash(README);
     for (const t of TOOLS) expect(README, t.id).toContain(`\`${t.key}\` ${t.name}`);
     for (const o of OVERLAYS) if (o.value !== 'none') expect(readme, o.value).toContain(squash(o.label));
-    const controls = read('src/ui/controls.ts');
-    const labelsOf = (block: string): string[] => {
-      const m = new RegExp(`const ${block}[^=]*= \\[([\\s\\S]*?)\\n\\];`).exec(controls);
-      expect(m, block).not.toBeNull();
-      return [...m![1].matchAll(/label: '([^']+)'/g)].map((x) => x[1]);
-    };
     for (const p of PARAM_SPECS) expect(readme, `PARAM_SPECS: ${p.label}`).toContain(squash(p.label));
-    const groups = { GLOBAL_EVENTS: 5, CONFIG_TOGGLES: 4, VIEW_TOGGLES: 7 };
-    for (const [block, n] of Object.entries(groups)) {
-      const labels = labelsOf(block);
-      expect(labels.length, block).toBe(n);
-      for (const l of labels) expect(readme, `${block}: ${l}`).toContain(squash(l));
-    }
+    // map toggles (Layers menu) and world rules (Settings)
+    expect(VIEW_TOGGLES.length).toBeGreaterThan(0);
+    expect(CONFIG_TOGGLES.length).toBeGreaterThan(0);
+    for (const v of VIEW_TOGGLES) expect(readme, `VIEW_TOGGLES: ${v.label}`).toContain(squash(v.label));
+    for (const c of CONFIG_TOGGLES) expect(readme, `CONFIG_TOGGLES: ${c.label}`).toContain(squash(c.label));
+    // the Disaster tool starts every kind, in the brush circle or on the whole map
+    for (const k of DISASTER_KINDS) expect(readme, `DISASTER_INFO: ${DISASTER_INFO[k].label}`).toContain(squash(DISASTER_INFO[k].label));
   });
 
   it('documents only keyboard shortcuts that src/ui/app.ts handles', () => {

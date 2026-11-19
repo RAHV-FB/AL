@@ -3,7 +3,7 @@
 import type { Simulation } from '../sim/simulation';
 import type { Camera } from './camera';
 import type { TerrainLayer } from './terrainLayer';
-import type { DisasterFx } from './effects';
+import { DISASTER_COLOR, type DisasterFx } from './effects';
 import { hueColor } from './colors';
 
 const C_PANEL = '#1c1b18';
@@ -13,21 +13,14 @@ const C_LONER = 'rgba(232,227,216,0.9)';
 const C_INFECTED = '#c2c46e';
 const C_CAMP_EDGE = '#131210';
 
-/** Disaster ring colours (muted palette: water, sage, ochre, rust). */
+/**
+ * Disaster rings in the outline colour of each kind on the map; drought and plague dashed as on the map,
+ * so no ring reads as the ochre view rectangle.
+ */
 function disasterColor(kind: string): string {
-  switch (kind) {
-    case 'coldsnap':
-      return '#6f9fc2';
-    case 'bloom':
-      return '#8fb573';
-    case 'plague':
-      return C_INFECTED;
-    case 'blight':
-      return '#cf5b45';
-    default:
-      return C_VIEW;
-  }
+  return (DISASTER_COLOR as Record<string, string>)[kind] ?? '#a3835c';
 }
+const DASHED = new Set(['drought', 'plague']);
 
 export class Minimap {
   private c = document.createElement('canvas');
@@ -65,16 +58,20 @@ export class Minimap {
     const sx = pw / sim.worldW;
     const sy = ph / sim.worldH;
     // disasters: thin rings in muted colours
+    const dash = [3 * dpr, 2 * dpr];
+    const solid: number[] = [];
     fx.forEach((d, a) => {
       if (!(d.radius > 0) || a < 0.05) return;
       ctx.globalAlpha = Math.min(1, a);
       ctx.strokeStyle = disasterColor(d.kind);
       ctx.lineWidth = Math.max(1, dpr);
+      ctx.setLineDash(DASHED.has(d.kind) ? dash : solid);
       ctx.beginPath();
       ctx.arc(d.x * sx, d.y * sy, Math.max(2, d.radius * sx), 0, Math.PI * 2);
       ctx.stroke();
       ctx.globalAlpha = 1;
     }, time);
+    ctx.setLineDash(solid);
     // agents as small squares in their tribe's colour (loners light, infected yellow-green)
     const s = Math.max(1, Math.round(1.2 * dpr));
     const agents = sim.state.agents;

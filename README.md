@@ -4,7 +4,7 @@ Artificial Life is an offline, deterministic civilization simulator that runs in
 
 The app is online at <https://rahv-fb.github.io/AL/>, deployed from the `main` branch by `.github/workflows/pages.yml` (see [CI and deployment](#testing-and-verification)). If that page does not load, use the offline file: download [`release/artificial-life.html`](release/artificial-life.html) and open it in any modern browser. It is one self-contained file that needs no server, no install and no network access.
 
-The app is written in TypeScript with Vite and Canvas 2D and has no runtime dependencies. It makes no network requests, sends no telemetry and stores nothing but your UI preferences (view toggles, overlay, open panels), in `localStorage`.
+The app is written in TypeScript with Vite and Canvas 2D and has no runtime dependencies. It makes no network requests and sends no telemetry. The only things it keeps in `localStorage` are interface settings: the data layer and map toggles, which sections are folded, whether the side panel and pop-up notices are on, whether you dismissed the first-run hint, and the last experiment you ran.
 
 [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) traces each requirement to the code, and [`docs/VERIFICATION.md`](docs/VERIFICATION.md) records measured results.
 
@@ -26,11 +26,13 @@ The app is written in TypeScript with Vite and Canvas 2D and has no runtime depe
 | Simulation benchmark | `npm run bench` |
 | Balance report (a per-day table for each preset) | `npm run balance` |
 | Browser smoke test and screenshot | `npm run build && npm run smoke:browser` |
-| Drive every UI control in a real browser (231 checks) | `npm run build && node scripts/ui-audit.mjs --file dist/index.html` |
+| Drive every UI control in a real browser | `npm run build && node scripts/ui-audit.mjs` |
 
 ## Controls
 
-The app opens on Garden of Eden, running at 1× (30 ticks per second). Hover over a control to see what it does, or press `H` for the list of shortcuts.
+The app opens on a start screen. It lists the experiments, shows the description of the selected one and what to watch for, and previews its world, paused, on the map behind the list. Type a seed or leave the box empty for the experiment's own seed, then press Start. A run starts at 1× (30 ticks per second). The start screen can also load a saved world and show the keyboard shortcuts, and the experiment name in the top bar brings it back. A link ending in `#run` skips it and starts the experiment you ran last (Garden of Eden the first time), and `#run=<id>&seed=<n>` starts a given experiment and seed.
+
+Hover over a control to see what it does, or press `H` for the list of controls.
 
 ### Keyboard
 
@@ -40,74 +42,75 @@ The app opens on Garden of Eden, running at 1× (30 ticks per second). Hover ove
 | `.` | Advance one tick (pauses first if the simulation is running) |
 | `<` `>` | Slower or faster (¼× to 64×, then Max) |
 | `1` to `9` | Choose a tool (see [Tools](#tools)) |
-| `W` `A` `S` `D` or arrow keys | Pan the camera |
+| `W` `A` `S` `D` or arrow keys | Move the map |
 | `+` `-` | Zoom in or out |
-| `0` | Fit the whole world on screen |
+| `0` | Show the whole map |
 | `F` | Follow the selected agent (press again to stop) |
 | `[` `]` | Shrink or grow the brush |
-| `O`, `Shift`+`O` | Next or previous data overlay |
-| `Esc` | Deselect the agent, stop following and switch back to Inspect (also closes the help sheet) |
-| `H` or `?` | Open the help sheet, which lists every shortcut |
-| `Ctrl`+`S`, `Ctrl`+`O` (`⌘` on macOS) | Save or load the experiment |
+| `O`, `Shift`+`O` | Next or previous data layer |
+| `Esc` | Close the open menu or Settings; otherwise deselect the agent, stop following and go back to Inspect |
+| `H` or `?` | Open the list of controls |
+| `Ctrl`+`S`, `Ctrl`+`O` (`⌘` on macOS) | Save the world, or load a saved one |
 
 ### Mouse
 
 | Input | Action |
 | --- | --- |
-| Wheel | Zoom toward the cursor (`Alt`+wheel resizes the brush) |
-| Left-drag | Pan with Inspect, Spawn agents, Disaster and Bless / Smite; paint with Remove agents, Add food, Remove food, Fertilize and Paint terrain |
-| Right-drag or middle-drag | Pan, with any tool |
-| Click (Inspect) | Select an agent and open the inspector |
-| Double-click (Inspect) | Select an agent and follow it with the camera |
-| Click (Bless / Smite) | Fully heal, feed and rest an agent |
-| `Shift`+click (Bless / Smite) | Kill an agent |
-| Click or drag on the minimap | Move the camera |
+| Wheel | Zoom in or out at the cursor (`Alt`+wheel changes the brush size) |
+| Left-drag | Move the map with Inspect, Add agents, Disaster and Bless or smite; paint with Remove agents, Add food, Remove food, Fertilize and Paint terrain |
+| Right-drag or middle-drag | Move the map, with any tool |
+| Click (Inspect) | Select an agent and show it in the Agent tab |
+| Double-click (Inspect) | On an agent, follow it up close; on the ground, zoom in there |
+| Click (Bless or smite) | Fully heal, feed and rest an agent |
+| `Shift`+click (Bless or smite) | Kill an agent |
+| Click or drag on the minimap | Move the view |
 | Drop a `.json` save on the window | Load it |
 
 ### Tools
 
-The tools sit on a rail at the left edge of the map, and keys `1` to `9` select them.
+The tools sit on a rail at the left edge of the map, and keys `1` to `9` select them. The options of the selected tool open in a panel next to the rail.
 
-- `1` Inspect: select an agent to see it in the inspector, or follow it.
-- `2` Spawn agents: drop a group of new adults inside the brush circle. The population designer in the Tool panel sets their genes and tribe.
-- `3` Remove agents: remove every agent under the brush.
-- `4` Add food: add food to the tiles under the brush.
-- `5` Remove food: strip the standing food from the tiles under the brush. Plants regrow over time.
-- `6` Fertilize: raise soil fertility, so tiles hold more food and regrow faster. This also repairs overgrazed land.
-- `7` Paint terrain: paint the chosen terrain type, including impassable walls and deep water.
-- `8` Disaster: start the chosen disaster at the cursor, covering the brush circle, with the intensity and duration set in the Tool panel.
-- `9` Bless / Smite: heal or kill one agent (see [Mouse](#mouse)).
+- `1` Inspect: select an agent to see what it is doing and why, or double-click it to follow it.
+- `2` Add agents: place a group of adult agents inside the circle. The options set the group size, the tribe (found a new one, join a living one or none), and the genes, from a few ready-made types or gene by gene with an amount of variation.
+- `3` Remove agents: remove every agent inside the circle. They count as removed in the death statistics.
+- `4` Add food: add food to every tile under the circle.
+- `5` Remove food: strip all standing food from the tiles under the circle. Plants grow back over time.
+- `6` Fertilize: make the soil richer, so tiles hold more food and regrow faster. This also repairs overgrazed land.
+- `7` Paint terrain: change the land under the circle to the chosen terrain, including impassable walls and deep water.
+- `8` Disaster: start a drought, blight, abundance, plague, meteor or cold snap inside the circle, with the intensity and duration you set. A button in the options starts it on the whole map instead; a meteor always strikes one spot.
+- `9` Bless or smite: click an agent to fully heal, feed and rest it, or `Shift`+click it to kill it.
 
-Spawn agents, Disaster and the painting tools draw a circle that shows where they act. Remove agents, Add food, Remove food and Fertilize keep acting while you hold the button still. While the simulation is paused, each edit advances it by one tick so you can see the result.
+Add agents, Disaster and the painting tools draw a circle that shows where they act. Remove agents, Add food, Remove food and Fertilize keep acting while you hold the button still. While the simulation is paused, each edit advances it by one tick so you can see the result.
 
-### Panels
+### Screen
 
-The top bar holds play/pause, single step and the speed control (¼× to 64×, and Max), plus the calendar, population, tribe count and TPS/FPS. A "CPU-limited" badge appears when the requested speed cannot be reached.
+The top bar shows the experiment name, play/pause, single step and the speed control (¼× to 64×, and Max), then the calendar and the population. Settings, Help and a button that shows or hides the side panel sit on the right. When your computer cannot keep up with the chosen speed, the speed label is marked and its tooltip says so.
 
-The left sidebar holds:
+On the map, Layers (top right) picks the data shown over the terrain (food, fertility, density, territory, disease or climate) and toggles tribe camps, names, connections, trails and routes, the vision radius and the minimap. The buttons at the bottom right zoom in, zoom out and show the whole map. Hovering over an agent shows a short card about it.
 
-- Tool: the options for the current tool. For Spawn agents this is the population designer, which sets group size, gene means and spread, archetypes and tribe.
-- Global events: a world-wide Drought, Plague, Abundance, Ice age (a cold snap) or Blight, with a severity and a duration.
-- Experiments: the presets and a seed box with three buttons. Restart uses the seed in the box and does not re-apply your interventions, New seed restarts with a random seed, and Replay my interventions restarts and re-applies them.
-- View: the data overlays (food, fertility, density, territory, disease, climate) and toggles for vision radius, trails, relationships, tribe camps, name labels, minimap and overlay legend, plus the Fit world and Follow selected buttons.
-- Parameters: 12 sliders defined by `PARAM_SPECS` in `src/sim/config.ts` (mutation rate, mutation size, reproduction rate, plant regrowth, food capacity, environmental harshness, random disasters, disease virulence, aggression bias, cooperation bias, mate compatibility and population cap), then toggles for overgrazing, seasons, day/night and tribes. Each change is recorded as an intervention, so it replays deterministically.
-- Save & load: save the experiment as a JSON file, or load one.
+The side panel has three tabs:
 
-The right sidebar holds:
+- Overview: a few sentences about what is happening now, key numbers with trend lines, the population chart and the list of tribes. More charts open below it: births and deaths, health, energy and hunger, food and soil, tribe sizes, causes of death, gene distributions over time and behavior, over all days or the last 20, 5 or 1.
+- Agent: the selected agent's current action and needs, the options it weighed, the agents it knows, its family, genes, skills and life story, with buttons to follow, bless or smite it.
+- Events: a chronicle you can filter by kind of event. Click an event to see where it happened.
 
-- Stats: live figures and charts for population, births and deaths per day, vitals, resources, tribes, deaths by cause, gene distributions over time, actions and roles. The range can be All, 20 d, 5 d or 1 d.
-- Inspector: the selected agent's needs, decision scores, genes, skills, relationships, family tree and life story, with buttons to follow, bless or smite it.
-- Events: a chronicle you can filter by category. Click an event to jump to where it happened.
+The Settings drawer holds:
+
+- World rules: toggles for overgrazing, seasons, day/night and tribes, and under More settings the 12 sliders defined by `PARAM_SPECS` in `src/sim/config.ts` (mutation rate, mutation size, reproduction rate, plant regrowth, food capacity, environmental harshness, random disasters, disease virulence, aggression bias, cooperation bias, mate compatibility and population cap), with a button that resets them to the experiment's values. Each change is recorded as an intervention, so it replays deterministically.
+- This run: the seed box, Restart (from the beginning with that seed, without your interventions), New seed, and Replay my interventions (restart and re-apply them at the ticks you made them).
+- Save and load: save the world as a JSON file, or load one.
+- Notices: pop-up notices for wars, tribes dying out, epidemics, big disasters and population crashes.
+- Performance: ticks and frames per second.
 
 ## Experiment presets
 
-Each preset is a declarative `ScenarioDef` in `src/sim/presets.ts`. It sets the config, the world-generation options, the starting populations (gene templates and tribes) and the scheduled events, plus a "what to look for" list that the Experiments panel shows.
+Each preset is a declarative `ScenarioDef` in `src/sim/presets.ts`. It sets the config, the world-generation options, the starting populations (gene templates and tribes) and the scheduled events, plus a list of what to watch for, which the start screen shows.
 
 | Preset | Setup | What it explores |
 | --- | --- | --- |
 | Garden of Eden (`eden`) | Twice the plant regrowth, 1.5× food capacity, cheap metabolism and no random disasters. Three gentle tribes. A bloom on day 4 | Growth with selection relaxed: how fast the bands fill the island, what finally limits them, and what happens when their territories meet |
-| Survival of the Fittest (`fittest`) | Scarce food, wide deserts, 1.6× harshness, 1.5× aggression and a raised mutation rate. Four groups of very diverse loners. Drought on day 3, frost on day 7, plague on day 10 | Selection under pressure. A short boom ends in a starvation crash (seed 42: a peak of 280, then 68 by day 12), and the survivors are faster, leaner and more fertile (speed 0.48 to 0.67, metabolism 0.50 to 0.41, fertility 0.50 to 0.70). Also whether loners still band together into tribes |
-| Two Civilizations (`two-civs`) | A river with a few fords splits the island. Peaceful, efficient foragers live in the west and big, aggressive raiders in the east. A western harvest on day 5 and an eastern drought on day 9 | Whether cooperation or aggression wins territory and food, with borders, raids and wars at the fords |
+| Survival of the Fittest (`fittest`) | Scarce food, wide deserts, 1.6× harshness, 1.5× aggression and a raised mutation rate. Four groups of very diverse loners. Drought on day 3, frost on day 7, plague on day 10 | Selection under pressure. A short boom ends in a starvation crash (seed 42: a peak of 285 on day 4, then 78 by day 12), and the survivors are faster, leaner and more fertile (speed 0.48 to 0.64, metabolism 0.50 to 0.45, fertility 0.50 to 0.70). Also whether loners still band together into tribes |
+| Two Civilizations (`two-civs`) | A river with three fords splits the island. Gentle foragers who gather food well live in the west and big, aggressive raiders in the east, and the two peoples start at war as old rivals. A western harvest on day 5 and an eastern drought on day 9 | Raids across the river, with no intervention needed: raiding parties cross the fords, sleep out on the march, plunder the foragers' stockpile and carry the loot home. Also which people grows faster, the foragers who gather food or the raiders who take it |
 | Evolution Laboratory (`evolab`) | About 3× the mutation rate, strict mate compatibility (0.2) and a mountain range with passes. Four groups of loners. Every 2 days a drought, cold snap or bloom hits the next quadrant | Local adaptation and speciation: hue clusters separating by region, and gene histograms with two peaks |
 | Civilization Collapse (`collapse`) | A lush world with one big, fast-breeding tribe, overgrazing on and a cap of 1,400. Global drought plus a heartland blight on day 8, a global cold snap on day 10, and rain returning only in the north-east on day 14 | Overshoot, soil degradation (fertility overlay), starvation collapse and possible recovery |
 | Plague Island (`plague-island`) | An archipelago with five crowded, sociable tribes whose immunity is weak. 1.5× disease virulence. Plague on day 3, and a second strain on day 10 | Epidemic waves, water acting as quarantine, and immunity and virulence evolving |
@@ -119,12 +122,13 @@ Each preset is a declarative `ScenarioDef` in `src/sim/presets.ts`. It sets the 
 
 Each agent has a stomach (hunger = 1 − food/maxFood), health, energy (stamina, restored by resting) and the food it carries, which it can share or deposit at camp.
 
-Every few ticks, and sooner when threatened, a utility-AI brain scores 14 actions and picks the best one: idle, wander, explore, forage, eat, rest, flee, attack, share, mate, socialize, go home, deposit and withdraw. The inspector shows the scores and a plain-language "thought".
+Every few ticks, and sooner when threatened, a utility-AI brain scores 14 actions and picks the best one: idle, wander, explore, forage, eat, rest, flee, attack, share, mate, socialize, go home, deposit and withdraw. The Agent tab shows the options it weighed and a plain-language "thought".
 
 Agents also have:
 
 - short memories of rich food spots (4) and dangerous places (3)
-- a planned route when the straight way is blocked and, when starving on spent land, a trek to greener land (see [Navigation and migration](#navigation-and-migration))
+- a planned route when the straight way is blocked (see [Navigation and migration](#navigation-and-migration))
+- a trek it keeps to through detours: to greener land when it is starving on spent land, or out to an enemy camp and home again on a raid
 - skills (forage, combat, social) that improve with practice
 - an emergent role (forager, warrior, caretaker or explorer), chosen by comparative advantage
 - a capped personal life log
@@ -145,7 +149,7 @@ A hungry agent on land grazed bare, with no camp store to fall back on, looks fa
 
 Route searches share a per-tick budget of 12,000 node expansions, with at most 10,000 for one search, and a search starts only when the tick can afford it. An agent refused for budget keeps walking while the way ahead is open, stops at the obstacle and tries again a few ticks later; after several refusals in a row it may overdraw the budget (one agent per tick). All agents share one object shape, so the route fields do not slow the hot loops. Routes are part of the save, so a loaded run follows the same waypoints.
 
-To watch this, select an agent with the Trails view toggle on. While the agent follows a planned route, the route appears as a dashed gold line with waypoints. The inspector says when the agent is following a route, working one out or migrating, and when it has no way there on foot.
+To watch this, select an agent with Trails and routes switched on in Layers. While the agent follows a planned route, the route appears as a dashed ochre line with dots at the waypoints. The Agent tab says when the agent is following a route, working one out, migrating or on a raid, and when it has no way there on foot.
 
 ### Genes and trade-offs
 
@@ -170,7 +174,7 @@ There are 12 genes, each in [0, 1], and `genetics.expressTraits` turns them into
 
 Two fertile adults produce a child. Its genes come from crossover with mild gene linkage, followed by Gaussian mutation (`mutationRate`, `mutationSize`). Close kin cannot mate.
 
-An agent is fertile when it is an adult and not senescent, off the post-birth cooldown, well fed (the stomach threshold depends on the fertility gene), rested and at least half healthy. The couple also needs a lush home range: the standing food on the tiles around them must be above a threshold, which is lower for high-fertility genomes. Grazed-down land, crowded camps included, therefore stops births long before famine, and this density dependence is what levels populations off. The inspector spells out which condition an agent is missing.
+An agent is fertile when it is an adult and not senescent, off the post-birth cooldown, well fed (the stomach threshold depends on the fertility gene), rested and at least half healthy. The couple also needs a lush home range: the standing food on the tiles around them must be above a threshold, which is lower for high-fertility genomes. Grazed-down land, crowded camps included, therefore stops births long before famine, and this density dependence is what levels populations off. The Agent tab spells out which condition an agent is missing.
 
 Mates must be within `mateCompatibility` of each other in genetic distance (the mean absolute gene difference, hue included). A low value causes reproductive isolation and speciation. A capped lineage registry tracks generations and family trees.
 
@@ -178,9 +182,13 @@ Mates must be within `mateCompatibility` of each other in genetic distance (the 
 
 Agents form relationships, and each agent keeps up to 12. A relationship has an affinity from −1 (enemy) to +1 (close friend) and a kinship flag (parent/child or sibling). Socializing and gifts raise affinity, and fights lower it. The genes, together with the global `aggressionBias` and `cooperationBias`, set how likely agents are to fight, steal or share.
 
-Competition and conflict come from traits. Each agent weighs every outsider it sees against four motives: food (robbing a carried load, or contesting a scarce patch someone is eating from), territory (outsiders on the tribe's land near camp), war or a personal grudge, and joining a friend's fight. It then weighs the odds (its own strength and allies in reach against the other side's band) and its boldness (aggression gene × bias, combat skill, health, and desperation when starving). Hostility is weaker toward genetically similar agents and allied tribes. Timid agents keep clear of fierce strangers, and badly hurt fighters flee. Tribes at war raid each other's stockpiles. Escalation saturates, and enmity cools when the sides stop meeting. Presets with gentle genomes stay peaceful, and the harsh ones fight.
+Competition and conflict come from traits. Each agent weighs every outsider it sees against four motives: food (robbing a carried load, or contesting a scarce patch someone is eating from), territory (outsiders on the tribe's land near camp), war or a personal grudge, and joining a friend's fight. It then weighs the odds (its own strength and allies in reach against the other side's band) and its boldness (aggression gene × bias, combat skill, health, and desperation when starving). Hostility is weaker toward genetically similar agents and allied tribes. Timid agents keep clear of fierce strangers, and badly hurt fighters flee. Escalation saturates, and enmity cools when the sides stop meeting. Presets with gentle genomes stay peaceful, and the harsh ones fight.
 
 Each tribe has a camp with a shared stockpile. Members deposit food there and withdraw it, and in cold weather the camp halves cold stress for members nearby. A tribe also tracks its territory (tiles controlled), roles, mean genes and relations with other tribes, from −1 (war) to +1 (alliance). Tribes split (fission) when they grow past ~120 members or spread far from camp, and daughter tribes start as friends of the parent. The members of a band under 5 merge into a larger neighboring tribe they like. A tribe goes extinct when its last member dies. Typical worlds hold roughly 5 to 15 living tribes per 1000 agents.
+
+Tribes at war raid each other's stockpiles. A tribe at war sends its bold, fit members against the enemy camp. A raid is worth less the farther they must walk, measured along the route they would take, across a ford if need be. A raider that sets out commits to the march: it keeps going through detours, sleeps where it stops at night and does not turn home early. It turns back when it is hurt or loaded, when the war ends, when it comes close enough to see that the enemy store is empty, or when the camp cannot be reached or the trek runs out. Then it carries any loot home. Members away on a raid neither pull their camp after them nor count toward a split.
+
+A preset can make two founding tribes old rivals with a starting relation. Their enmity cools much more slowly than other relations, passes to their daughter tribes and ends only when they make peace. Two Civilizations starts its two peoples at war this way.
 
 ### Ecology, seasons and weather
 
@@ -231,7 +239,7 @@ src/
     persistence.ts   save files: serialize, validate, repair
     spatial.ts       uniform-grid spatial hash; names.ts generates names
   render/          Canvas 2D: camera, cached terrain and vegetation layer, overlays, agents, disaster effects, minimap
-  ui/              app shell and frame loop, toolbar and sidebars, tools, population designer, charts, inspector, event log
+  ui/              app shell and frame loop, start screen, top bar, tools and their options, Layers menu, Settings, side panel (Overview, Agent, Events), population designer, charts
 tests/             vitest (node): a unit test per module plus smoke, determinism, invariants, long-run, perf, balance and spec tests
 scripts/           QA helpers and the Playwright browser smoke test
 release/           committed single-file build (artificial-life.html)
@@ -286,12 +294,13 @@ Replays are bit-exact within the same build and JavaScript engine. World generat
 | `tests/core-*.test.ts` | core audit regressions: population accounting at the cap, exact replay (also through a save file), hostile interventions and save files, full-state hash, world generation per preset |
 | `tests/behavior-*.test.ts` | behavior audit regressions: emergent conflict motives, raids, timid avoidance, reachability, deposit loops, grudges, diplomacy saturation, tribe sizes |
 | `tests/eco-*.test.ts` | ecology audit regressions: spatial cold snaps, regrowth from grazed land, the breeding range gate, seasonal stability, stats records |
-| `tests/ui-*.test.ts` | UI logic: brush previews match applied radii, day labels match the clock, contrast tokens |
+| `tests/ui-*.test.ts` | UI logic: brush previews match applied radii, day labels match the clock, contrast tokens, and the Overview tab's sentences match the simulation state |
 | `tests/lead-*.test.ts` | save/load continuity: mid-replay saves, pending interventions, diplomacy and epidemic event logs |
 | `tests/agent-shape.test.ts` | performance guard: live, routed, migrating and loaded agents all share createAgent's fast V8 hidden class (needs `--allow-natives-syntax`, set in `vitest.config.ts`) |
+| `tests/raid-two-civs.test.ts` | Two Civilizations raids: the two peoples start at war as old rivals; with seed 42 raiders cross the river at least 10 times within 12 days (the first within 3 days), plunder the foragers at least 3 times and both peoples survive; a save taken mid-raid continues identically |
 | `tests/route-planning.test.ts` | route planning: regions, A* through the only ford (every leg walkable), unreachable goals, the per-tick budget, crossing to the far bank, re-planning after a ford is painted over, thin walls near the goal, diagonal walls, a maze crossed with partial routes, starving migrants trekking to a lush far bank on 3 seeds (12 of 12 cross on each, 0 without routing), routes kept through land-to-land repaints, one agent shape, routes in saves, Plague Island routing |
-| `scripts/ui-audit.mjs` | Playwright: drives every visible control of the built app (231 checks: tools, events, experiments, parameters, overlays, save/load, inspector, shortcuts, layout at 3 sizes, contrast, FPS) and asserts real effects |
-| `scripts/browser-smoke.mjs` | loads `dist/index.html` (or `--url`) in headless Chromium and fails on console or page errors, failed requests or a blank canvas; toggles play/pause, presses a few shortcuts and saves `docs/screenshot.png` |
+| `scripts/ui-audit.mjs` | Playwright: drives the built app like a user, from the start screen through the top bar, every tool and its options, whole-map disasters, Layers, zoom, the hover card, the keyboard, the Overview, Agent and Events tabs, Settings, save and load, and notices, and asserts a real effect for each control. It also checks the layout at 1280×720, 1440×900 and 1920×1080, text contrast, the design rules (no gradients, glass, blur, glows or all-caps text, on the page or on the map) and the frame rate with about 1000 agents |
+| `scripts/browser-smoke.mjs` | loads `dist/index.html` (or `--file`, `--url`) in headless Chromium, picks Two Civilizations on the start screen, starts it, opens an agent in the Agent tab and saves a 1440×900 screenshot to `docs/screenshot.png`, then tries the transport controls and a few shortcuts. It fails on console or page errors, failed requests, a blank map, a world that runs before Start, or a run that does not start |
 
 Vitest hides the console output of passing tests. Add `--silent=false` to see the reports:
 
@@ -304,7 +313,7 @@ AL_LONGRUN_TICKS=5000 npx vitest run tests/longrun.test.ts --silent=false  # qui
 
 The environment knobs are `AL_INVARIANT_TICKS`, `AL_LONGRUN_TICKS`, `AL_LONGRUN_HEAP_MB`, `AL_PERF_BUDGET_MS`, `AL_BALANCE_DAYS`, `AL_BALANCE_SCENARIO` and `AL_SEED`.
 
-The browser smoke test needs Playwright with Chromium (`npm i -D playwright && npx playwright install chromium`). It accepts `--url <url>`, `--wait <ms>`, `--out <png>` and `--no-screenshot`.
+The browser scripts need Playwright with Chromium (`npm i -D playwright && npx playwright install chromium`, or a global install reachable through `NODE_PATH`). The smoke test accepts `--url <url>`, `--file <html>`, `--wait <ms>`, `--out <png>`, `--scale <n>` and `--no-screenshot`. The UI audit accepts `--url`, `--file`, `--only <regex>`, `--groups <regex>`, `--shots <dir>` and `--no-perf`.
 
 Recorded results are in [`docs/VERIFICATION.md`](docs/VERIFICATION.md).
 

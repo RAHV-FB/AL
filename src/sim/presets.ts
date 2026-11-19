@@ -99,7 +99,7 @@ export const SCENARIOS: ScenarioDef[] = [
       {
         tick: 4 * DAY,
         intervention: { kind: 'disaster', disaster: 'bloom', x: 800, y: 500, radius: 450, intensity: 0.8, duration: 900 },
-        note: 'Day 4: plants bloom across most of the island.',
+        note: 'Day 4: plants bloom across the centre of the island.',
       },
     ],
   },
@@ -377,7 +377,7 @@ export const SCENARIOS: ScenarioDef[] = [
       'Two hundred small, peaceful foragers share the land with a pack of twelve giant, aggressive raiders who are poor at gathering plants. A second pack of ten appears on day 6. ' +
       'Once food runs short, hungry raiders hunt the foragers, and the run shows whether numbers and speed keep the foragers alive.',
     lookFor: [
-      'Attacks starting as plant food grows scarce (the fights count climbs from around day 5)',
+      'Attacks starting as plant food grows scarce, from around day 5',
       'Raider numbers rising and falling behind forager numbers, as in predator and prey cycles',
       'Foragers evolving higher speed and perception, or banding tightly together for safety',
       'Raiders starving when prey is scarce or well defended',

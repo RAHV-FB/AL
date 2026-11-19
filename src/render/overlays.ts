@@ -4,6 +4,8 @@
  *   food, fertility, climate  per-tile colour from flat ramps
  *   density, disease          agents counted per tile and spread over the neighbouring tiles
  *   territory                 the owning tribe's colour per tile plus crisp border lines
+ * Values are grouped into the classes the legend shows (five steps; climate: two slower, two faster),
+ * so every colour on the map is one of the legend's colours and smooth fields read as clear bands.
  * Every overlay is a 1 texel per tile image drawn without smoothing, so tiles stay sharp at any
  * zoom. Rebuilt at a low cadence (and only when the sim tick advanced); drawing is a single blit.
  */
@@ -63,6 +65,18 @@ const RAMP = {
     [1, 84, 150, 78, 190],
   ]),
 };
+
+/** Ramp offsets (into a 256-entry RGBA table) of the legend's five classes: the colour at each class centre. */
+const CLASS_OFS = [0, 1, 2, 3, 4].map((k) => Math.round(((k + 0.5) / 5) * 255) * 4);
+
+/** Offset of the class that holds v (0..1): five equal classes, as in the legend. */
+function classOfs(v: number): number {
+  return CLASS_OFS[v >= 1 ? 4 : v > 0 ? Math.floor(v * 5) : 0];
+}
+
+/** Climate classes: mild and strong, the legend's inner and outer steps on each side of normal. */
+const CLIMATE_MILD = Math.round(0.4 * 255) * 4;
+const CLIMATE_STRONG = Math.round(0.8 * 255) * 4;
 
 function canvas(w: number, h: number): HTMLCanvasElement {
   const c = document.createElement('canvas');
@@ -136,8 +150,7 @@ export class OverlayLayer {
     const d = this.tileImg.data;
     const N = W * H;
     const terr = world.terrain;
-    const put = (o: number, lut: Ramp, v: number) => {
-      const li = ((v * 255) | 0) * 4;
+    const put = (o: number, lut: Ramp, li: number) => {
       d[o] = lut[li];
       d[o + 1] = lut[li + 1];
       d[o + 2] = lut[li + 2];
@@ -155,7 +168,7 @@ export class OverlayLayer {
         }
         let v = food[i] / cap;
         v = v > 0 ? Math.sqrt(v > 1 ? 1 : v) : 0;
-        put(o, RAMP.food, v);
+        put(o, RAMP.food, classOfs(v));
       }
     } else if (kind === 'fertility') {
       const fert = world.fertility;
@@ -168,19 +181,22 @@ export class OverlayLayer {
         }
         let v = fert[i];
         v = v > 1 ? 1 : v > 0 ? v : 0;
-        put(o, RAMP.fertility, v);
+        put(o, RAMP.fertility, classOfs(v));
       }
     } else if (kind === 'climate') {
       const cm = world.climateMod;
       for (let i = 0; i < N; i++) {
         const o = i * 4;
         const v = cm[i];
-        if (!(Math.abs(v - 1) > 0.02)) {
+        const t = terr[i];
+        // nothing grows on water or walls, so their regrowth rate means nothing
+        if (!(Math.abs(v - 1) > 0.02) || t === TERRAIN.DeepWater || t === TERRAIN.Water || t === TERRAIN.Wall) {
           d[o + 3] = 0;
           continue;
         }
-        if (v < 1) put(o, RAMP.climateDown, Math.min(1, 1 - v));
-        else put(o, RAMP.climateUp, Math.min(1, (v - 1) / 1.5));
+        // strong: regrowth at half or less, or at 1.75x or more
+        if (v < 1) put(o, RAMP.climateDown, 1 - v >= 0.5 ? CLIMATE_STRONG : CLIMATE_MILD);
+        else put(o, RAMP.climateUp, v - 1 >= 0.75 ? CLIMATE_STRONG : CLIMATE_MILD);
       }
     }
     this.tileCtx.putImageData(this.tileImg, 0, 0);
@@ -237,13 +253,19 @@ export class OverlayLayer {
     for (let i = 0; i < N; i++) if (g[i] > max) max = g[i];
     const norm = 1 / Math.max(disease ? 0.08 : 0.25, max);
     const lut = disease ? RAMP.disease : RAMP.density;
+    // below this a tile stays clear (a lone agent spread over its neighbours does not tint the land)
+    const floor = disease ? 0.1 : 0.04;
     const d = this.tileImg!.data;
     for (let i = 0; i < N; i++) {
       let v = g[i] * norm;
       v = v > 1 ? 1 : v;
       if (disease) v = Math.sqrt(v);
-      const li = ((v * 255) | 0) * 4;
       const o = i * 4;
+      if (v < floor) {
+        d[o + 3] = 0;
+        continue;
+      }
+      const li = classOfs(v);
       d[o] = lut[li];
       d[o + 1] = lut[li + 1];
       d[o + 2] = lut[li + 2];
@@ -448,9 +470,16 @@ export class OverlayLayer {
     const steps = 5;
     for (let s = 0; s < steps; s++) {
       const t = (s + 0.5) / steps;
-      ctx.fillStyle = stepColor(spec.ramp, t);
       const sx = x + pad + Math.round((s * bw) / steps);
       const ex = x + pad + Math.round(((s + 1) * bw) / steps);
+      if (kind === 'climate' && s === 2) {
+        // normal regrowth has no colour on the map: an empty box
+        ctx.strokeStyle = C_BORDER;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(sx + 0.5, by + 0.5, ex - sx - 1, 7);
+        continue;
+      }
+      ctx.fillStyle = stepColor(spec.ramp, t);
       ctx.fillRect(sx, by, ex - sx, 8);
     }
     ctx.font = `11px ${FONT}`;

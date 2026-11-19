@@ -17,7 +17,7 @@ export const GENE_LABEL: Record<GeneName, string> = {
   longevity: 'Longevity',
   immunity: 'Immunity',
   efficiency: 'Efficiency',
-  hue: 'Colour',
+  hue: 'Color',
 };
 
 export const GENE_HELP: Record<GeneName, string> = {
@@ -32,7 +32,7 @@ export const GENE_HELP: Record<GeneName, string> = {
   longevity: 'How long it can live. Costs upkeep.',
   immunity: 'Resistance to disease. Costs upkeep.',
   efficiency: 'How much food it gets from each bite.',
-  hue: 'Body colour only, with no effect on survival. Use it to follow this group and its descendants on the map. It drifts over the generations.',
+  hue: 'Body color only, with no effect on survival. Use it to follow this group and its descendants on the map. It drifts over the generations.',
 };
 
 interface Preset {
@@ -49,10 +49,10 @@ const PRESETS: Preset[] = [
   { id: 'raiders', name: 'Warlike raiders', tip: 'Big, aggressive and selfish. They take food by force.', genes: { speed: 0.62, size: 0.75, perception: 0.6, metabolism: 0.65, aggression: 0.96, sociability: 0.5, altruism: 0.08, fertility: 0.5, longevity: 0.4, immunity: 0.5, efficiency: 0.45, hue: 0.0 }, spread: 0.06 },
   { id: 'scouts', name: 'Swift scouts', tip: 'Small, very fast explorers who see far. Good at finding food, weak in a fight.', genes: { speed: 0.95, size: 0.28, perception: 0.92, metabolism: 0.6, aggression: 0.25, sociability: 0.35, altruism: 0.4, fertility: 0.55, longevity: 0.4, immunity: 0.4, efficiency: 0.55, hue: 0.56 }, spread: 0.06 },
   { id: 'giants', name: 'Hardy giants', tip: 'Huge, slow, long-lived and resistant to disease, with few children.', genes: { speed: 0.3, size: 0.95, perception: 0.45, metabolism: 0.35, aggression: 0.5, sociability: 0.5, altruism: 0.5, fertility: 0.28, longevity: 0.88, immunity: 0.88, efficiency: 0.6, hue: 0.1 }, spread: 0.06 },
-  { id: 'random', name: 'Random', tip: 'Random gene values and colour.', genes: {}, spread: 0.08 },
+  { id: 'random', name: 'Random', tip: 'Random gene values and color.', genes: {}, spread: 0.08 },
 ];
 
-/** Body colour used for the designer swatch (same formula as tribe colours on the map). */
+/** Body color used for the designer swatch (same formula as tribe colours on the map). */
 const hueCss = (g: number): string => `hsl(${Math.round(g * 360)}, 45%, 58%)`;
 
 export class PopulationDesigner {

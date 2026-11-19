@@ -15,7 +15,7 @@ Summary: 75 requirements traced. 73 are Done, 2 are Partial and none are Missing
 | E3 | Single distributable HTML that works without an HTTP server | Done | `vite.config.ts:6-7` (`base: './'`, `viteSingleFile`) | `release/artificial-life.html` is byte-identical to a fresh build of `7d0a909`. Over `file://` it passes the browser smoke test (2026-11-18, `docs/VERIFICATION.md`). |
 | E4 | Simulation separated from rendering and UI | Done | `src/sim/*` (no DOM); `src/ui/app.ts:496` (`enqueue`) | The simulation runs headless in Node. Every UI change to the world goes through `sim.enqueue`. |
 | E5 | Deterministic seeded randomness | Done | `src/sim/rng.ts:5` (sfc32); `src/sim/simulation.ts:98-99` | Separate world and simulation RNGs. Tested in `tests/determinism.test.ts`, including a spy that checks `Math.random` is never called. |
-| E6 | Smooth with 300 to 1,000 agents | Done | `src/ui/app.ts:20-25` (speeds, 12 ms step budget); `tests/perf.bench.test.ts` | 4.47 ms per tick at 1,000 agents in the integration run and 3.46 ms in the latest recorded run (`docs/VERIFICATION.md`). A "CPU-limited" badge appears when the speed cannot be met. Rendering time is not benchmarked headlessly. |
+| E6 | Smooth with 300 to 1,000 agents | Done | `src/ui/app.ts:20-25` (speeds, 12 ms step budget); `tests/perf.bench.test.ts` | 4.47 ms per tick at 1,000 agents in the integration run and 3.46 ms in the latest recorded run (`docs/VERIFICATION.md`). When the speed cannot be met, the speed control in the top bar is marked and its tooltip says so. Rendering time is not benchmarked headlessly. |
 | E7 | Save and load via downloadable JSON, with validation | Done | `src/ui/app.ts` (`save`, `loadFile`, drag and drop); `src/sim/persistence.ts` | Untrusted files are size-limited, version-checked and sanitized, and repairs are shown in a toast. Saves include pending interventions, an unfinished replay and the bookkeeping for the epidemic and diplomacy logs, so saving, loading and continuing matches the uninterrupted run exactly (`tests/lead-*.test.ts`). |
 | E8 | Tests for invariants | Done | `tests/invariants.test.ts`; `scripts/qa-helpers.ts:74` (`checkInvariants`) | Every preset runs 3,000 ticks, plus an intervention barrage. |
 | E9 | Determinism check with identical seeds and interventions | Done | `tests/determinism.test.ts` | Checkpoint hashes, intervention-log replay, and save, load and continue. |
@@ -86,11 +86,11 @@ Summary: 75 requirements traced. 73 are Done, 2 are Partial and none are Missing
 | X6 | Add and remove food | Done | `tools.ts:32-33`, applied in `interventions.ts:270,285` | |
 | X7 | Modify terrain and build obstacles | Done | `tools.ts:35`, applied in `interventions.ts:316` (`paintTerrain`, walls) | Agents trapped by new terrain are moved to open ground. |
 | X8 | Change mutation, reproduction and difficulty | Done | `controls.ts:240-311` (12 sliders and 4 toggles), applied by `setConfig` (`interventions.ts:404`) | Changes are clamped to `PARAM_SPECS` ranges and recorded. |
-| X9 | Trigger disasters, epidemics, droughts, abundance | Done | `tools.ts:36` (local); `controls.ts:40` (global events); both applied in `interventions.ts:371` | |
+| X9 | Trigger disasters, epidemics, droughts, abundance | Done | `tools.ts:36` (local); `controls.ts:40` (global events); both applied in `interventions.ts:371` | Since the 2026-11-19 redesign the Disaster tool also starts any disaster except a meteor on the whole map (`wholeMap` in `controls.ts`), which replaced the separate global events. |
 | X10 | Competing tribes in different map regions | Done | Designer tribe choice, applied in `interventions.ts:219-244`; `two-civs` preset | |
 | X11 | Observe long-term consequences | Done | speeds up to 64× and Max; `ui/analytics.ts:74` (All, 20 d, 5 d and 1 d ranges); stats downsampling | |
 | X12 | Restart with the same seed | Done | `controls.ts:210` calls `app.ts:396` (`restart`); `app.ts:400` (`replay`) | Gap G2: a replay is incomplete once the intervention log passes 5,000 entries, and the app warns when that happens. |
-| X13 | Clear explanation of every intervention | Done | `interventions.ts:29` (`INTERVENTION_HELP`); `tools.ts:107` (`toolHelp`); tooltips on every control; the "You" category in the event log | |
+| X13 | Clear explanation of every intervention | Done | `interventions.ts:29` (`INTERVENTION_HELP`); `tools.ts:107` (`toolHelp`); tooltips on every control; the event log's category for your interventions | |
 
 ## Presets
 
@@ -110,7 +110,7 @@ Summary: 75 requirements traced. 73 are Done, 2 are Partial and none are Missing
 | U1 | Large animated canvas, dark scientific look | Done | `render/renderer.ts:3` (frame order); `ui/styles.css` | |
 | U2 | Agents, resources and terrain easy to tell apart | Done | `render/terrainLayer.ts` (vegetation follows food); `render/agents.ts` | |
 | U3 | Overlays: food, density, territory, environment | Done | `controls.ts:13` (`OVERLAYS`); `render/overlays.ts` | Also fertility, disease and climate. |
-| U4 | Real-time population stats | Done | `app.ts:1196` (top bar); `ui/analytics.ts:175-182` (KPI tiles) | |
+| U4 | Real-time population stats | Done | `app.ts:1196` (top bar); `ui/analytics.ts:175-182` (KPI tiles) | Since the 2026-11-19 redesign these are the key numbers in the Overview tab. |
 | U5 | Birth and death rates | Done | `ui/analytics.ts:205` | Plus deaths by cause (`:240`). |
 | U6 | Average health and energy | Done | `ui/analytics.ts:216` | |
 | U7 | Resource availability | Done | `ui/analytics.ts:227` (total food, average fertility) | |
@@ -167,7 +167,7 @@ At baseline its "look for" text (`presets.ts:118`) said efficiency rises while s
 
 The working tree kept changing while the other auditors tuned the balance. At 00:10 UTC both seeds ended day 12 with 15 agents; at 00:21 UTC they ended with 15 and 8, after peaks of 256 and 232. In both measurements the speed gene still rose (to between 0.66 and 0.82), efficiency did not rise consistently (between 0.30 and 0.56 on day 12), and the loners formed 2 to 4 tribes.
 
-Fixed on 2026-11-19. The preset text now describes the measured selection (faster, leaner, more fertile survivors), and the rebalanced ecology keeps the preset viable: in the 12-day report for seed 42 the population peaks at 280 and ends at 68, and 20-day runs survive on seeds 42, 1, 7 and 99.
+Fixed on 2026-11-19. The preset text now describes the measured selection (faster, leaner, more fertile survivors), and the rebalanced ecology keeps the preset viable: in the 12-day report for seed 42 the population peaked at 280 and ended at 68, and 20-day runs survived on seeds 42, 1, 7 and 99.
 
 ### G6: Single resource type (P3, by design)
 
@@ -175,7 +175,7 @@ Food is the only resource. Exchange is limited to gifts and the shared tribe sto
 
 ### G7: Carrying capacity was not displayed (P4, done)
 
-`estimateCarryingCapacity` (`ecology.ts:479`) could be shown as a reference line in the population chart. Done on 2026-11-19: the Food tile in the Stats panel shows "supports ≤ N", an upper bound from `estimateCarryingCapacity`.
+`estimateCarryingCapacity` (`ecology.ts:479`) could be shown as a reference line in the population chart. Done on 2026-11-19: the Food tile in the Stats panel showed "supports ≤ N", an upper bound from `estimateCarryingCapacity`. Since the redesign the Overview tab says instead how many agents the regrowth could feed at most, from the same estimate.
 
 ### G8: The release copy was manual (P4, done)
 

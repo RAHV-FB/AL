@@ -76,6 +76,8 @@ const STRONG_FRIEND = 0.5;
 const STRONG_ENEMY = -0.5;
 /** Lines between other agents longer than this (world units) are left out. */
 const MAX_LINE = 160;
+/** Legend row for the territory edges drawn at close zoom. */
+const EDGE_LABEL = 'Territory edge';
 
 /** Kinds of ties between agents (index into TIE_COLOR). */
 const FAMILY = 0;
@@ -125,6 +127,10 @@ export class Renderer {
   private camZ = 1;
   private readonly toSX = (x: number) => (x - this.camX) * this.camZ + this.camera.viewW / 2;
   private readonly toSY = (y: number) => (y - this.camY) * this.camZ + this.camera.viewH / 2;
+  /** Keeps agent labels clear of a label box (CSS px) written by another layer. */
+  private readonly reserveLabel = (x0: number, y0: number, x1: number, y1: number) => {
+    this.painter.reserve(x0, y0, x1, y1);
+  };
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -253,7 +259,7 @@ export class Renderer {
     this.overlays.draw(ctx, sim, view.overlay, z);
     ctx.globalAlpha = 1;
     this.fx.drawWorld(ctx, time, z, b.x0, b.y0, b.x1, b.y1, WW, WH);
-    if (view.showCamps && z >= DETAIL_ZOOM && view.overlay !== 'territory') this.drawTerritoryEdges(ctx, sim, z);
+    const edges = view.showCamps && z >= DETAIL_ZOOM && view.overlay !== 'territory' && this.drawTerritoryEdges(ctx, sim, z);
 
     const sel = view.selectedId >= 0 ? sim.getAgent(view.selectedId) : undefined;
     this.updateTrail(sel);
@@ -274,16 +280,16 @@ export class Renderer {
     // ---- screen space (CSS px)
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.globalAlpha = 1;
+    const ins = view.insets ?? NO_INSETS;
     this.painter.beginLabels();
     this.painter.drawSelectedName(ctx, sim, z, cam.x, cam.y, vw, vh, view.showLabels, sel ? sel.id : -1);
     if (view.showCamps) this.drawCampLabels(ctx, sim, z, vw, vh);
-    this.fx.drawLabels(ctx, time, this.toSX, this.toSY, z, vw, vh);
+    this.fx.drawLabels(ctx, time, this.toSX, this.toSY, z, vw, vh, vr, WW, WH, ins.top, this.reserveLabel);
     const hov = view.hoverId >= 0 && view.hoverId !== view.selectedId ? sim.getAgent(view.hoverId) : undefined;
     if (hov) this.drawRing(ctx, hov, false);
     if (sel) this.drawRing(ctx, sel, true);
     this.painter.drawScreen(ctx, sim, z, cam.x, cam.y, vw, vh, view.showLabels, sel ? sel.id : -1, night);
     this.stats.labels = this.painter.labelsDrawn;
-    const ins = view.insets ?? NO_INSETS;
     if (sel && this.tieAgents.length) this.drawTieMarkers(ctx, sel, vw, vh, ins);
     this.fx.drawScreen(ctx, time, vw, vh, ins);
 
@@ -304,7 +310,7 @@ export class Renderer {
       this.minimap.update(sim, this.terrain, this.fx, this.frame, time, mw, mh, dpr);
       this.minimap.draw(ctx, cam, sim, ins.left + 14, vh - ins.bottom - 14 - mh, mw, mh);
     } else this.minimap.rect.visible = false;
-    this.drawConnectionsLegend(ctx, lines > 0, ins, vh);
+    this.drawConnectionsLegend(ctx, lines > 0, edges, ins, vh);
 
     const ms = performance.now() - t0;
     this.stats.drawMs = this.stats.drawMs > 0 ? this.stats.drawMs * 0.9 + ms * 0.1 : ms;
@@ -440,21 +446,21 @@ export class Renderer {
 
   /**
    * Territory edges of the visible tiles (close zoom, without the territory overlay): a thin line in each
-   * tribe's colour on its own side of the border.
+   * tribe's colour on its own side of the border. Returns true when any edge was drawn.
    */
-  private drawTerritoryEdges(ctx: CanvasRenderingContext2D, sim: Simulation, z: number): void {
+  private drawTerritoryEdges(ctx: CanvasRenderingContext2D, sim: Simulation, z: number): boolean {
     const world = sim.state.world;
     const W = world.width;
     const H = world.height;
     const ter = world.territory;
-    if (!ter || ter.length !== W * H) return;
+    if (!ter || ter.length !== W * H) return false;
     const ts = world.tileSize;
     const vr = this.viewRect;
     const tx0 = Math.max(0, Math.floor(vr.x0 / ts) - 1);
     const ty0 = Math.max(0, Math.floor(vr.y0 / ts) - 1);
     const tx1 = Math.min(W - 1, Math.floor(vr.x1 / ts) + 1);
     const ty1 = Math.min(H - 1, Math.floor(vr.y1 / ts) + 1);
-    if (tx1 < tx0 || ty1 < ty0) return;
+    if (tx1 < tx0 || ty1 < ty0) return false;
     const segs = this.edgeSegs;
     for (const v of segs.values()) v.length = 0;
     const off = 1.6 / z;
@@ -491,12 +497,13 @@ export class Renderer {
         }
       }
     }
-    if (!any) return;
+    if (!any) return false;
     // solid and faint, so they never read as the dashed enemy lines
     ctx.lineCap = 'butt';
     ctx.lineWidth = 1 / z;
     ctx.setLineDash(this.noDash);
     ctx.globalAlpha = 0.55;
+    let drawn = false;
     for (const [id, v] of segs) {
       if (!v.length) continue;
       const tr = sim.getTribe(id);
@@ -508,9 +515,11 @@ export class Renderer {
         ctx.lineTo(v[i + 2], v[i + 3]);
       }
       ctx.stroke();
+      drawn = true;
     }
     ctx.globalAlpha = 1;
     ctx.setLineDash(this.noDash);
+    return drawn;
   }
 
   // ------------------------------------------------------------ connections
@@ -737,30 +746,45 @@ export class Renderer {
     }
   }
 
-  /** Legend for the line styles, above the minimap, while connection lines are on the map (screen space). */
-  private drawConnectionsLegend(ctx: CanvasRenderingContext2D, show: boolean, ins: { top: number; right: number; bottom: number; left: number }, vh: number): void {
+  /**
+   * Legend for the lines on the map, above the minimap (screen space), while connection lines are drawn:
+   * the three connection styles, plus the territory edge when territory edges are on the map too.
+   */
+  private drawConnectionsLegend(
+    ctx: CanvasRenderingContext2D,
+    lines: boolean,
+    edges: boolean,
+    ins: { top: number; right: number; bottom: number; left: number },
+    vh: number,
+  ): void {
     const r = this.connectionsLegendRect;
     r.visible = false;
-    if (!show) return;
+    if (!lines) return;
     const pad = 8;
     const row = 17;
-    const w = 112;
-    const h = pad * 2 + 14 + row * 3;
+    const title = 14;
+    const rows = 3 + (edges ? 1 : 0);
+    const gap = edges ? 5 : 0;
+    ctx.font = `400 11px ${FONT}`;
+    let tw = ctx.measureText('Enemies').width;
+    if (edges) tw = Math.max(tw, ctx.measureText(EDGE_LABEL).width);
+    const w = Math.max(112, Math.ceil(pad + 30 + tw + pad + 2));
+    const h = pad * 2 + title + row * rows + gap;
     const mm = this.minimap.rect;
     const bottom = mm.visible ? mm.y - 4 - 8 : vh - ins.bottom - 14;
     const x = ins.left + 14 - (mm.visible ? 4 : 0);
     const y = bottom - h;
     if (y < ins.top + 8) return;
     flatPanel(ctx, x, y, w, h);
-    ctx.font = `600 11px ${FONT}`;
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'left';
+    ctx.font = `600 11px ${FONT}`;
     ctx.fillStyle = PAL.text;
     ctx.fillText('Connections', x + pad, y + pad + 6);
     const labels = ['Family', 'Friends', 'Enemies'];
     ctx.font = `400 11px ${FONT}`;
     for (let i = 0; i < 3; i++) {
-      const yy = y + pad + 14 + row * i + row / 2 + 1;
+      const yy = y + pad + title + row * i + row / 2 + 1;
       ctx.beginPath();
       ctx.moveTo(x + pad, yy);
       ctx.lineTo(x + pad + 22, yy);
@@ -776,6 +800,27 @@ export class Renderer {
       ctx.setLineDash(this.noDash);
       ctx.fillStyle = PAL.muted;
       ctx.fillText(labels[i], x + pad + 30, yy);
+    }
+    if (edges) {
+      // a short run of tile edges, the shape territory edges have on the map
+      const yy = y + pad + title + row * 3 + gap + row / 2 + 1;
+      const x0 = Math.round(x + pad) + 0.5;
+      const y0 = Math.round(yy) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(x0, y0 + 4);
+      ctx.lineTo(x0 + 7, y0 + 4);
+      ctx.lineTo(x0 + 7, y0);
+      ctx.lineTo(x0 + 15, y0);
+      ctx.lineTo(x0 + 15, y0 - 4);
+      ctx.lineTo(x0 + 22, y0 - 4);
+      ctx.strokeStyle = PAL.muted;
+      ctx.lineWidth = 1;
+      ctx.lineCap = 'butt';
+      ctx.lineJoin = 'miter';
+      ctx.stroke();
+      ctx.font = `400 11px ${FONT}`;
+      ctx.fillStyle = PAL.muted;
+      ctx.fillText(EDGE_LABEL, x + pad + 30, yy);
     }
     ctx.textBaseline = 'alphabetic';
     r.x = x;

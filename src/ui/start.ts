@@ -59,7 +59,7 @@ export function buildStartScreen(handlers: StartHandlers): StartScreen {
     list.append(entry);
   }
 
-  // details of the selected experiment open under its row
+  // details of the selected experiment, under the whole list so every experiment stays in view
   const detail = h('div', { class: 'st-detail', 'aria-live': 'polite' });
   const seedInput = h('input', { type: 'text', inputmode: 'numeric', class: 'text seed-input', maxlength: 10, 'aria-label': 'Seed', id: 'st-seed', autocomplete: 'off', spellcheck: 'false' });
   const seedNote = h('p', { class: 'st-note' });
@@ -124,6 +124,8 @@ export function buildStartScreen(handlers: StartHandlers): StartScreen {
     const look = (sc.lookFor ?? []).slice(0, 4);
     fill(
       detail,
+      h('h2', { class: 'st-name' }, sc.name),
+      sc.tagline ? h('p', { class: 'st-tagline' }, plainText(sc.tagline)) : null,
       sc.description ? h('p', { class: 'st-desc' }, plainText(sc.description)) : null,
       look.length ? h('h3', null, 'What to watch for') : null,
       look.length ? h('ul', { class: 'st-look' }, ...look.map((l) => h('li', null, plainText(l)))) : null,
@@ -140,14 +142,28 @@ export function buildStartScreen(handlers: StartHandlers): StartScreen {
       entries.get(id)?.classList.toggle('on', on);
     }
     paintDetail();
-    entries.get(sc.id)?.append(detail);
-    window.setTimeout(() => entries.get(sc.id)?.scrollIntoView({ block: 'nearest' }), 0);
+    window.setTimeout(() => reveal(sc), 0);
     if (notify) {
       window.clearTimeout(seedTimer);
       const v = readSeed();
       lastSeed = v;
       handlers.onPick(sc, v);
     }
+  };
+
+  // keep the selected row in view; the first one scrolls to the top so the heading shows
+  const scroll = h('div', { class: 'st-scroll' }, h('h3', { class: 'st-label' }, 'Experiments'), list, detail);
+  const reveal = (sc: ScenarioDef) => {
+    const entry = entries.get(sc.id);
+    if (!entry || !scroll.isConnected) return;
+    if (SCENARIOS[0]?.id === sc.id) {
+      scroll.scrollTop = 0;
+      return;
+    }
+    const er = entry.getBoundingClientRect();
+    const br = scroll.getBoundingClientRect();
+    if (er.top < br.top) scroll.scrollTop += er.top - br.top - 6;
+    else if (er.bottom > br.bottom) scroll.scrollTop += er.bottom - br.bottom + 6;
   };
 
   // arrow keys move through the list
@@ -170,7 +186,7 @@ export function buildStartScreen(handlers: StartHandlers): StartScreen {
       h('div', { class: 'st-brand' }, icon('logo', 22), h('h1', null, 'Artificial Life')),
       h('p', { class: 'st-lead' }, 'A simulated world where creatures with genes and needs forage, raise families, form tribes, fight and evolve.'),
     ),
-    h('div', { class: 'st-scroll' }, h('h3', { class: 'st-label' }, 'Experiments'), list),
+    scroll,
     h(
       'div',
       { class: 'st-foot' },

@@ -111,11 +111,30 @@ export class DisasterFx {
     return a * (0.6 + 0.4 * inten);
   }
 
-  /** World-space marks. ctx must be in world space; (x0,y0)-(x1,y1) is the visible world rectangle. */
+  /**
+   * World-space marks, kept inside the world rectangle. ctx must be in world space; (x0,y0)-(x1,y1) is the
+   * visible world rectangle.
+   */
   drawWorld(ctx: CanvasRenderingContext2D, time: number, zoom: number, x0: number, y0: number, x1: number, y1: number, worldW: number, worldH: number): void {
     this.visible = 0;
     if (!this.tracked.size) return;
     const px = 1 / zoom;
+    // a disaster near the edge must not spill its tint and outline over the empty canvas around the world
+    let clip = false;
+    for (const t of this.tracked.values()) {
+      const d = t.d;
+      const R = d.radius;
+      if (R > 0 && (d.x - R < 0 || d.y - R < 0 || d.x + R > worldW || d.y + R > worldH)) {
+        clip = true;
+        break;
+      }
+    }
+    if (clip) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, worldW, worldH);
+      ctx.clip();
+    }
     ctx.lineCap = 'butt';
     for (const t of this.tracked.values()) {
       const d = t.d;
@@ -172,6 +191,7 @@ export class DisasterFx {
       if (dash) ctx.setLineDash(this.noDash);
     }
     ctx.globalAlpha = 1;
+    if (clip) ctx.restore();
   }
 
   /** Sparse diagonal hatching clipped to a circle (analytic chords, no clip path). */
@@ -241,28 +261,76 @@ export class DisasterFx {
     ctx.lineCap = 'butt';
   }
 
-  /** Labels above local disasters (screen space, CSS px). */
-  drawLabels(ctx: CanvasRenderingContext2D, time: number, toSX: (x: number) => number, toSY: (y: number) => number, zoom: number, viewW: number, viewH: number): void {
+  /**
+   * Labels of local disasters (screen space, CSS px): above the top of the mark, or, when that is above the
+   * map area (zoomed in inside a disaster), just inside the top of the map area where it crosses the mark.
+   * `view` is the visible world rectangle, `top` the first free CSS px row of the map area. `reserve`
+   * records each label box so agent labels keep clear of it.
+   */
+  drawLabels(
+    ctx: CanvasRenderingContext2D,
+    time: number,
+    toSX: (x: number) => number,
+    toSY: (y: number) => number,
+    zoom: number,
+    viewW: number,
+    viewH: number,
+    view?: { x0: number; y0: number; x1: number; y1: number },
+    worldW = Infinity,
+    worldH = Infinity,
+    top = 0,
+    reserve?: (x0: number, y0: number, x1: number, y1: number) => void,
+  ): void {
     if (!this.tracked.size || zoom < 0.3) return;
     ctx.font = `500 12px ${FONT}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'bottom';
     ctx.lineJoin = 'round';
+    // inside labels go below the controls at the top of the map and below any whole-map notes
+    let notes = 0;
+    for (const t of this.tracked.values()) if (!(t.d.radius > 0) && this.alphaOf(t, time) >= 0.05) notes++;
+    const inside = top + 62 + 32 * notes;
     for (const t of this.tracked.values()) {
       const d = t.d;
-      if (!(d.radius > 0)) continue;
-      const sx = toSX(d.x);
-      const sy = toSY(d.y - d.radius) - 5;
-      if (sx < -80 || sx > viewW + 80 || sy < 14 || sy > viewH + 40) continue;
+      const R = d.radius;
+      if (!(R > 0)) continue;
       const A = this.alphaOf(t, time);
       if (A < 0.05) continue;
       const text = DISASTER_LABEL[d.kind] ?? d.kind;
+      // the top of the mark inside the world
+      let sx = toSX(Math.max(0, Math.min(worldW, d.x)));
+      let sy = toSY(Math.max(0, d.y - R)) - 5;
+      if (sy < top + 14) {
+        // the top is above the map area: write the label inside the mark, at the top of the map area
+        if (!view) continue;
+        sy = inside;
+        const wy = view.y0 + (sy - 14) / zoom;
+        const dy = wy - d.y;
+        if (Math.abs(dy) >= R || wy < 0 || wy > worldH) continue;
+        const half = (ctx.measureText(text).width / 2 + 10) / zoom;
+        const hw = Math.sqrt(R * R - dy * dy);
+        const lo = Math.max(d.x - hw + half, view.x0 + half + 8 / zoom, half);
+        const hi = Math.min(d.x + hw - half, view.x1 - half - 8 / zoom, worldW - half);
+        if (lo > hi) continue;
+        sx = toSX(Math.max(lo, Math.min(hi, d.x)));
+      } else {
+        if (sx < -80 || sx > viewW + 80 || sy > viewH + 40) continue;
+        // keep the label on the canvas, still above the mark
+        const half = ctx.measureText(text).width / 2 + 4;
+        const lo = Math.max(half, toSX(d.x - R));
+        const hi = Math.min(viewW - half, toSX(d.x + R));
+        if (lo <= hi) sx = Math.max(lo, Math.min(hi, sx));
+      }
       ctx.globalAlpha = Math.min(1, A * 1.2);
       ctx.strokeStyle = PAL.ink;
       ctx.lineWidth = 3.2;
       ctx.strokeText(text, sx, sy);
       ctx.fillStyle = PAL.text;
       ctx.fillText(text, sx, sy);
+      if (reserve) {
+        const w = ctx.measureText(text).width / 2 + 3;
+        reserve(sx - w, sy - 16, sx + w, sy + 1);
+      }
     }
     ctx.globalAlpha = 1;
     ctx.textAlign = 'left';

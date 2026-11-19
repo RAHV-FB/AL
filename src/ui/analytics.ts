@@ -835,10 +835,12 @@ export function createAnalyticsPanel(container: HTMLElement, opts: AnalyticsPane
     const sum = currentSummary(s);
     setText(kPop.value, fmtInt(sum.population));
     kPop.root.dataset.tip = `Agents alive now, and the recent trend. The highest so far was ${fmtInt(sum.peakPopulation)}, on day ${dayOfTick(s, sum.peakTick)}.`;
-    setText(kBirths.value, rateFmt(sum.birthsPerDay));
-    kBirths.root.dataset.tip = `Births over the last day. ${fmtInt(sum.totalBirths)} since the start.`;
-    setText(kDeaths.value, rateFmt(sum.deathsPerDay));
-    kDeaths.root.dataset.tip = `Deaths over the last day. ${fmtInt(sum.totalDeaths)} since the start.`;
+    // in the first hours a rate per day would be extrapolated from a few ticks: show the counts so far
+    const young = s.state.tick < Math.max(1, s.config.dayLength || 600) / 4;
+    setText(kBirths.value, young ? `${fmtInt(sum.totalBirths)} so far` : rateFmt(sum.birthsPerDay));
+    kBirths.root.dataset.tip = young ? 'Births since the start. The rate per day shows once the run is a few hours old.' : `Births over the last day. ${fmtInt(sum.totalBirths)} since the start.`;
+    setText(kDeaths.value, young ? `${fmtInt(sum.totalDeaths)} so far` : rateFmt(sum.deathsPerDay));
+    kDeaths.root.dataset.tip = young ? 'Deaths since the start. The rate per day shows once the run is a few hours old.' : `Deaths over the last day. ${fmtInt(sum.totalDeaths)} since the start.`;
     setText(kTribes.value, fmtInt(sum.tribes));
     setText(kGen.value, fmtInt(sum.maxGeneration));
     kGen.root.dataset.tip = `The highest generation among living agents (average ${sum.meanGeneration.toFixed(1)}). Founders are generation 0.`;

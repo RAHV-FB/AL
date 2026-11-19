@@ -273,7 +273,6 @@ export class TerrainLayer {
   private world: WorldState | null = null;
   private W = 0;
   private H = 0;
-  private ts = 8;
   private version = -1;
   // static per tile (rebuilt when terrain changes)
   private corner = new Uint8Array(0);
@@ -364,7 +363,6 @@ export class TerrainLayer {
       this.world = world;
       this.W = W;
       this.H = H;
-      this.ts = world.tileSize > 0 ? world.tileSize : 8;
       const N = W * H;
       this.corner = new Uint8Array(N);
       this.shore = new Uint8Array(N);
