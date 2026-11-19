@@ -1284,7 +1284,7 @@ function markExtinct(sim: Simulation, t: Tribe, c: SocialCache): void {
   });
 }
 
-/** Drift the camp toward the members' centroid, weighted toward members standing on food. */
+/** Drift the camp toward the members' centroid (members at home), weighted toward members standing on food. */
 function moveCamp(sim: Simulation, t: Tribe, list: Agent[]): void {
   const food = sim.state.world.food;
   const pull2 = K.campPull * K.campPull;
@@ -1293,7 +1293,8 @@ function moveCamp(sim: Simulation, t: Tribe, list: Agent[]): void {
   let sw = 0;
   for (let pass = 0; pass < 2 && sw === 0; pass++) {
     for (const m of list) {
-      if (pass === 0 && dist2(m.x, m.y, t.homeX, t.homeY) > pull2) continue;
+      // members away on a raid do not drag the camp after them (it followed the raiding parties to the river)
+      if (onRaid(m) || (pass === 0 && dist2(m.x, m.y, t.homeX, t.homeY) > pull2)) continue;
       const ti = sim.tileIndex(m.x, m.y);
       const f = ti >= 0 ? food[ti] : 0;
       const w = 0.5 + Math.min(2, (Number.isFinite(f) ? f : 0) / 5);

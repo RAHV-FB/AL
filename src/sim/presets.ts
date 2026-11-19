@@ -187,6 +187,8 @@ export const SCENARIOS: ScenarioDef[] = [
       { x: 420, y: 500, count: 110, radius: 120, template: PEACEFUL_FORAGERS, tribe: 'new', tribeName: 'Verdant Foragers' },
       { x: 1180, y: 500, count: 110, radius: 120, template: WARLIKE_RAIDERS, tribe: 'new', tribeName: 'Crimson Raiders' },
     ],
+    // the two peoples start at war; their enmity cools only slowly (social.ts: rivalDrift)
+    rivalries: [{ a: 'Crimson Raiders', b: 'Verdant Foragers', relation: -0.6 }],
     scheduled: [
       {
         tick: 5 * DAY,

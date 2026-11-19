@@ -4,7 +4,7 @@ Artificial Life is an offline, deterministic civilization simulator that runs in
 
 The app is online at <https://rahv-fb.github.io/AL/>, deployed from the `main` branch by `.github/workflows/pages.yml` (see [CI and deployment](#testing-and-verification)). If that page does not load, use the offline file: download [`release/artificial-life.html`](release/artificial-life.html) and open it in any modern browser. It is one self-contained file that needs no server, no install and no network access.
 
-The app is written in TypeScript with Vite and Canvas 2D and has no runtime dependencies. It makes no network requests and sends no telemetry. It stores nothing but your UI preferences (view toggles, overlay, open panels), in `localStorage`.
+The app is written in TypeScript with Vite and Canvas 2D and has no runtime dependencies. It makes no network requests, sends no telemetry and stores nothing but your UI preferences (view toggles, overlay, open panels), in `localStorage`.
 
 [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) traces each requirement to the code, and [`docs/VERIFICATION.md`](docs/VERIFICATION.md) records measured results.
 
@@ -133,7 +133,7 @@ Agents die of starvation, old age, combat, disease or disasters, or when you rem
 
 ### Navigation and migration
 
-Agents walk straight at their goal and slide around small obstacles such as a rock or a short wall stub. Slow terrain slows them, and shallows and mountains cost the most time. A diagonal step never squeezes between two blocked tiles that touch only at a corner.
+Agents walk straight at their goal and slide around small obstacles such as a rock or a short wall stub. Terrain sets their pace, and shallows and mountains are the slowest. A diagonal step never squeezes between two blocked tiles that touch only at a corner.
 
 When the straight line is blocked (a river crossed only at shallow fords, a lake, a wall you painted), the agent plans a route with A* over the tile grid. Step costs follow terrain speed, so routes favor open ground and use slow shallows only where they must. The tile path is smoothed to a few waypoints with an exact line-of-sight walk, and a shortcut is taken only if it is walkable and no slower than the path it replaces. Walkable land is labeled into connected regions, so a goal on another island or behind a closed wall is rejected at once instead of searched for.
 

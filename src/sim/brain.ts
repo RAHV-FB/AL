@@ -991,6 +991,43 @@ function targetReachable(sim: Simulation, a: Agent, k: number, tribe: Tribe | un
   return !other && sameRegion(sim, a.x, a.y, x, y);
 }
 
+/**
+ * The tribe whose camp this raider is heading for, or null when the raid is over. A raid trek has two legs. On the
+ * way out (trek.tribe is the enemy) it ends when the raider is hurt or loaded, the war has ended, the enemy store
+ * is empty, the camp is cut off or no way there was found. On the way home with the loot (trek.tribe is the
+ * raider's own tribe, set by plunder) it ends near camp, once the load is gone or when the store has no room.
+ * Either leg ends when the trek runs out. The trek point follows the camp as it drifts.
+ */
+function continuingRaid(
+  sim: Simulation,
+  a: Agent,
+  trek: NonNullable<Agent['trek']>,
+  tribe: Tribe | undefined,
+  hp: number,
+  cap: number,
+  tick: number,
+): Tribe | null {
+  const et = trek.tribe !== undefined ? sim.getTribe(trek.tribe) : undefined;
+  if (!tribe || !et || et.extinctTick !== -1 || tick > trek.until) return null;
+  if (!Number.isFinite(et.homeX) || !Number.isFinite(et.homeY)) return null;
+  const dx = et.homeX - a.x;
+  const dy = et.homeY - a.y;
+  if (et === tribe) {
+    // homeward with the loot
+    if (!(a.carried > 1) || dx * dx + dy * dy < 2 * CAMP_RANGE * (2 * CAMP_RANGE)) return null;
+    if (!(stockpileCapacity(tribe) - Math.max(0, tribe.stockpile) > 5)) return null;
+  } else {
+    if (hp < RAID_GIVE_UP_HP || a.carried >= cap * 0.5) return null;
+    if (!((tribe.relations[et.id] ?? 0) < SOCIAL_TUNING.warHostile) || !(et.stockpile > 0.5)) return null;
+  }
+  if (!sameRegion(sim, a.x, a.y, et.homeX, et.homeY)) return null;
+  const rt = a.route;
+  if (rt !== undefined && rt.fail === true && Math.abs(rt.gx - et.homeX) < 40 && Math.abs(rt.gy - et.homeY) < 40) return null;
+  trek.x = et.homeX;
+  trek.y = et.homeY;
+  return et;
+}
+
 // ------------------------------------------------------------------ think
 /** Perceive + choose an action (utility AI). Sets action/target/utilities/thought/decisionCooldown. */
 export function think(sim: Simulation, a: Agent): void {
@@ -1361,6 +1398,8 @@ export function think(sim: Simulation, a: Agent): void {
     if (!raidTrek) a.trek = undefined;
     trek = undefined; // from here on `trek` is a migration only
   }
+  // on the way home from a raid with the loot
+  const homeward = raidTrek !== null && raidTrek === tribe;
   if (trek) {
     const tdx = trek.x - a.x;
     const tdy = trek.y - a.y;
@@ -1397,6 +1436,7 @@ export function think(sim: Simulation, a: Agent): void {
   if (
     tribe &&
     adult &&
+    !homeward &&
     aggEff > 0.45 &&
     daylight > 0.3 &&
     a.carried < cap * 0.5 &&
@@ -1553,13 +1593,15 @@ export function think(sim: Simulation, a: Agent): void {
       ? 0
       : ((night * (0.2 + 0.6 * soc) + chill * 0.12 * soc) * (1 - 0.7 * hunger) + fear * 0.3 + (hp < 0.45 ? 0.15 : 0)) * far +
         soc * 0.1 * clamp01((campDist - 250) / 400);
-    // deposit carried surplus into the stockpile (only while the store has room)
+    // deposit carried surplus into the stockpile (only while the store has room); a raider bringing loot home
+    // keeps walking by day however far it is
     if (a.carried >= Math.min(6, cap * 0.3) && storeRoom > Math.min(a.carried, 5)) {
       const fill = clamp01(a.carried / cap);
       U[I_DEPOSIT] =
         ((0.12 + 0.6 * fill) * (0.6 + 0.4 * Math.max(Math.min(1, altEff), soc)) * (1 - 0.6 * hunger)) / (1 + campDist / 500) +
         (fill > 0.95 ? 0.15 : 0) +
         (role === 'forager' ? 0.05 : 0);
+      if (homeward && daylight > 0.3) U[I_DEPOSIT] = Math.max(U[I_DEPOSIT], (0.2 + 0.3 * fill) * (1 - 0.5 * hunger) + RAID_COMMIT);
     }
     // withdraw from the stockpile when hungry
     if (tribe.stockpile > 1 && hunger > 0.4) {
@@ -1768,7 +1810,9 @@ export function think(sim: Simulation, a: Agent): void {
       const tb = tribe as Tribe;
       a.targetX = tb.homeX;
       a.targetY = tb.homeY;
-      thought = `Carrying ${Math.round(a.carried)} food — bringing it to ${theName(tb)} stockpile`;
+      thought = homeward
+        ? `Bringing ${Math.round(a.carried)} food home from a raid to the stockpile of ${theName(tb)}`
+        : `Carrying ${Math.round(a.carried)} food to the stockpile of ${theName(tb)}`;
       break;
     }
     case I_WITHDRAW: {
@@ -1781,7 +1825,7 @@ export function think(sim: Simulation, a: Agent): void {
     case I_EXPLORE: {
       // a raid; a raider already on the march that would rather roam (prowling, searching for food) keeps heading
       // for the enemy camp too
-      const raid = raidTarget ?? raidTrek;
+      const raid = raidTarget ?? (homeward ? null : raidTrek);
       if (raid) {
         a.targetX = raid.homeX;
         a.targetY = raid.homeY;
@@ -2279,7 +2323,10 @@ function actExplore(sim: Simulation, a: Agent): void {
   }
 }
 
-/** A raider that reached the camp of a tribe its own tribe is at war with grabs from its stockpile. */
+/**
+ * A raider that reached the camp of a tribe its own tribe is at war with grabs from its stockpile. Loaded (or
+ * with the store emptied) the raid is over: it heads home with the loot.
+ */
 function plunder(sim: Simulation, a: Agent): void {
   const own = liveTribe(sim, a);
   if (!own) return;
@@ -2291,7 +2338,21 @@ function plunder(sim: Simulation, a: Agent): void {
     const dy = et.homeY - a.y;
     if (dx * dx + dy * dy > SOCIAL_TUNING.campRadius * SOCIAL_TUNING.campRadius) continue;
     const got = raidStockpile(sim, a, et);
-    if (got > 0) a.thought = `Raided ${theName(et)} camp — carrying off ${Math.round(got)} food`;
+    if (got > 0) {
+      a.thought = `Raided the camp of ${theName(et)}, carrying off ${Math.round(got)} food`;
+      // loaded (or the store is empty): the raid turns for home with the loot
+      if (a.carried >= carryCapacity(a) * 0.5 || !(et.stockpile > 0.5)) {
+        const tk = a.trek;
+        const until = sim.state.tick + RAID_TREK_TICKS;
+        if (tk !== undefined) {
+          tk.x = own.homeX;
+          tk.y = own.homeY;
+          tk.until = until;
+          tk.kind = 'raid';
+          tk.tribe = own.id;
+        } else a.trek = { x: own.homeX, y: own.homeY, until, kind: 'raid', tribe: own.id };
+      }
+    }
     return;
   }
 }

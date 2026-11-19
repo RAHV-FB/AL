@@ -44,7 +44,7 @@ import { createStatsState } from './stats';
 import { normalizeIntervention } from './interventions';
 import { NAV } from './pathfinding';
 import { ROUTE } from './steering';
-import { TREK_TICKS } from './brain';
+import { RAID_TREK_TICKS, TREK_TICKS } from './brain';
 import {
   ACTIONS,
   DEATH_CAUSES,
@@ -988,21 +988,28 @@ function sanitizeAgent(a: Obj, refs: Refs, r: Repairs): void {
       a.route = undefined; // steering simply plans again
     }
   }
-  // brain.ts: a migrant's trek destination
+  // brain.ts: a committed trek, a migration or a raid. Saves made before raids were treks hold migrations without
+  // kind / tribe. Rebuilt with all five keys in createAgent's order, so every trek object has one shape.
   if (a.trek !== undefined) {
     const tk = a.trek;
+    const kind = isObj(tk) ? (tk.kind === undefined ? 'migrate' : tk.kind) : undefined;
+    const raid = kind === 'raid';
     const ok =
       isObj(tk) &&
+      (kind === 'migrate' || raid) &&
       isFiniteNum(tk.x) && tk.x >= 0 && tk.x <= refs.W &&
       isFiniteNum(tk.y) && tk.y >= 0 && tk.y <= refs.H &&
       isInt(tk.until) &&
       tk.until >= 0 &&
-      tk.until <= refs.tick + TREK_TICKS &&
-      Object.keys(tk).every((k) => k === 'x' || k === 'y' || k === 'until');
+      tk.until <= refs.tick + (raid ? RAID_TREK_TICKS : TREK_TICKS) &&
+      // a raid names the enemy tribe (an allocated id: one that has since died out is dropped by the brain);
+      // a migration names none
+      (raid ? isInt(tk.tribe) && tk.tribe >= 1 && tk.tribe < refs.nextTribeId : tk.tribe === undefined || tk.tribe === NONE) &&
+      Object.keys(tk).every((k) => k === 'x' || k === 'y' || k === 'until' || k === 'kind' || k === 'tribe');
     if (!ok) {
       r.fix('agent.trek');
       a.trek = undefined;
-    }
+    } else a.trek = { x: tk.x, y: tk.y, until: tk.until, kind, tribe: raid ? tk.tribe : NONE };
   }
 }
 
@@ -1321,6 +1328,18 @@ function sanitizeState(raw: Obj, r: Repairs): SimState {
       const keys = (field: string, v: unknown): number[] =>
         list(r, `diplomacy.${field}`, v, 20000, true, (k) => (isInt(k) && k >= 0 ? k : null)) as number[];
       state.diplomacy = { wars: keys('wars', raw.diplomacy.wars), alliances: keys('alliances', raw.diplomacy.alliances), feuds: keys('feuds', raw.diplomacy.feuds) };
+      // old rivalries (absent = none): pair keys of two different, allocated tribe ids, each pair once
+      if (raw.diplomacy.rivals !== undefined) {
+        const seen = new Set<number>();
+        state.diplomacy.rivals = list(r, 'diplomacy.rivals', raw.diplomacy.rivals, 20000, true, (k) => {
+          if (!isInt(k) || k < 0 || seen.has(k)) return null;
+          const lo = Math.floor(k / 1048576);
+          const hi = k - lo * 1048576;
+          if (!(lo >= 1 && lo < hi && hi < refs.nextTribeId)) return null;
+          seen.add(k);
+          return k;
+        }) as number[];
+      }
     } else r.fix('diplomacy');
   }
   // optional: epidemic log bookkeeping; absent → disease.ts starts fresh and adopts a running epidemic

@@ -139,7 +139,7 @@ Fixed on 2026-11-19. The queues now live in `SimState` (`pendingReplay`, `pendin
 
 To reproduce it: enqueue a spawn, then 5,000 small Add food stamps. The log keeps only the last 5,000 entries, so the spawn is lost and the replay hash differs from the original. The repro was re-checked on the working tree with the other audit fixes in place.
 
-During the audit the core auditor added, in the working tree, a counter `state.interventionLogDropped` that is saved with the file, and a one-time "The intervention log is full" entry in the event log (category You, no toast). Replay my interventions still re-applied the truncated log without a warning, and the repro still lost the spawn and diverged (re-checked 2026-11-19 00:19 UTC). The suggested fix was to warn in `App.replay()` once the cap has been reached, and to coalesce paint stamps or raise the cap.
+During the audit the core auditor added, in the working tree, a counter `state.interventionLogDropped` that is saved with the file, and a one-time "The intervention log is full" entry in the event log (category You, no toast). Replay my interventions still re-applied the truncated log without a warning, and the repro still lost the spawn and diverged (re-checked 2026-11-19 00:19 UTC). The suggested fixes were a warning in `App.replay()` once the cap has been reached, coalescing paint stamps, and raising the cap.
 
 Mitigated on 2026-11-19. Recorded entries are canonical (no-op interventions are not logged), dropped entries are counted in `interventionLogDropped` with a warning in the event log, and Replay my interventions warns that the replay is incomplete. The 5,000-entry cap remains and is listed under Limitations in the README.
 

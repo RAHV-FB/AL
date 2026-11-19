@@ -1,7 +1,8 @@
 /**
  * Dependency-free Canvas2D chart toolkit (OWNER: Analytics).
  *
- * - DPR-aware, themed from CSS variables (dark by default), recessive grid/axes.
+ * - DPR-aware, themed from the app's CSS tokens (dark by default), recessive grid and axes,
+ *   flat fills only (no gradients, no glow).
  * - Two stacked canvases per chart: the data layer is redrawn only when data
  *   changes (setData with a new key) or on resize; the hover layer (crosshair,
  *   markers) + an HTML tooltip redraw on pointer move only.
@@ -22,23 +23,40 @@ export interface ChartTheme {
   font: string;
 }
 
-/** Validated categorical slots (dark-surface steps), used in fixed order. */
-export const PALETTE = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767'];
-/** Sequential ramp for densities on a dark surface: near-zero recedes into the panel. */
-export const HEAT_RAMP = ['#0b1220', '#123058', '#1c5cab', '#3987e5', '#86b6ef', '#e8f1fd'];
+/**
+ * Categorical slots from the app palette, used in fixed order: sage, ochre, rust, water, sand, moss, clay,
+ * slate. Series within one chart use slots far apart in hue and lightness (see SERIES in analytics.ts).
+ */
+export const PALETTE = ['#8fb573', '#d6a648', '#cf5b45', '#6f9fc2', '#c8b48a', '#5e8c4a', '#a5694f', '#8b98a3'];
+/** Named access to the palette slots. */
+export const COLORS = {
+  sage: PALETTE[0],
+  ochre: PALETTE[1],
+  rust: PALETTE[2],
+  water: PALETTE[3],
+  sand: PALETTE[4],
+  moss: PALETTE[5],
+  clay: PALETTE[6],
+  slate: PALETTE[7],
+} as const;
+/** Sequential ramp for densities: near zero recedes into the background (--bg), through moss to sand. */
+export const HEAT_RAMP = ['#131210', '#253021', '#3b5530', '#5e8c4a', '#97a874', '#c8b48a'];
 
-const FONT = '10px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif';
+/** Colour of the line drawn over a heatmap (the gene mean). */
+const HEAT_LINE = '#e8e3d8';
+
+const FONT = '10.5px system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif';
 
 export function readTheme(el: Element): ChartTheme {
   const cs = getComputedStyle(el);
   const v = (name: string, fb: string) => cs.getPropertyValue(name).trim() || fb;
   return {
-    panel: v('--panel', '#0f1626'),
-    text: v('--text', '#d7e3f4'),
-    muted: v('--muted', '#8495ad'),
-    grid: 'rgba(148,163,184,0.13)',
-    axis: 'rgba(148,163,184,0.45)',
-    accent: v('--accent', '#3987e5'),
+    panel: v('--panel', '#1c1b18'),
+    text: v('--text', '#e8e3d8'),
+    muted: v('--muted', '#aba596'),
+    grid: v('--border', '#302e29'),
+    axis: v('--border-2', '#3e3b34'),
+    accent: v('--accent', '#8fb573'),
     font: FONT,
   };
 }
@@ -159,17 +177,6 @@ function unobserveSize(el: Element): void {
   sharedRO?.unobserve(el);
 }
 
-function roundRectPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
-  const rr = Math.max(0, Math.min(r, w / 2, h / 2));
-  ctx.beginPath();
-  ctx.moveTo(x + rr, y);
-  ctx.arcTo(x + w, y, x + w, y + h, rr);
-  ctx.arcTo(x + w, y + h, x, y + h, rr);
-  ctx.arcTo(x, y + h, x, y, rr);
-  ctx.arcTo(x, y, x + w, y, rr);
-  ctx.closePath();
-}
-
 // ------------------------------------------------------------------ base
 
 export interface BaseOptions {
@@ -288,7 +295,7 @@ abstract class CanvasChart<D, O extends BaseOptions> {
         ctx.fillStyle = th.muted;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(this.opts.emptyText ?? 'Waiting for data…', this.cw / 2, this.ch / 2);
+        ctx.fillText(this.opts.emptyText ?? 'No data yet', this.cw / 2, this.ch / 2);
       }
       this.dirty = false;
     }
@@ -536,10 +543,10 @@ abstract class XYChart<D extends { x: ArrayLike<number> }> extends CanvasChart<D
 
   protected marker(ctx: CanvasRenderingContext2D, th: ChartTheme, X: number, Y: number, color: string): void {
     ctx.beginPath();
-    ctx.arc(X, Y, 3.5, 0, Math.PI * 2);
+    ctx.arc(X, Y, 3, 0, Math.PI * 2);
     ctx.fillStyle = color;
     ctx.fill();
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 1.5;
     ctx.strokeStyle = th.panel;
     ctx.stroke();
   }
@@ -621,7 +628,7 @@ export class LineChart extends XYChart<LineData> {
         }
         for (let i = n - 1; i >= 0; i--) ctx.lineTo(this.sx(d.x[i]), this.sy(s.band.lo[i]));
         ctx.closePath();
-        ctx.globalAlpha = 0.2;
+        ctx.globalAlpha = 0.16;
         ctx.fillStyle = s.color;
         ctx.fill();
         ctx.globalAlpha = 1;
@@ -632,7 +639,7 @@ export class LineChart extends XYChart<LineData> {
         ctx.lineTo(this.sx(d.x[n - 1]), this.sy(Math.max(f.y0, 0)));
         ctx.lineTo(this.sx(d.x[0]), this.sy(Math.max(f.y0, 0)));
         ctx.closePath();
-        ctx.globalAlpha = 0.16;
+        ctx.globalAlpha = 0.1;
         ctx.fillStyle = s.color;
         ctx.fill();
         ctx.globalAlpha = 1;
@@ -650,7 +657,7 @@ export class LineChart extends XYChart<LineData> {
       }
       this.trace(ctx, d.x, s.values);
       ctx.strokeStyle = s.color;
-      ctx.lineWidth = s.width ?? 1.75;
+      ctx.lineWidth = s.width ?? 1.5;
       ctx.setLineDash(s.dash ?? []);
       ctx.stroke();
     }
@@ -839,10 +846,7 @@ export class BarChart extends CanvasChart<BarData, BarOptions> {
         ctx.textAlign = 'right';
         ctx.fillText(b.label, x0 - 6, cy);
         ctx.fillStyle = b.color ?? color;
-        if (bw > 0) {
-          roundRectPath(ctx, x0, cy - barH / 2, bw, barH, 2);
-          ctx.fill();
-        }
+        if (bw > 0) ctx.fillRect(x0, Math.round(cy - barH / 2), bw, barH);
         ctx.fillStyle = th.text;
         ctx.textAlign = 'left';
         ctx.fillText(fmt(b.value), x0 + bw + 4, cy);
@@ -883,16 +887,7 @@ export class BarChart extends CanvasChart<BarData, BarOptions> {
       const top = sy(Math.max(0, b.value));
       const bh = fy + fh - top;
       ctx.fillStyle = b.color ?? color;
-      if (bh > 0.5) {
-        // rounded top, square base: draw a taller rounded rect and clip at the baseline
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(x, fy - 2, slot, fh + 2);
-        ctx.clip();
-        roundRectPath(ctx, x, top, Math.max(1, slot - gap), bh + 3, 2);
-        ctx.fill();
-        ctx.restore();
-      }
+      if (bh > 0.5) ctx.fillRect(x, top, Math.max(1, slot - gap), bh);
       if (i % every === 0) {
         ctx.fillStyle = th.muted;
         ctx.fillText(b.label, x + (slot - gap) / 2, fy + fh + 5);
@@ -912,7 +907,7 @@ export class BarChart extends CanvasChart<BarData, BarOptions> {
     }
     if (idx < 0 || idx >= d.bars.length) return null;
     const r = this.rects[idx];
-    ctx.fillStyle = 'rgba(148,163,184,0.10)';
+    ctx.fillStyle = 'rgba(232,227,216,0.06)';
     ctx.fillRect(r.x, r.y, r.w, r.h);
     void th;
     const b = d.bars[idx];
@@ -1015,10 +1010,11 @@ export class Heatmap extends XYChart<HeatmapData> {
       ctx.lineJoin = 'round';
       ctx.beginPath();
       this.trace(ctx, d.x, d.overlay);
-      ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-      ctx.lineWidth = 3;
+      // a crisp dark casing keeps the light line readable over the light end of the ramp
+      ctx.strokeStyle = 'rgba(19,18,16,0.8)';
+      ctx.lineWidth = 2.75;
       ctx.stroke();
-      ctx.strokeStyle = '#f5d76e';
+      ctx.strokeStyle = HEAT_LINE;
       ctx.lineWidth = 1.25;
       ctx.stroke();
       ctx.restore();
@@ -1042,7 +1038,7 @@ export class Heatmap extends XYChart<HeatmapData> {
     const v = d.values[c * rows + r];
     let html = this.header(d.x[c]);
     html += tipRow(null, d.rowLabel ? d.rowLabel(r) : `Row ${r}`, d.valueLabel ? d.valueLabel(v) : formatNum(v));
-    if (d.overlay) html += tipRow('#f5d76e', d.overlayLabel ?? 'Mean', formatNum(d.overlay[c]));
+    if (d.overlay) html += tipRow(HEAT_LINE, d.overlayLabel ?? 'Mean', formatNum(d.overlay[c]));
     return html;
   }
 }
@@ -1057,6 +1053,10 @@ export interface SparklineOptions {
   max?: number;
   /** Minimum auto y-range (keeps flat-ish series from exaggerating noise). */
   minRange?: number;
+  /** Flat translucent fill under the line (default false). */
+  fill?: boolean;
+  /** Line width in CSS px (default 1.25). */
+  width?: number;
 }
 
 /** Tiny axis-less trend line (KPI tiles, small multiples). */
@@ -1070,7 +1070,7 @@ export class Sparkline {
   private key: unknown = undefined;
 
   constructor(parent: HTMLElement, private opts: SparklineOptions = {}) {
-    this.color = opts.color ?? '#3987e5';
+    this.color = opts.color ?? PALETTE[0];
     const el = document.createElement('canvas');
     el.className = 'an-spark';
     el.style.height = `${opts.height ?? 26}px`;
@@ -1145,18 +1145,20 @@ export class Sparkline {
     }
     ctx.lineTo(X(n - 1), Y(v[n - 1]));
     ctx.strokeStyle = this.color;
-    ctx.lineWidth = 1.5;
+    ctx.lineWidth = this.opts.width ?? 1.25;
     ctx.lineJoin = 'round';
     ctx.stroke();
-    ctx.lineTo(X(n - 1), h);
-    ctx.lineTo(X(0), h);
-    ctx.closePath();
-    ctx.globalAlpha = 0.14;
-    ctx.fillStyle = this.color;
-    ctx.fill();
-    ctx.globalAlpha = 1;
+    if (this.opts.fill) {
+      ctx.lineTo(X(n - 1), h);
+      ctx.lineTo(X(0), h);
+      ctx.closePath();
+      ctx.globalAlpha = 0.12;
+      ctx.fillStyle = this.color;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
     ctx.beginPath();
-    ctx.arc(X(n - 1), Y(v[n - 1]), 2.2, 0, Math.PI * 2);
+    ctx.arc(X(n - 1), Y(v[n - 1]), 1.8, 0, Math.PI * 2);
     ctx.fillStyle = this.color;
     ctx.fill();
   }

@@ -46,7 +46,7 @@ import { updateDisasters } from './disasters';
 import { updateDisease } from './disease';
 import { think, act } from './brain';
 import { updateVitals } from './lifecycle';
-import { updateSocial } from './social';
+import { declareRivalry, updateSocial } from './social';
 import { createStatsState, updateStats } from './stats';
 import { applyIntervention, normalizeIntervention } from './interventions';
 import { resetNavBudget } from './pathfinding';
@@ -142,6 +142,13 @@ export class Simulation {
       if (replay.length) state.pendingReplay = replay;
     }
     sim.log('environment', 'info', `Experiment "${scenario.name}" started (seed ${config.seed}).`);
+    // old rivalries between founding tribes (by name): a starting attitude whose enmity cools only slowly
+    for (const rv of scenario.rivalries ?? []) {
+      if (!rv || typeof rv.a !== 'string' || typeof rv.b !== 'string') continue;
+      const ta = state.tribes.find((t) => t.name === rv.a && t.extinctTick === -1);
+      const tb = state.tribes.find((t) => t.name === rv.b && t.extinctTick === -1);
+      if (ta && tb && ta !== tb) declareRivalry(sim, ta, tb, rv.relation);
+    }
     state.rngState = rng.getState(); // spawning the founders used the generator
     return sim;
   }
@@ -564,7 +571,7 @@ export class Simulation {
       }
       const tk = a.trek;
       mix(tk ? 1 : 0);
-      if (tk) { mix(tk.x); mix(tk.y); mix(tk.until); }
+      if (tk) { mix(tk.x); mix(tk.y); mix(tk.until); mix(tk.kind === 'raid' ? 1 : 0); mix(opt(tk.tribe)); }
       const st = a.stats;
       mix(st.foodEaten); mix(st.distance); mix(st.kills); mix(st.shared); mix(st.received); mix(st.fights);
       mix(a.children.length);
@@ -585,6 +592,10 @@ export class Simulation {
       for (const g of t.meanGenes) mix(g);
       mixStr(t.name);
     }
+    // old rivalries shape the run (slow cooling); the other diplomacy lists only feed the event log
+    const rivals = s.diplomacy?.rivals;
+    mix(rivals ? rivals.length : -1);
+    if (rivals) for (const k of rivals) { mix(Math.floor(k / 1048576)); mix(k % 1048576); }
     mix(s.lineage.length);
     for (const l of s.lineage) { mix(l.id); mix(l.deathTick); mix(DEATH_CAUSES.indexOf(l.deathCause as DeathCause)); mix(l.offspring); mix(l.tribeId); }
     mix(s.disasters.length);
