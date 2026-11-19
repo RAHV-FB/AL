@@ -43,6 +43,8 @@ import { initEnvironment } from './ecology';
 import { createStatsState } from './stats';
 import { normalizeIntervention } from './interventions';
 import { NAV } from './pathfinding';
+import { ROUTE } from './steering';
+import { TREK_TICKS } from './brain';
 import {
   ACTIONS,
   DEATH_CAUSES,
@@ -907,11 +909,16 @@ function sanitizeAgent(a: Obj, refs: Refs, r: Repairs): void {
       isInt(rt.i) &&
       rt.i >= 0 &&
       rt.i % 2 === 0 &&
-      rt.i <= rt.pts.length &&
+      (rt.pts.length === 0 ? rt.i === 0 : rt.i <= rt.pts.length - 2) &&
       isInt(rt.t) &&
+      rt.t >= 0 &&
+      rt.t <= refs.tick + ROUTE.failRetry + ROUTE.directRecheck &&
       isInt(rt.v) &&
       (rt.fail === undefined || typeof rt.fail === 'boolean') &&
-      Object.keys(rt).every((k) => ['gx', 'gy', 'pts', 'i', 't', 'v', 'fail'].includes(k));
+      (rt.b === undefined || (isFiniteNum(rt.b) && rt.b >= 0)) &&
+      (rt.bt === undefined || (isInt(rt.bt) && rt.bt >= 0 && rt.bt <= refs.tick)) &&
+      (rt.p === undefined || (isInt(rt.p) && rt.p >= 1 && rt.p <= ROUTE.maxPartial)) &&
+      Object.keys(rt).every((k) => ['gx', 'gy', 'pts', 'i', 't', 'v', 'fail', 'b', 'bt', 'p'].includes(k));
     if (!valid) {
       r.fix('agent.route');
       delete a.route; // steering simply plans again
@@ -925,6 +932,8 @@ function sanitizeAgent(a: Obj, refs: Refs, r: Repairs): void {
       isFiniteNum(tk.x) && tk.x >= 0 && tk.x <= refs.W &&
       isFiniteNum(tk.y) && tk.y >= 0 && tk.y <= refs.H &&
       isInt(tk.until) &&
+      tk.until >= 0 &&
+      tk.until <= refs.tick + TREK_TICKS &&
       Object.keys(tk).every((k) => k === 'x' || k === 'y' || k === 'until');
     if (!ok) {
       r.fix('agent.trek');

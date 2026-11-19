@@ -239,6 +239,11 @@ export interface AgentRoute {
   t: number;
   v: number;
   fail?: boolean;
+  /** Best distance so far to the current waypoint (or the goal on a straight line) and the tick it improved. */
+  b?: number;
+  bt?: number;
+  /** Consecutive partial routes (search capped, e.g. in a maze); absent = a complete route. */
+  p?: number;
 }
 
 export interface LineageRecord {

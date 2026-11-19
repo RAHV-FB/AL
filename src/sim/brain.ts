@@ -483,7 +483,7 @@ function moveFoodCand(from: number, to: number): void {
 }
 
 /** How long (ticks) a migrant keeps heading for its chosen destination. */
-const TREK_TICKS = 1800;
+export const TREK_TICKS = 1800;
 
 /** Food reachable only by a detour (across a ford, around a lake) is worth this much of its straight-line score. */
 const DETOUR_FOOD_FACTOR = 0.6;
@@ -1192,7 +1192,13 @@ export function think(sim: Simulation, a: Agent): void {
   if (trek) {
     const tdx = trek.x - a.x;
     const tdy = trek.y - a.y;
-    if (tick > trek.until || hunger < 0.3 || tdx * tdx + tdy * tdy < 40 * 40 || lushness(sim, a.x, a.y) > 0.45) {
+    if (
+      tick > trek.until ||
+      hunger < 0.3 ||
+      tdx * tdx + tdy * tdy < 40 * 40 ||
+      lushness(sim, a.x, a.y) > 0.45 ||
+      !sameRegion(sim, a.x, a.y, trek.x, trek.y) // terrain changed: the destination is cut off
+    ) {
       a.trek = undefined;
       trek = undefined;
     } else U[I_EXPLORE] += 0.1 + 0.35 * foodDrive * (1 - 0.6 * night);
@@ -1586,10 +1592,12 @@ export function think(sim: Simulation, a: Agent): void {
         exY = trek.y;
       } else if (
         prevAction === 'explore' &&
+        !(migrateDrive > 0.3) && // a migrant without a destination keeps looking for greener land each time
         Number.isFinite(prevTX) &&
         Number.isFinite(prevTY) &&
         a.actionTicks < 600 &&
-        (prevTX - a.x) * (prevTX - a.x) + (prevTY - a.y) * (prevTY - a.y) > 30 * 30
+        (prevTX - a.x) * (prevTX - a.x) + (prevTY - a.y) * (prevTY - a.y) > 30 * 30 &&
+        sameRegion(sim, a.x, a.y, prevTX, prevTY)
       ) {
         exX = prevTX;
         exY = prevTY;
@@ -1598,17 +1606,19 @@ export function think(sim: Simulation, a: Agent): void {
         thought = 'Restless — wandering';
         break;
       }
-      // a migrant commits to the destination it picked
-      if (!trek && migrateDrive > 0.3) a.trek = { x: exX, y: exY, until: tick + TREK_TICKS };
+      // a migrant commits to the destination it picked — if it really looks like greener land
+      if (!trek && migrateDrive > 0.3 && lushness(sim, exX, exY) > 0.35) a.trek = { x: exX, y: exY, until: tick + TREK_TICKS };
       a.targetX = exX;
       a.targetY = exY;
       const dir = compass(exX - a.x, exY - a.y);
-      const detour = !clearPath(sim, a.x, a.y, exX, exY) ? ' (the long way round, by a ford or pass)' : '';
+      const detour = !clearPath(sim, a.x, a.y, exX, exY) && sameRegion(sim, a.x, a.y, exX, exY) ? ' (the long way round, by a ford or pass)' : '';
       thought =
         trek
           ? `${hl} (${pct(hunger)}%) — still trekking to greener land to the ${dir}`
-          : migrateDrive > 0.3
+          : a.trek
           ? `${hl} (${pct(hunger)}%) and the land here is grazed bare — moving on to greener land to the ${dir}`
+          : migrateDrive > 0.3
+          ? `${hl} (${pct(hunger)}%) and the land here is grazed bare — searching ${dir} for greener land`
           : !haveFoodTarget && hunger > 0.25
           ? `${hl} (${pct(hunger)}%), no food in sight — searching ${dir}`
           : prowl > 0.12

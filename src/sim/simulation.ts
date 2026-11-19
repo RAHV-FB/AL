@@ -49,6 +49,7 @@ import { updateVitals } from './lifecycle';
 import { updateSocial } from './social';
 import { createStatsState, updateStats } from './stats';
 import { applyIntervention, normalizeIntervention } from './interventions';
+import { resetNavBudget } from './pathfinding';
 
 export interface CreateOptions {
   scenario: ScenarioDef;
@@ -188,6 +189,7 @@ export class Simulation {
     const s = this.state;
     this.stepping = true;
     this.deadThisTick = 0;
+    resetNavBudget(this); // every tick starts with the full route-search budget (also after a load)
 
     // 1. scheduled + replayed + user interventions. Nothing iterates the agent array yet, so agents they
     //    spawn join the world at once: later interventions of this tick (remove, paint, …), the agent
@@ -557,6 +559,7 @@ export class Simulation {
       mix(rt ? 1 : 0);
       if (rt) {
         mix(rt.gx); mix(rt.gy); mix(rt.i); mix(rt.t); mix(rt.v); mix(rt.fail ? 1 : 0); mix(rt.pts.length);
+        mix(opt(rt.b)); mix(opt(rt.bt)); mix(opt(rt.p));
         for (const p of rt.pts) mix(p);
       }
       const tk = a.trek;

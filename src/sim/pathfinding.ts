@@ -35,11 +35,14 @@ export const NAV = {
   maxWaypoints: 40,
   /** How far (tiles) an impassable goal tile is snapped to the nearest passable one. */
   goalSnapTiles: 2,
-  /** Line-of-sight samples per tile when smoothing. */
-  losSamplesPerTile: 3,
 };
 
-export type RouteStatus = 'ok' | 'direct' | 'unreachable' | 'budget';
+/**
+ * 'ok' — pts ends at the goal; 'partial' — the search hit NAV.queryBudget, pts leads to the explored tile
+ * closest to the goal (follow it, then plan again from there); 'unreachable'; 'budget' — this tick's shared
+ * budget is spent, retry soon.
+ */
+export type RouteStatus = 'ok' | 'partial' | 'unreachable' | 'budget';
 
 export interface RouteResult {
   status: RouteStatus;
@@ -271,19 +274,79 @@ function heapPop(nav: NavCache): number {
   return top;
 }
 
-// ---------------------------------------------------------------- line of sight (strict, tile-based)
+// ---------------------------------------------------------------- line of sight (exact grid walk)
 
-/** True when every sample along the segment between two world points lies on a passable tile. */
-function los(nav: NavCache, x0: number, y0: number, x1: number, y1: number): boolean {
-  const dx = x1 - x0;
-  const dy = y1 - y0;
+/**
+ * Walk the tiles a segment touches (Amanatides–Woo). Returns the segment's time cost (Σ tile cost × length
+ * inside the tile, in tile units), or Infinity when it touches an impassable tile or passes exactly
+ * through a tile corner whose two side tiles are not both passable — the same no-corner-cutting rule the
+ * A* moves and steering.stepDir obey.
+ */
+function lineCost(nav: NavCache, x0: number, y0: number, x1: number, y1: number): number {
+  const ts = nav.ts;
+  const w = nav.w;
+  const cost = nav.cost;
+  const fx = x0 / ts;
+  const fy = y0 / ts;
+  const gx = x1 / ts;
+  const gy = y1 / ts;
+  if (!Number.isFinite(fx + fy + gx + gy)) return Infinity;
+  let tx = Math.floor(fx);
+  let ty = Math.floor(fy);
+  const ex = Math.floor(gx);
+  const ey = Math.floor(gy);
+  const pass = (x: number, y: number) => x >= 0 && y >= 0 && x < w && y < nav.h && cost[y * w + x] > 0;
+  if (!pass(tx, ty) || !pass(ex, ey)) return Infinity;
+  const dx = gx - fx;
+  const dy = gy - fy;
   const len = Math.sqrt(dx * dx + dy * dy);
-  const n = Math.max(1, Math.ceil((len / nav.ts) * NAV.losSamplesPerTile));
-  for (let k = 1; k < n; k++) {
-    const t = tileOf(nav, x0 + (dx * k) / n, y0 + (dy * k) / n);
-    if (t < 0 || nav.cost[t] === 0) return false;
+  if (!(len > 1e-9)) return 0;
+  const sx = dx > 0 ? 1 : dx < 0 ? -1 : 0;
+  const sy = dy > 0 ? 1 : dy < 0 ? -1 : 0;
+  const tdx = sx !== 0 ? Math.abs(1 / dx) : Infinity; // segment parameter per tile step in x
+  const tdy = sy !== 0 ? Math.abs(1 / dy) : Infinity;
+  let tmx = sx > 0 ? (tx + 1 - fx) * tdx : sx < 0 ? (fx - tx) * tdx : Infinity;
+  let tmy = sy > 0 ? (ty + 1 - fy) * tdy : sy < 0 ? (fy - ty) * tdy : Infinity;
+  let t = 0;
+  let total = 0;
+  let guard = 2 * (Math.abs(ex - tx) + Math.abs(ey - ty)) + 4;
+  while (tx !== ex || ty !== ey) {
+    if (--guard < 0) return Infinity; // numeric trouble: be conservative
+    const tn = tmx < tmy ? tmx : tmy;
+    const tc = tn < 1 ? tn : 1;
+    total += (tc - t) * len * cost[ty * w + tx];
+    t = tc;
+    if (Math.abs(tmx - tmy) < 1e-9) {
+      if (!pass(tx + sx, ty) || !pass(tx, ty + sy)) return Infinity; // squeezing through a corner
+      tx += sx;
+      ty += sy;
+      tmx += tdx;
+      tmy += tdy;
+    } else if (tmx < tmy) {
+      tx += sx;
+      tmx += tdx;
+    } else {
+      ty += sy;
+      tmy += tdy;
+    }
+    if (!pass(tx, ty)) return Infinity;
   }
-  return true;
+  total += (1 - t) * len * cost[ty * w + tx];
+  return total;
+}
+
+/** True when the straight segment between two world points can be walked (exact; see lineCost). */
+export function lineClear(sim: Simulation, x0: number, y0: number, x1: number, y1: number): boolean {
+  return lineCost(navOf(sim), x0, y0, x1, y1) < Infinity;
+}
+
+/** Reset this tick's search budget (called by Simulation.step at the start of every tick). */
+export function resetNavBudget(sim: Simulation): void {
+  const b = budgets.get(sim);
+  if (b) {
+    b.tick = sim.state.tick;
+    b.used = 0;
+  } else budgets.set(sim, { tick: sim.state.tick, used: 0 });
 }
 
 // ---------------------------------------------------------------- A*
@@ -344,6 +407,8 @@ export function planRoute(sim: Simulation, x0: number, y0: number, x1: number, y
 
   let expanded = 0;
   let found = false;
+  let bestNode = start; // explored tile closest to the goal (heuristic), for partial routes
+  let bestH = heur(start);
   while (nav.heapLen > 0) {
     const cur = heapPop(nav);
     if (closed[cur] === gen) continue;
@@ -351,6 +416,11 @@ export function planRoute(sim: Simulation, x0: number, y0: number, x1: number, y
     if (cur === goal) {
       found = true;
       break;
+    }
+    const hc = heur(cur);
+    if (hc < bestH) {
+      bestH = hc;
+      bestNode = cur;
     }
     if (++expanded > limit) break;
     const cx = cur % w;
@@ -374,12 +444,23 @@ export function planRoute(sim: Simulation, x0: number, y0: number, x1: number, y
     }
   }
   spend(sim, expanded);
-  if (!found) return { status: expanded > limit ? 'budget' : 'unreachable', pts: [], expanded };
+  let end = goal;
+  let status: RouteStatus = 'ok';
+  if (!found) {
+    if (!(expanded > limit)) return { status: 'unreachable', pts: [], expanded };
+    // the shared tick budget ran short: retry soon. The query's own cap was hit (a maze, a long comb of
+    // walls): follow a partial route to the explored tile nearest the goal and plan again from there.
+    if (limit < NAV.queryBudget || bestNode === start) return { status: 'budget', pts: [], expanded };
+    end = bestNode;
+    status = 'partial';
+  }
+  const ex = status === 'ok' ? gx : ((end % w) + 0.5) * ts;
+  const ey = status === 'ok' ? gy : (Math.floor(end / w) + 0.5) * ts;
 
-  // reconstruct (goal → start)
+  // reconstruct (end → start)
   const tiles = nav.tiles;
   let len = 0;
-  for (let t = goal; t !== -1 && len < tiles.length; t = parent[t]) tiles[len++] = t;
+  for (let t = end; t !== -1 && len < tiles.length; t = parent[t]) tiles[len++] = t;
   // turning points: tiles where the step direction changes (start and goal excluded)
   const turns: number[] = [];
   for (let k = len - 2; k >= 1; k--) {
@@ -392,29 +473,42 @@ export function planRoute(sim: Simulation, x0: number, y0: number, x1: number, y
     const d2y = Math.floor(nx / w) - Math.floor(t / w);
     if (d1x !== d2x || d1y !== d2y) turns.push(t);
   }
+  // string-pull the turning points: a shortcut must be walkable (exact grid walk, corner rule) and must not
+  // cost more time than the stretch of A* path it replaces (it may not cut across rock or shallows that the
+  // search went round)
   const pts: number[] = [];
-  // string-pull the turning points with a strict line-of-sight test
+  const candX: number[] = [];
+  const candY: number[] = [];
+  const candG: number[] = [];
+  for (const t of turns) {
+    candX.push(((t % w) + 0.5) * ts);
+    candY.push((Math.floor(t / w) + 0.5) * ts);
+    candG.push(g[t]);
+  }
+  candX.push(ex);
+  candY.push(ey);
+  candG.push(g[end]);
   let ax = x0;
   let ay = y0;
-  const cand: number[] = [];
-  for (const t of turns) cand.push(((t % w) + 0.5) * ts, (Math.floor(t / w) + 0.5) * ts);
-  cand.push(gx, gy);
+  let ag = 0;
   let i = 0;
-  while (i < cand.length) {
-    // furthest candidate visible from the anchor (look ahead a bounded number of points)
+  const n = candX.length;
+  while (i < n) {
     let j = i;
-    const maxLook = Math.min(cand.length - 2, i + 2 * 12);
-    for (let k = maxLook; k > i; k -= 2) {
-      if (los(nav, ax, ay, cand[k], cand[k + 1])) {
+    const maxLook = Math.min(n - 1, i + 12);
+    for (let k = maxLook; k > i; k--) {
+      const c = lineCost(nav, ax, ay, candX[k], candY[k]);
+      if (c <= (candG[k] - ag) * 1.03 + 0.75) {
         j = k;
         break;
       }
     }
-    pts.push(cand[j], cand[j + 1]);
-    ax = cand[j];
-    ay = cand[j + 1];
-    i = j + 2;
+    pts.push(candX[j], candY[j]);
+    ax = candX[j];
+    ay = candY[j];
+    ag = candG[j];
+    i = j + 1;
     if (pts.length >= NAV.maxWaypoints * 2) break;
   }
-  return { status: 'ok', pts, expanded };
+  return { status, pts, expanded };
 }

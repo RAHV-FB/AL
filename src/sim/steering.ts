@@ -11,7 +11,7 @@ import type { Simulation } from './simulation';
 import type { Agent, AgentRoute, TerrainType } from './types';
 import { TERRAIN_INFO } from './constants';
 import { growthFactor } from './lifecycle';
-import { planRoute } from './pathfinding';
+import { lineClear, planRoute } from './pathfinding';
 
 /** Route following (see pathfinding.ts). Distances in tiles, times in ticks. */
 export const ROUTE = {
@@ -25,6 +25,10 @@ export const ROUTE = {
   failRetry: 90,
   /** After the tick's search budget ran out, retry after this long (+ id % 4 to spread the load). */
   budgetRetry: 3,
+  /** No progress toward the current waypoint (or a straight-line goal) for this long: plan again from here. */
+  stallTicks: 60,
+  /** Consecutive partial routes (search cap hit, e.g. a maze) before giving up for failRetry ticks. */
+  maxPartial: 6,
 };
 
 /** Deflection angles tried around obstacles: 0, ±30°, ±60°, ±90°, ±120°, ±150°, 180°. */
@@ -82,8 +86,9 @@ export function stepDir(sim: Simulation, a: Agent, dx: number, dy: number, facto
   }
   const ux = dx / len;
   const uy = dy / len;
+  const ts = sim.state.world.tileSize;
   let probe = step * 2.5;
-  const minProbe = sim.state.world.tileSize * 0.8;
+  const minProbe = ts * 0.8;
   if (probe < minProbe) probe = minProbe;
   if (probe > maxDist) probe = maxDist > step ? maxDist : step;
   let h = a.heading;
@@ -101,6 +106,9 @@ export function stepDir(sim: Simulation, a: Agent, dx: number, dy: number, facto
         const nx = a.x + cx * step;
         const ny = a.y + cy * step;
         if (!sim.passableAt(nx, ny)) continue;
+        // into a diagonal tile only when both side tiles are open (no slipping through a wall's corner) —
+        // the same rule as the route planner's moves and its walkable regions
+        if (Math.floor(nx / ts) !== Math.floor(a.x / ts) && Math.floor(ny / ts) !== Math.floor(a.y / ts) && (!sim.passableAt(nx, a.y) || !sim.passableAt(a.x, ny))) continue;
         if (pass === 0 && !sim.passableAt(a.x + cx * probe, a.y + cy * probe)) continue;
         return commit(sim, a, nx, ny, cx, cy);
       }
@@ -192,32 +200,65 @@ export function moveToward(sim: Simulation, a: Agent, tx: number, ty: number, fa
   return false;
 }
 
-/** Plan how to reach (tx,ty) from where the agent stands: straight line, waypoints, or (for now) no route. */
-function makeRoute(sim: Simulation, a: Agent, tx: number, ty: number, tick: number): AgentRoute {
+/**
+ * Plan how to reach (tx,ty) from where the agent stands: a straight line (unless `force`: the straight line
+ * stalled), waypoints, a partial route (search capped; `partial` counts consecutive ones), or — for now —
+ * no route.
+ */
+function makeRoute(sim: Simulation, a: Agent, tx: number, ty: number, tick: number, force = false, partial = 0): AgentRoute {
   const v = sim.state.world.terrainVersion;
-  if (clearPath(sim, a.x, a.y, tx, ty)) return { gx: tx, gy: ty, pts: [], i: 0, t: tick + ROUTE.directRecheck, v };
+  if (!force && clearPath(sim, a.x, a.y, tx, ty)) return { gx: tx, gy: ty, pts: [], i: 0, t: tick + ROUTE.directRecheck, v, b: 1e9, bt: tick };
   const res = planRoute(sim, a.x, a.y, tx, ty);
-  if (res.status === 'ok' && res.pts.length >= 2) return { gx: tx, gy: ty, pts: res.pts, i: 0, t: tick, v };
+  if ((res.status === 'ok' || (res.status === 'partial' && partial < ROUTE.maxPartial)) && res.pts.length >= 2) {
+    const r: AgentRoute = { gx: tx, gy: ty, pts: res.pts, i: 0, t: tick, v, b: 1e9, bt: tick };
+    if (res.status === 'partial') r.p = partial + 1;
+    return r;
+  }
   const retry = res.status === 'budget' ? ROUTE.budgetRetry + (a.id % 4) : ROUTE.failRetry;
   return { gx: tx, gy: ty, pts: [], i: 0, t: tick + retry, v, fail: true };
+}
+
+/** Track progress (best distance `b` and the tick `bt` it last improved by ≥ 0.5); true when stalled. */
+function stalled(r: AgentRoute, dist: number, tick: number): boolean {
+  const best = r.b ?? 1e9;
+  if (dist < best - 0.5 || r.bt === undefined) {
+    r.b = dist;
+    r.bt = tick;
+    return false;
+  }
+  return tick - r.bt > ROUTE.stallTicks;
 }
 
 /**
  * The waypoint index (into a.route.pts) to steer to this tick, or -1 to steer straight at the goal.
  * Keeps a.route up to date: re-plans when the goal moved, the terrain changed, a re-check or retry is due,
- * or a truncated route ran out; advances past waypoints the agent has reached.
+ * a truncated or partial route ran out, or progress stalled; advances past waypoints the agent has reached
+ * and can see past.
  */
 function routeWaypoint(sim: Simulation, a: Agent, tx: number, ty: number, d: number): number {
   const world = sim.state.world;
   const ts = world.tileSize;
-  if (d < ts * ROUTE.minDistTiles) return -1;
   const tick = sim.state.tick;
   let r = a.route;
-  if (r) {
-    const tol = Math.max(ts * ROUTE.goalTolTiles, d * 0.1);
-    if (Math.abs(r.gx - tx) > tol || Math.abs(r.gy - ty) > tol || r.v !== world.terrainVersion) r = undefined;
-    else if (r.pts.length === 0) {
-      if (tick < r.t) return -1; // straight line verified (or no route yet): steer directly until the re-check
+  const fresh =
+    r !== undefined &&
+    r.v === world.terrainVersion &&
+    Math.abs(r.gx - tx) <= Math.max(ts * ROUTE.goalTolTiles, d * 0.1) &&
+    Math.abs(r.gy - ty) <= Math.max(ts * ROUTE.goalTolTiles, d * 0.1);
+  // close to the goal: steer straight only when nothing is in the way (a thin wall can still separate us)
+  if (d < ts * ROUTE.minDistTiles && !(fresh && r!.pts.length > 0) && clearPath(sim, a.x, a.y, tx, ty)) return -1;
+  if (!fresh) r = undefined;
+  else if (r!.pts.length === 0) {
+    if (r!.fail) {
+      if (tick < r!.t) return -1; // no route yet: wall-follow until the retry
+      r = undefined;
+    } else {
+      // straight line verified: steer directly, but plan a real route if the agent stops getting closer
+      if (stalled(r!, d, tick)) {
+        a.route = makeRoute(sim, a, tx, ty, tick, true);
+        return a.route.pts.length ? Math.min(a.route.i, a.route.pts.length - 2) : -1;
+      }
+      if (tick < r!.t) return -1;
       r = undefined;
     }
   }
@@ -228,27 +269,37 @@ function routeWaypoint(sim: Simulation, a: Agent, tx: number, ty: number, d: num
   }
   const pts = r.pts;
   const last = pts.length - 2;
-  const st = stride(sim, a);
-  const reach = Math.max(ts * 0.5, st * 1.1);
-  let i = r.i;
+  const reach = Math.max(ts * 0.5, stride(sim, a) * 1.1);
+  let i = r.i < last ? r.i : last;
+  // advance past waypoints that are reached — and only once the next one is in sight from here, so the
+  // agent never turns early round a corner it has not cleared
   while (i < last) {
     const ex = pts[i] - a.x;
     const ey = pts[i + 1] - a.y;
-    if (ex * ex + ey * ey > reach * reach) break;
+    const e2 = ex * ex + ey * ey;
+    if (e2 > reach * reach) break;
+    if (e2 > 1 && !lineClear(sim, a.x, a.y, pts[i + 2], pts[i + 3])) break;
     i += 2;
+    r.b = 1e9; // new waypoint: progress is measured afresh
+    r.bt = tick;
   }
   r.i = i;
+  const wx = pts[i] - a.x;
+  const wy = pts[i + 1] - a.y;
+  if (stalled(r, Math.sqrt(wx * wx + wy * wy), tick)) {
+    // pinned at a corner or wading round an unexpected obstacle: plan again from where the agent stands
+    a.route = makeRoute(sim, a, tx, ty, tick, true, r.p ?? 0);
+    return a.route.pts.length ? 0 : -1;
+  }
   if (i >= last) {
-    // final leg. If the route ends at the goal, head straight for the (possibly moving) goal; a route that
-    // was cut short at NAV.maxWaypoints is re-planned once its last waypoint is reached.
+    // final leg. A route that ends at the goal: head straight for the (possibly moving) goal. A route cut
+    // short (NAV.maxWaypoints) or partial (search capped) is continued from its end once reached.
     const ex = pts[last] - r.gx;
     const ey = pts[last + 1] - r.gy;
-    if (ex * ex + ey * ey <= ts * ts) return -1;
-    const fx = pts[last] - a.x;
-    const fy = pts[last + 1] - a.y;
-    if (fx * fx + fy * fy <= reach * reach) {
-      a.route = undefined;
-      return -1;
+    if (ex * ex + ey * ey <= ts * ts) return lineClear(sim, a.x, a.y, tx, ty) ? -1 : i;
+    if (wx * wx + wy * wy <= reach * reach) {
+      a.route = makeRoute(sim, a, tx, ty, tick, false, r.p ?? 0);
+      return a.route.pts.length ? 0 : -1;
     }
   }
   return i;

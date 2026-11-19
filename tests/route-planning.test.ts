@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Simulation } from '../src/sim/simulation';
 import { getScenario } from '../src/sim/presets';
-import { NAV, planRoute, regionAt, sameRegion } from '../src/sim/pathfinding';
+import { NAV, navBudgetLeft, planRoute, regionAt, sameRegion } from '../src/sim/pathfinding';
 import { moveToward } from '../src/sim/steering';
 import { createAgent } from '../src/sim/lifecycle';
 import { randomGenes } from '../src/sim/genetics';
@@ -213,7 +213,7 @@ describe('migration across a ford', () => {
     }
     console.log(`[route] migration across the ford: ${crossed} of ${band.length} starving migrants reached the far bank`);
     expect(routed, 'migrants followed planned routes').toBeGreaterThan(0);
-    expect(crossed, 'migrants that reached the far bank').toBeGreaterThanOrEqual(4);
+    expect(crossed, 'migrants that reached the far bank').toBeGreaterThanOrEqual(9);
   }, 120_000);
 });
 
@@ -288,5 +288,126 @@ describe('routes in the real presets', () => {
     expect(blocked / total).toBeGreaterThan(0.5);
     const r = planRoute(sim, tribes[1].homeX, tribes[1].homeY, tribes[0].homeX, tribes[0].homeY);
     expect(r.status).toBe('ok');
+  });
+});
+
+/** A flat grass world with no river, for obstacle-specific tests. */
+function grassWorld(): Simulation {
+  const sim = riverWorld();
+  const w = sim.state.world;
+  for (let i = 0; i < w.terrain.length; i++) {
+    w.terrain[i] = TERRAIN.Grass;
+    w.fertility[i] = w.baseFertility[i] = 1;
+    w.food[i] = 8;
+  }
+  w.terrainVersion++;
+  return sim;
+}
+
+function walkTo(sim: Simulation, a: Agent, gx: number, gy: number, ticks: number): number {
+  for (let t = 0; t < ticks; t++) {
+    if (moveToward(sim, a, gx, gy, 1, 3)) return t;
+    expect(sim.passableAt(a.x, a.y)).toBe(true);
+    a.energy = 1;
+    sim.state.tick++;
+  }
+  return -1;
+}
+
+describe('route following: review regressions', () => {
+  it('a thin wall between the agent and a nearby goal is walked round, not pushed into', () => {
+    const sim = grassWorld();
+    const w = sim.state.world;
+    for (let tx = 20; tx < w.width; tx++) w.terrain[60 * w.width + tx] = TERRAIN.Wall; // 1-tile wall, gap at the far west
+    w.terrainVersion++;
+    const s = tileCentre(110, 61);
+    const g = tileCentre(100, 59);
+    const a = addAgent(sim, s.x, s.y);
+    expect(walkTo(sim, a, g.x, g.y, 6000)).toBeGreaterThanOrEqual(0);
+  });
+
+  it('a diagonal one-tile wall is not slipped through at its corners (planner, smoothing and stepping agree)', () => {
+    const sim = grassWorld();
+    const w = sim.state.world;
+    // anti-diagonal wall (66,83)..(56,93) plus a lake to its south-west
+    for (let k = 0; k <= 10; k++) w.terrain[(83 + k) * w.width + (66 - k)] = TERRAIN.Wall;
+    for (let ty = 95; ty < 110; ty++) for (let tx = 40; tx < 62; tx++) w.terrain[ty * w.width + tx] = TERRAIN.DeepWater;
+    w.terrainVersion++;
+    const s = { x: 52.25 * TS, y: 84.05 * TS };
+    const g = tileCentre(112, 115);
+    const res = planRoute(sim, s.x, s.y, g.x, g.y);
+    expect(res.status).toBe('ok');
+    // every leg, sampled finely: never on a wall tile, never squeezing diagonally past a wall corner
+    const open = (tx: number, ty: number) => sim.passableAt((tx + 0.5) * TS, (ty + 0.5) * TS);
+    let px = s.x;
+    let py = s.y;
+    for (let k = 0; k < res.pts.length; k += 2) {
+      const n = Math.ceil(Math.hypot(res.pts[k] - px, res.pts[k + 1] - py) / (0.02 * TS));
+      let ptx = Math.floor(px / TS);
+      let pty = Math.floor(py / TS);
+      for (let q = 1; q <= n; q++) {
+        const x = px + ((res.pts[k] - px) * q) / n;
+        const y = py + ((res.pts[k + 1] - py) * q) / n;
+        const tx = Math.floor(x / TS);
+        const ty = Math.floor(y / TS);
+        expect(open(tx, ty), `leg ${k / 2} enters tile ${tx},${ty}`).toBe(true);
+        if (tx !== ptx && ty !== pty) expect(open(tx, pty) && open(ptx, ty), `leg ${k / 2} cuts the corner at ${tx},${ty}`).toBe(true);
+        ptx = tx;
+        pty = ty;
+      }
+      px = res.pts[k];
+      py = res.pts[k + 1];
+    }
+    const a = addAgent(sim, s.x, s.y);
+    a.traits.speed = 0.53; // slow walkers were the ones that got pinned
+    expect(walkTo(sim, a, g.x, g.y, 8000)).toBeGreaterThanOrEqual(0);
+  });
+
+  it('a maze too big for one search is crossed with partial routes, without hammering the budget', () => {
+    const sim = grassWorld();
+    const w = sim.state.world;
+    // serpentine walls every 6 rows with alternating gaps at the ends
+    for (let ty = 6; ty < w.height - 2; ty += 6) {
+      const gapLeft = (ty / 6) % 2 === 0;
+      for (let tx = 0; tx < w.width; tx++) {
+        if (gapLeft ? tx < 3 : tx >= w.width - 3) continue;
+        w.terrain[ty * w.width + tx] = TERRAIN.Wall;
+      }
+    }
+    w.terrainVersion++;
+    const s = tileCentre(100, 1);
+    const g = tileCentre(100, 123);
+    expect(sameRegion(sim, s.x, s.y, g.x, g.y)).toBe(true);
+    const a = addAgent(sim, s.x, s.y);
+    let partial = 0;
+    let arrived = -1;
+    for (let t = 0; t < 40000 && arrived < 0; t++) {
+      if (moveToward(sim, a, g.x, g.y, 1, 3)) arrived = t;
+      if (a.route?.p) partial = Math.max(partial, a.route.p);
+      a.energy = 1;
+      sim.state.tick++;
+    }
+    expect(partial, 'used partial routes').toBeGreaterThan(0);
+    expect(arrived, 'got through the maze').toBeGreaterThanOrEqual(0);
+  }, 120_000);
+
+  it('rejects a saved route whose waypoint index points past the last waypoint', () => {
+    const sim = riverWorld();
+    const a = addAgent(sim, tileCentre(80, 30).x, tileCentre(80, 30).y);
+    a.route = { gx: 1000, gy: 240, pts: [700, 240, 1000, 240], i: 4, t: 0, v: sim.state.world.terrainVersion };
+    const warnings: string[] = [];
+    const st = deserializeState(serializeSim(sim), { warnings });
+    expect(st.agents.find((x) => x.id === a.id)!.route).toBeUndefined();
+  });
+
+  it('route searches made between ticks do not eat into the next tick (budget reset at every step)', () => {
+    const a = riverWorld();
+    const b = riverWorld();
+    const s = tileCentre(20, 110);
+    const g = tileCentre(180, 10);
+    for (let k = 0; k < 6; k++) planRoute(a, s.x, s.y, g.x, g.y); // only on a, outside step()
+    a.step();
+    b.step();
+    expect(navBudgetLeft(a)).toBe(navBudgetLeft(b));
   });
 });
