@@ -56,6 +56,8 @@ export interface RouteResult {
 
 interface NavCache {
   version: number;
+  /** world.navVersion the regions were labelled for. */
+  navVer: number;
   terrain: Uint8Array;
   w: number;
   h: number;
@@ -78,7 +80,7 @@ interface NavCache {
 }
 
 const caches = new WeakMap<WorldState, NavCache>();
-const budgets = new WeakMap<Simulation, { tick: number; used: number }>();
+const budgets = new WeakMap<Simulation, { tick: number; used: number; over: boolean }>();
 
 const SQRT2 = Math.SQRT2;
 // neighbour offsets: 4 orthogonal then 4 diagonal
@@ -94,6 +96,7 @@ function build(world: WorldState): NavCache {
   if (!c || c.w !== w || c.h !== h) {
     c = {
       version: -1,
+      navVer: -1,
       terrain: world.terrain,
       w,
       h,
@@ -144,6 +147,7 @@ function build(world: WorldState): NavCache {
   }
   c.regions = id;
   c.version = world.terrainVersion;
+  c.navVer = world.navVersion ?? 0;
   return c;
 }
 
@@ -151,7 +155,19 @@ function build(world: WorldState): NavCache {
 function navOf(sim: Simulation): NavCache {
   const world = sim.state.world;
   const c = caches.get(world);
-  if (c && c.version === world.terrainVersion && c.terrain === world.terrain && c.w === world.width && c.h === world.height) return c;
+  if (c && c.terrain === world.terrain && c.w === world.width && c.h === world.height) {
+    if (c.version === world.terrainVersion) return c;
+    if (c.navVer === (world.navVersion ?? 0)) {
+      // only terrain costs changed (land repainted as other land): refresh the cost grid, keep the regions
+      for (let i = 0; i < c.cost.length; i++) {
+        const info = TERRAIN_INFO[world.terrain[i] as TerrainType];
+        const mc = info && info.passable ? info.moveCost : 0;
+        c.cost[i] = mc > 0 ? 1 / mc : 0;
+      }
+      c.version = world.terrainVersion;
+      return c;
+    }
+  }
   return build(world);
 }
 
@@ -218,17 +234,22 @@ export function navBudgetLeft(sim: Simulation): number {
   return Math.max(0, NAV.tickBudget - b.used);
 }
 
-function spend(sim: Simulation, n: number): void {
+function budgetOf(sim: Simulation): { tick: number; used: number; over: boolean } {
   let b = budgets.get(sim);
   if (!b) {
-    b = { tick: sim.state.tick, used: 0 };
+    b = { tick: sim.state.tick, used: 0, over: false };
     budgets.set(sim, b);
   }
   if (b.tick !== sim.state.tick) {
     b.tick = sim.state.tick;
     b.used = 0;
+    b.over = false;
   }
-  b.used += n;
+  return b;
+}
+
+function spend(sim: Simulation, n: number): void {
+  budgetOf(sim).used += n;
 }
 
 // ---------------------------------------------------------------- binary heap (min f), lazy deletion
@@ -344,11 +365,10 @@ export function lineClear(sim: Simulation, x0: number, y0: number, x1: number, y
 
 /** Reset this tick's search budget (called by Simulation.step at the start of every tick). */
 export function resetNavBudget(sim: Simulation): void {
-  const b = budgets.get(sim);
-  if (b) {
-    b.tick = sim.state.tick;
-    b.used = 0;
-  } else budgets.set(sim, { tick: sim.state.tick, used: 0 });
+  const b = budgetOf(sim);
+  b.tick = sim.state.tick;
+  b.used = 0;
+  b.over = false;
 }
 
 // ---------------------------------------------------------------- A*
@@ -361,7 +381,7 @@ export function resetNavBudget(sim: Simulation): void {
  * Callers decide beforehand whether a straight line suffices (steering.clearPath); this function always
  * searches when the goal is reachable.
  */
-export function planRoute(sim: Simulation, x0: number, y0: number, x1: number, y1: number): RouteResult {
+export function planRoute(sim: Simulation, x0: number, y0: number, x1: number, y1: number, overdraft = false): RouteResult {
   const nav = navOf(sim);
   const start = snapPassable(nav, tileOf(nav, x0, y0), 1);
   const goal = snapPassable(nav, tileOf(nav, x1, y1), NAV.goalSnapTiles);
@@ -372,8 +392,13 @@ export function planRoute(sim: Simulation, x0: number, y0: number, x1: number, y
   const gy = goalPassable ? y1 : (Math.floor(goal / nav.w) + 0.5) * ts;
   if (start === goal) return { status: 'ok', pts: [gx, gy], expanded: 0 };
 
-  const left = navBudgetLeft(sim);
-  const limit = Math.min(NAV.queryBudget, left);
+  // fairness: one agent per tick that has been refused repeatedly may search in full even when the
+  // tick's budget is spent (deterministic: the flag is reset with the budget every tick)
+  const b = budgetOf(sim);
+  const over = overdraft && !b.over;
+  const left = over ? NAV.queryBudget : navBudgetLeft(sim);
+  if (over) b.over = true;
+  let limit = Math.min(NAV.queryBudget, left);
   // do not start a search the tick cannot finish (it would be wasted): estimate the need from the distance
   const sdx = Math.abs((start % nav.w) - (goal % nav.w));
   const sdy = Math.abs(Math.floor(start / nav.w) - Math.floor(goal / nav.w));
@@ -456,7 +481,9 @@ export function planRoute(sim: Simulation, x0: number, y0: number, x1: number, y
     if (!(expanded > limit)) return { status: 'unreachable', pts: [], expanded };
     // the shared tick budget ran short: retry soon. The query's own cap was hit (a maze, a long comb of
     // walls): follow a partial route to the explored tile nearest the goal and plan again from there.
-    if (limit < NAV.queryBudget || bestNode === start) return { status: 'budget', pts: [], expanded };
+    if (limit < NAV.queryBudget) return { status: 'budget', pts: [], expanded };
+    // a full search found nothing closer to the goal than the start (a dead-end pocket): give up for now
+    if (bestNode === start) return { status: 'unreachable', pts: [], expanded };
     end = bestNode;
     status = 'partial';
   }

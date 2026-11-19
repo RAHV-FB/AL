@@ -772,20 +772,65 @@ function memorySpot(r: Repairs, field: string, e: unknown): Obj | null {
 }
 
 /** Pass 2: sanitise every field of a living agent in place (unknown extension fields are kept). */
-/** Field order of a live agent (lifecycle.createAgent). Unknown extra fields are kept, after these. */
-const AGENT_KEYS = [
-  'id', 'name', 'alive', 'generation', 'parents', 'birthTick', 'age', 'x', 'y', 'vx', 'vy', 'heading', 'genes', 'traits',
-  'health', 'food', 'energy', 'carried', 'action', 'actionTicks', 'targetX', 'targetY', 'targetId', 'decisionCooldown',
-  'utilities', 'thought', 'reproCooldown', 'offspring', 'children', 'tribeId', 'relationships', 'role', 'skills',
-  'infection', 'virulence', 'immuneTicks', 'memory', 'history', 'stats', 'deathTick', 'deathCause', 'lastAttackerId',
-  'fear', 'sinceMeal', 'route', 'trek', 'diseaseHp',
-] as const;
-
+/**
+ * Rebuild a sanitised agent as ONE object literal in lifecycle.createAgent's key order (nested records too).
+ * Adding 47 fields one by one would drop the object into V8's slow dictionary mode, and a different key
+ * order would give loaded agents another hidden class than live ones — either makes every tick markedly
+ * slower. Unknown extra fields are not part of the contract and are dropped.
+ */
 function canonicalAgent(a: Obj): Obj {
-  const out: Obj = {};
-  for (const k of AGENT_KEYS) out[k] = a[k];
-  for (const k of Object.keys(a)) if (!(k in out)) out[k] = a[k];
-  return out;
+  const sk = a.skills as Obj;
+  const st = a.stats as Obj;
+  const mem = a.memory as Obj;
+  return {
+    id: a.id,
+    name: a.name,
+    alive: a.alive,
+    generation: a.generation,
+    parents: a.parents,
+    birthTick: a.birthTick,
+    age: a.age,
+    x: a.x,
+    y: a.y,
+    vx: a.vx,
+    vy: a.vy,
+    heading: a.heading,
+    genes: a.genes,
+    traits: a.traits,
+    health: a.health,
+    food: a.food,
+    energy: a.energy,
+    carried: a.carried,
+    action: a.action,
+    actionTicks: a.actionTicks,
+    targetX: a.targetX,
+    targetY: a.targetY,
+    targetId: a.targetId,
+    decisionCooldown: a.decisionCooldown,
+    utilities: a.utilities,
+    thought: a.thought,
+    reproCooldown: a.reproCooldown,
+    offspring: a.offspring,
+    children: a.children,
+    tribeId: a.tribeId,
+    relationships: a.relationships,
+    role: a.role,
+    skills: { forage: sk.forage, combat: sk.combat, social: sk.social },
+    infection: a.infection,
+    virulence: a.virulence,
+    immuneTicks: a.immuneTicks,
+    memory: { food: mem.food, danger: mem.danger },
+    history: a.history,
+    stats: { foodEaten: st.foodEaten, distance: st.distance, kills: st.kills, shared: st.shared, received: st.received, fights: st.fights },
+    deathTick: a.deathTick,
+    deathCause: a.deathCause,
+    lastAttackerId: a.lastAttackerId,
+    fear: a.fear,
+    sinceMeal: a.sinceMeal,
+    route: a.route,
+    trek: a.trek,
+    diseaseHp: a.diseaseHp,
+  };
 }
 
 function sanitizeAgent(a: Obj, refs: Refs, r: Repairs): void {
@@ -936,7 +981,8 @@ function sanitizeAgent(a: Obj, refs: Refs, r: Repairs): void {
       (rt.bt === undefined || (isInt(rt.bt) && rt.bt >= 0 && rt.bt <= refs.tick)) &&
       (rt.p === undefined || (isInt(rt.p) && rt.p >= 1 && rt.p <= ROUTE.maxPartial)) &&
       (rt.wait === undefined || typeof rt.wait === 'boolean') &&
-      Object.keys(rt).every((k) => ['gx', 'gy', 'pts', 'i', 't', 'v', 'fail', 'b', 'bt', 'p', 'wait'].includes(k));
+      (rt.w === undefined || (isInt(rt.w) && rt.w >= 1 && rt.w <= 1_000_000)) &&
+      Object.keys(rt).every((k) => ['gx', 'gy', 'pts', 'i', 't', 'v', 'fail', 'b', 'bt', 'p', 'wait', 'w'].includes(k));
     if (!valid) {
       r.fix('agent.route');
       a.route = undefined; // steering simply plans again

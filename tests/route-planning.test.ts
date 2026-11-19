@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { Simulation } from '../src/sim/simulation';
 import { getScenario } from '../src/sim/presets';
-import { NAV, navBudgetLeft, planRoute, regionAt, sameRegion } from '../src/sim/pathfinding';
+import { NAV, navBudgetLeft, planRoute, regionAt, resetNavBudget, sameRegion } from '../src/sim/pathfinding';
 import { moveToward } from '../src/sim/steering';
 import { createAgent } from '../src/sim/lifecycle';
 import { randomGenes } from '../src/sim/genetics';
@@ -485,4 +485,87 @@ describe('route planning: performance regressions', () => {
       expect(dead, `seed ${seed}`).toBeLessThanOrEqual(4);
     }
   }, 180_000);
+});
+
+describe('route following: final-verification regressions', () => {
+  it('a dead-end pocket gives up instead of waiting forever, and does not starve other agents’ planning', () => {
+    const sim = grassWorld();
+    const w = sim.state.world;
+    for (let tx = 20; tx <= 180; tx++) w.terrain[100 * w.width + tx] = TERRAIN.Wall; // cup bottom
+    for (let ty = 10; ty <= 100; ty++) {
+      w.terrain[ty * w.width + 20] = TERRAIN.Wall;
+      w.terrain[ty * w.width + 180] = TERRAIN.Wall;
+    }
+    for (let ty = 105; ty < 120; ty++) for (let tx = 5; tx < 15; tx++) w.terrain[ty * w.width + tx] = TERRAIN.DeepWater; // a lake
+    w.terrainVersion++;
+    w.navVersion = (w.navVersion ?? 0) + 1;
+    const trapped: Agent[] = [];
+    for (let k = 0; k < 8; k++) trapped.push(addAgent(sim, tileCentre(96 + k, 99).x, tileCentre(96 + k, 99).y));
+    const bystanders: Agent[] = [];
+    for (let k = 0; k < 20; k++) bystanders.push(addAgent(sim, tileCentre(2, 103 + (k % 10)).x + (k >= 10 ? 4 : 0), tileCentre(2, 103 + (k % 10)).y));
+    const cupGoal = tileCentre(100, 110);
+    const lakeGoal = tileCentre(18, 112);
+    let trappedWaitTicks = 0;
+    const arrived = new Set<number>();
+    for (let t = 0; t < 3000; t++) {
+      for (const a of trapped) {
+        moveToward(sim, a, cupGoal.x, cupGoal.y, 1, 3);
+        if (a.route?.wait) trappedWaitTicks++;
+        a.energy = 1;
+      }
+      for (const a of bystanders) {
+        if (arrived.has(a.id)) continue;
+        if (moveToward(sim, a, lakeGoal.x, lakeGoal.y, 1, 4)) arrived.add(a.id);
+        a.energy = 1;
+      }
+      sim.state.tick++;
+      resetNavBudget(sim);
+    }
+    expect(arrived.size, 'bystanders that reached their goal round the lake').toBe(20);
+    expect(trappedWaitTicks, 'ticks the trapped agents spent waiting for search budget').toBeLessThan(1000);
+  }, 120_000);
+
+  it('a juvenile holding a leftover straight-line route still follows its mother across the ford', () => {
+    const sim = riverWorld();
+    const mother = addAgent(sim, tileCentre(110, 30).x, tileCentre(110, 30).y);
+    const kid = addAgent(sim, tileCentre(89, 31).x, tileCentre(89, 31).y);
+    kid.age = Math.floor(kid.traits.maturityAge * 0.3);
+    kid.parents = [mother.id, -1];
+    kid.route = { gx: 90.9 * TS, gy: 37.4 * TS, pts: [], i: 0, t: 1e6, v: sim.state.world.navVersion ?? 0, b: 1e9, bt: 0 }; // stale verdict
+    let crossed = -1;
+    for (let t = 0; t < 3000 && crossed < 0; t++) {
+      mother.x = tileCentre(110, 30).x; // she waits on the far bank
+      mother.y = tileCentre(110, 30).y;
+      mother.food = mother.traits.maxFood;
+      kid.food = kid.traits.maxFood;
+      sim.step();
+      if (kid.x > 105 * TS) crossed = t;
+    }
+    expect(crossed, 'tick the juvenile reached the far bank').toBeGreaterThanOrEqual(0);
+  }, 60_000);
+
+  it('agents behind diagonal one-tile walls — far or near the goal — are not pinned', () => {
+    let arrivedFar = 0;
+    let arrivedNear = 0;
+    let trials = 0;
+    for (let k = 0; k < 6; k++) {
+      const sim = grassWorld();
+      const w = sim.state.world;
+      const ox = 40 + 20 * k;
+      for (let j = 0; j < 30; j++) w.terrain[(50 + j) * w.width + (ox + j)] = TERRAIN.Wall; // diagonal wall
+      w.terrainVersion++;
+      w.navVersion = (w.navVersion ?? 0) + 1;
+      trials++;
+      // far: across the wall's middle
+      const a = addAgent(sim, tileCentre(ox + 10, 64).x + 2.3, tileCentre(ox + 10, 64).y + 1.1);
+      const g = tileCentre(ox + 2, 75);
+      if (walkTo(sim, a, g.x, g.y, 6000) >= 0) arrivedFar++;
+      // near: goal within 2.5 tiles on the other side of the wall
+      const b = addAgent(sim, tileCentre(ox + 15, 64).x + 1.7, tileCentre(ox + 15, 64).y + 2.9);
+      const gb = tileCentre(ox + 14, 66);
+      if (walkTo(sim, b, gb.x, gb.y, 6000) >= 0) arrivedNear++;
+    }
+    expect(arrivedFar).toBe(trials);
+    expect(arrivedNear).toBe(trials);
+  }, 120_000);
 });

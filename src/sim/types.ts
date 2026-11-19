@@ -228,8 +228,9 @@ export interface Agent {
 /**
  * A walking route toward goal (gx,gy). pts: flat waypoints [x0,y0,x1,y1,…] (empty = the straight line was
  * verified clear, or no route exists when `fail`); i: index of the next waypoint; t: tick the route was
- * planned (with waypoints) or the tick of the next re-check / retry (empty pts); v: world.terrainVersion it
- * was planned on (any terrain change re-plans).
+ * planned (with waypoints) or the tick of the next re-check / retry (empty pts); v: world.navVersion it was
+ * planned on (when walkability changes, the remaining legs are re-checked and the route re-planned only if one
+ * is blocked).
  */
 export interface AgentRoute {
   gx: number;
@@ -244,8 +245,10 @@ export interface AgentRoute {
   bt?: number;
   /** Consecutive partial routes (search capped, e.g. in a maze); absent = a complete route. */
   p?: number;
-  /** Waiting for search budget (pts empty): stand still until tick t, then plan. */
+  /** Waiting for search budget (pts empty): walk on while the way ahead is open, plan again at tick t. */
   wait?: boolean;
+  /** Budget refusals in a row while waiting (after a few the agent may overdraw the tick's budget). */
+  w?: number;
 }
 
 export interface LineageRecord {

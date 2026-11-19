@@ -2123,11 +2123,13 @@ function actWander(sim: Simulation, a: Agent): void {
       const ex = m.x - a.x;
       const ey = m.y - a.y;
       const d = Math.sqrt(ex * ex + ey * ey);
-      if (d > 18 && (a.route ? a.route.pts.length > 0 : !clearPath(sim, a.x, a.y, m.x, m.y)) && sameRegion(sim, a.x, a.y, m.x, m.y)) {
+      const rt = a.route;
+      if (d > 18 && ((rt !== undefined && (rt.pts.length > 0 || rt.wait === true)) || !clearPath(sim, a.x, a.y, m.x, m.y)) && sameRegion(sim, a.x, a.y, m.x, m.y)) {
         // she crossed at a ford (or went round a wall): follow her route instead of pressing into the bank
         moveToward(sim, a, m.x, m.y, 0.5 + 0.4 * Math.min(1, (d - 18) / 60), 18);
         return;
       }
+      if (rt !== undefined) a.route = undefined; // following her directly: no leftover route
       if (d > 18) {
         const w = Math.min(1.5, (d - 18) / 40) * 1.5;
         dx += (ex / d) * w;

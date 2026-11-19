@@ -192,3 +192,18 @@ No preset goes extinct within 12 days. In 20-day runs, measured by the ecology a
 **Emergent conflict** (behaviour audit, seed 42, 12 days, integrated tree): fights/day — eden 0, collapse 0, plague-island 0 (gentle genomes), predators ≈22, fittest ≈104, two-civs ≈181, evolab ≈196; living tribes ≈5–15 per 1000 agents (was ≈40 tiny splinters).
 
 **GitHub Pages** — after pushing the final code to `main`, the "Deploy to GitHub Pages" run #12 (44440590726) **succeeded** (build and deploy jobs green). The earlier failures were the `github-pages` environment rejecting deploys from the feature branch. Loading <https://rahv-fb.github.io/AL/> in headless Chromium returned HTTP 200; the app booted into Garden of Eden and was simulating (tick 120, 224 agents after ~4 s) with no console or page errors.
+
+
+## Route planning across fords (added 2026-11-19)
+
+Agents now plan walking routes (A* over the tile grid with walkable regions, exact line of sight, partial routes through mazes, a per-tick search budget) and hungry agents on spent land migrate to greener land on a committed trek. Four independent adversarial reviews (pathfinding correctness, determinism & save/load, performance, behaviour) and one verification round of their fixes were run; every confirmed finding was fixed and has a regression test in `tests/route-planning.test.ts` or `tests/agent-shape.test.ts`.
+
+All numbers below are from runs on the final tree:
+
+- **Tests:** `npx vitest run --exclude tests/balance.report.test.ts` → **38 files, 389 tests passed.** `npx tsc --noEmit` clean.
+- **Crossing a ford (synthetic river with a single ford):** 12 of 12 starving migrants, out of sight of the lush far bank, trek across on each of seeds 3, 11 and 29, with 0 starving on the way; with routing disabled (pathfinding mocked) 0 of 12 cross.
+- **Real presets:** Plague Island — 50 agents followed planned routes between islands within 3,000 ticks; Two Civilizations — the river blocks most straight crossings but both banks are one region and camp-to-camp routes plan through the fords.
+- **Robustness:** thin walls near the goal, diagonal one-tile walls (planner, smoothing and stepping agree on the corner rule), a serpentine maze crossed with partial routes, a dead-end cup that gives up instead of freezing (20 of 20 bystanders still reach their goals), routes kept through land→land repaints, saves taken mid-route continue with an identical full hash.
+- **Performance:** 1000 agents → mean **3.46 ms/tick** (p95 5.51) in `tests/perf.bench.test.ts`; the pre-feature value was ≈3.9 ms. One hidden class per agent is enforced by `tests/agent-shape.test.ts` (live and loaded agents). Long runs: eden 20,000 ticks at 4.02 ms/tick, heap 35.9 → 28.5 MB; predators 3.59 ms/tick, 28.3 → 33.3 MB.
+- **Browser:** `node scripts/ui-audit.mjs --file dist/index.html` → **231 passed, 0 failed**; ~1000 agents: 58 FPS at 1×, 38.6 FPS / 178 TPS at Max. `node scripts/browser-smoke.mjs` passed.
+- **Balance (12 days, seed 42, final population):** eden 1000, fittest 78, two-civs 519, evolab 770, collapse 1219, plague-island 1000, predators 689 — no extinctions; within a few percent of the pre-feature runs.

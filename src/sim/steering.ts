@@ -29,6 +29,8 @@ export const ROUTE = {
   stallTicks: 60,
   /** Consecutive partial routes (search cap hit, e.g. a maze) before giving up for failRetry ticks. */
   maxPartial: 6,
+  /** After this many budget refusals in a row an agent may overdraw the tick's search budget (one per tick). */
+  overdraftAfter: 3,
 };
 
 /** Deflection angles tried around obstacles: 0, ±30°, ±60°, ±90°, ±120°, ±150°, 180°. */
@@ -157,12 +159,22 @@ export function clearPath(sim: Simulation, x0: number, y0: number, x1: number, y
   const dy = y1 - y0;
   const d = Math.sqrt(dx * dx + dy * dy);
   if (!(d > 0)) return Number.isFinite(d);
-  const n = Math.ceil(d / (sim.state.world.tileSize * 0.5));
+  const ts = sim.state.world.tileSize;
+  const n = Math.ceil(d / (ts * 0.5));
   let run = 0;
-  for (let i = 1; i < n; i++) {
+  let ptx = Math.floor(x0 / ts);
+  let pty = Math.floor(y0 / ts);
+  for (let i = 1; i <= n; i++) {
     const t = i / n;
     const sx = x0 + dx * t;
     const sy = y0 + dy * t;
+    // a diagonal hop between samples whose two side tiles are both blocked squeezes through a wall's corner
+    const ctx = Math.floor(sx / ts);
+    const cty = Math.floor(sy / ts);
+    if (ctx !== ptx && cty !== pty && !sim.passableAt((ctx + 0.5) * ts, (pty + 0.5) * ts) && !sim.passableAt((ptx + 0.5) * ts, (cty + 0.5) * ts)) return false;
+    ptx = ctx;
+    pty = cty;
+    if (i === n) break; // the end point itself is checked on entry
     if (sim.passableAt(sx, sy)) run = 0;
     // two samples in a row: the line crosses the obstacle (not just a clipped corner) — blocked when it is
     // wall-like there, since stepDir cannot get round a long one-tile wall
@@ -187,7 +199,11 @@ export function moveToward(sim: Simulation, a: Agent, tx: number, ty: number, fa
   }
   const wp = routeWaypoint(sim, a, tx, ty, d);
   if (wp === -2) {
-    halt(a); // a route is being planned (search budget spent this tick)
+    // a route is being worked out (search budget spent this tick): keep walking while the next two tiles
+    // toward the goal are open, and only stand still at the obstacle itself
+    const k = Math.min(1, (2 * sim.state.world.tileSize) / d);
+    if (clearPath(sim, a.x, a.y, a.x + dx * k, a.y + dy * k)) stepDir(sim, a, dx, dy, factor, d - arriveDist * 0.5);
+    else halt(a);
     return false;
   }
   if (wp >= 0) {
@@ -209,17 +225,18 @@ export function moveToward(sim: Simulation, a: Agent, tx: number, ty: number, fa
  * stalled), waypoints, a partial route (search capped; `partial` counts consecutive ones), or — for now —
  * no route.
  */
-function makeRoute(sim: Simulation, a: Agent, tx: number, ty: number, tick: number, force = false, partial = 0): AgentRoute {
+function makeRoute(sim: Simulation, a: Agent, tx: number, ty: number, tick: number, force = false, partial = 0, waited = 0): AgentRoute {
   const v = sim.state.world.navVersion ?? 0;
   if (!force && clearPath(sim, a.x, a.y, tx, ty)) return { gx: tx, gy: ty, pts: [], i: 0, t: tick + ROUTE.directRecheck, v, b: 1e9, bt: tick };
-  const res = planRoute(sim, a.x, a.y, tx, ty);
+  // an agent refused several times in a row gets to overdraw the tick's budget (one per tick): no starvation
+  const res = planRoute(sim, a.x, a.y, tx, ty, waited >= ROUTE.overdraftAfter);
   if ((res.status === 'ok' || (res.status === 'partial' && partial < ROUTE.maxPartial)) && res.pts.length >= 2) {
     const r: AgentRoute = { gx: tx, gy: ty, pts: res.pts, i: 0, t: tick, v, b: 1e9, bt: tick };
     if (res.status === 'partial') r.p = partial + 1;
     return r;
   }
-  // this tick's search budget is spent: wait (standing still) and try again shortly
-  if (res.status === 'budget') return { gx: tx, gy: ty, pts: [], i: 0, t: tick + ROUTE.budgetRetry + (a.id % 4), v, wait: true };
+  // this tick's search budget is spent: wait and try again shortly (moveToward keeps walking while it can)
+  if (res.status === 'budget') return { gx: tx, gy: ty, pts: [], i: 0, t: tick + ROUTE.budgetRetry + (a.id % 4), v, wait: true, w: waited + 1 };
   // no way (or a maze too large even for a chain of partial routes): give up for a while
   return { gx: tx, gy: ty, pts: [], i: 0, t: tick + (res.status === 'partial' ? 2 * ROUTE.failRetry : ROUTE.failRetry), v, fail: true };
 }
@@ -234,6 +251,11 @@ function legsClear(sim: Simulation, a: Agent, r: AgentRoute): boolean {
     py = r.pts[k + 1];
   }
   return true;
+}
+
+/** First waypoint index of a fresh route, -2 while waiting for search budget, -1 to steer straight. */
+function routeStart(r: AgentRoute): number {
+  return r.pts.length ? 0 : r.wait ? -2 : -1;
 }
 
 /** Track progress (best distance `b` and the tick `bt` it last improved by ≥ 0.5); true when stalled. */
@@ -267,12 +289,18 @@ function routeWaypoint(sim: Simulation, a: Agent, tx: number, ty: number, d: num
     if (r!.pts.length > 0 ? legsClear(sim, a, r!) : !r!.fail) r!.v = nv;
     else fresh = false;
   }
-  // close to the goal: steer straight only when nothing is in the way (a thin wall can still separate us)
-  if (d < ts * ROUTE.minDistTiles && !(fresh && r!.pts.length > 0) && clearPath(sim, a.x, a.y, tx, ty)) return -1;
+  // close to the goal: steer straight only when the exact line is clear (a thin or diagonal wall can still
+  // separate us); a leftover route for another goal is dropped so it is not shown
+  if (d < ts * ROUTE.minDistTiles && !(fresh && r!.pts.length > 0) && lineClear(sim, a.x, a.y, tx, ty)) {
+    if (r !== undefined && !fresh) a.route = undefined;
+    return -1;
+  }
+  let waited = 0;
   if (!fresh) r = undefined;
   else if (r!.pts.length === 0) {
     if (r!.wait) {
-      if (tick < r!.t) return -2; // waiting for search budget: stand still rather than press into the bank
+      if (tick < r!.t) return -2; // waiting for search budget
+      waited = r!.w ?? 1;
       r = undefined;
     } else if (r!.fail) {
       if (tick < r!.t) return -1; // no route yet: wall-follow until the retry
@@ -281,14 +309,23 @@ function routeWaypoint(sim: Simulation, a: Agent, tx: number, ty: number, d: num
       // straight line verified: steer directly, but plan a real route if the agent stops getting closer
       if (stalled(r!, d, tick)) {
         a.route = makeRoute(sim, a, tx, ty, tick, true);
-        return a.route.pts.length ? Math.min(a.route.i, a.route.pts.length - 2) : -1;
+        return routeStart(a.route);
       }
       if (tick < r!.t) return -1;
-      r = undefined;
+      // re-check the straight line; the stall clock carries over, so a pinned agent is still noticed
+      const prev = r!;
+      const nr = makeRoute(sim, a, tx, ty, tick);
+      if (nr.pts.length === 0 && !nr.fail && !nr.wait) {
+        nr.b = prev.b;
+        nr.bt = prev.bt;
+      }
+      a.route = nr;
+      if (nr.pts.length === 0) return nr.wait ? -2 : -1;
+      r = nr;
     }
   }
   if (!r) {
-    r = makeRoute(sim, a, tx, ty, tick);
+    r = makeRoute(sim, a, tx, ty, tick, false, 0, waited);
     a.route = r;
     if (r.pts.length === 0) return r.wait ? -2 : -1;
   }
@@ -314,7 +351,7 @@ function routeWaypoint(sim: Simulation, a: Agent, tx: number, ty: number, d: num
   if (stalled(r, Math.sqrt(wx * wx + wy * wy), tick)) {
     // pinned at a corner or wading round an unexpected obstacle: plan again from where the agent stands
     a.route = makeRoute(sim, a, tx, ty, tick, true, r.p ?? 0);
-    return a.route.pts.length ? 0 : -1;
+    return routeStart(a.route);
   }
   if (i >= last) {
     // final leg. A route that ends at the goal: head straight for the (possibly moving) goal. A route cut
@@ -324,7 +361,7 @@ function routeWaypoint(sim: Simulation, a: Agent, tx: number, ty: number, d: num
     if (ex * ex + ey * ey <= ts * ts) return lineClear(sim, a.x, a.y, tx, ty) ? -1 : i;
     if (wx * wx + wy * wy <= reach * reach) {
       a.route = makeRoute(sim, a, tx, ty, tick, false, r.p ?? 0);
-      return a.route.pts.length ? 0 : -1;
+      return routeStart(a.route);
     }
   }
   return i;
