@@ -88,8 +88,14 @@ const LOCAL_R = 44;
 const SCARCE_PER_HEAD = 40;
 /** Outsiders closer than this to my tribe's camp, standing on my tribe's land, can be challenged. */
 const TERRITORY_R = 160;
-/** Enemy camps farther than this are not worth raiding. */
-const RAID_RANGE = 900;
+/** Enemy camps farther than this on foot (walking distance by the best route, world units) are not worth raiding. */
+const RAID_RANGE = 1100;
+/** How long (ticks) a raider keeps marching on an enemy camp before giving up (2.5 days at the default day length). */
+export const RAID_TREK_TICKS = 1500;
+/** A raider whose health falls below this fraction breaks off the raid. */
+const RAID_GIVE_UP_HP = 0.45;
+/** Extra utility that keeps a raider on the march once it has set out. */
+const RAID_COMMIT = 0.25;
 /** Genetic distance (0..1) below which another agent looks like "one of us" (hostility toward it fades). */
 const ALIKE_DIST = 0.3;
 /** Distance a fleeing agent aims for (its escape point must be open ground). */
@@ -706,6 +712,149 @@ function perceive(sim: Simulation, a: Agent, b: Agent, pw: number): void {
   }
 }
 
+// ------------------------------------------------------------------ walking distance to a camp (raids)
+/**
+ * Walking-distance fields toward tribe camps, used to value raids by the route a raiding party would walk (across
+ * a ford, round a lake) instead of the straight line. A field is a Dijkstra search over the tile grid from the
+ * camp's tile with the route planner's step costs (step length × the mean time cost 1/moveCost of the two tiles,
+ * no corner cutting), in world units at the pace of open grass, so shallows and mountain passes count as the
+ * extra walking they are. Unreachable tiles, and tiles beyond WALK_FIELD_MAX, read Infinity.
+ * Derived data: cached per simulation and never saved. A field depends only on the camp's tile and the terrain
+ * (world.terrainVersion), so a loaded run computes exactly the same values.
+ */
+interface WalkField {
+  tile: number;
+  tv: number;
+  dist: Float32Array;
+}
+const WALK_FIELD_MAX = RAID_RANGE * 1.1;
+const walkFields = new WeakMap<Simulation, Map<number, WalkField>>();
+// search scratch, shared by every field (a field is computed in one synchronous call)
+let wfCost = new Float32Array(0);
+let wfDist = new Float64Array(0);
+let wfHeapNode = new Int32Array(0);
+let wfHeapKey = new Float64Array(0);
+const WF_DX = [1, -1, 0, 0, 1, 1, -1, -1];
+const WF_DY = [0, 0, 1, -1, 1, -1, 1, -1];
+const WF_LEN = [1, 1, 1, 1, Math.SQRT2, Math.SQRT2, Math.SQRT2, Math.SQRT2];
+
+function computeWalkField(sim: Simulation, src: number, out: Float32Array): void {
+  const w = sim.state.world;
+  const W = w.width;
+  const H = w.height;
+  const N = W * H;
+  const ts = w.tileSize;
+  if (wfCost.length !== N) {
+    wfCost = new Float32Array(N);
+    wfDist = new Float64Array(N);
+  }
+  const cost = wfCost;
+  const dist = wfDist;
+  const terr = w.terrain;
+  for (let i = 0; i < N; i++) {
+    const info = TERRAIN_INFO[terr[i] as TerrainType];
+    cost[i] = info !== undefined && info.passable && info.moveCost > 0 ? 1 / info.moveCost : 0;
+  }
+  dist.fill(Infinity);
+  out.fill(Infinity);
+  if (src < 0 || src >= N || cost[src] === 0) return;
+  const capacity = 8 * N + 16;
+  if (wfHeapNode.length < capacity) {
+    wfHeapNode = new Int32Array(capacity);
+    wfHeapKey = new Float64Array(capacity);
+  }
+  const hn = wfHeapNode;
+  const hk = wfHeapKey;
+  let len = 0;
+  const limit = WALK_FIELD_MAX / ts; // tile units
+  dist[src] = 0;
+  hn[0] = src;
+  hk[0] = 0;
+  len = 1;
+  while (len > 0) {
+    // pop the minimum
+    const node = hn[0];
+    const key = hk[0];
+    len--;
+    if (len > 0) {
+      const ln = hn[len];
+      const lk = hk[len];
+      let i = 0;
+      for (;;) {
+        const l = 2 * i + 1;
+        if (l >= len) break;
+        const r = l + 1;
+        const c = r < len && hk[r] < hk[l] ? r : l;
+        if (!(hk[c] < lk)) break;
+        hn[i] = hn[c];
+        hk[i] = hk[c];
+        i = c;
+      }
+      hn[i] = ln;
+      hk[i] = lk;
+    }
+    if (key > dist[node]) continue; // stale entry
+    if (key > limit) break;
+    const cx = node % W;
+    const cy = (node - cx) / W;
+    const cc = cost[node];
+    for (let k = 0; k < 8; k++) {
+      const nx = cx + WF_DX[k];
+      const ny = cy + WF_DY[k];
+      if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
+      const nb = ny * W + nx;
+      const nc = cost[nb];
+      if (nc === 0) continue;
+      if (k >= 4 && (cost[cy * W + nx] === 0 || cost[ny * W + cx] === 0)) continue; // no corner cutting
+      const nd = key + WF_LEN[k] * 0.5 * (cc + nc);
+      if (!(nd < dist[nb])) continue;
+      dist[nb] = nd;
+      // push
+      let i = len++;
+      while (i > 0) {
+        const p = (i - 1) >> 1;
+        if (!(nd < hk[p])) break;
+        hn[i] = hn[p];
+        hk[i] = hk[p];
+        i = p;
+      }
+      hn[i] = nb;
+      hk[i] = nd;
+    }
+  }
+  for (let i = 0; i < N; i++) {
+    const d = dist[i];
+    if (d <= limit) out[i] = d * ts;
+  }
+}
+
+/** Walking distance (world units) from (x,y) to the camp of tribe t by the best route; Infinity when out of reach. */
+function walkDistance(sim: Simulation, t: Tribe, x: number, y: number): number {
+  const at = sim.tileIndex(x, y);
+  if (at < 0) return Infinity;
+  const w = sim.state.world;
+  const N = w.width * w.height;
+  const tile = sim.tileIndex(t.homeX, t.homeY);
+  const tv = w.terrainVersion;
+  let byTribe = walkFields.get(sim);
+  if (!byTribe) {
+    byTribe = new Map();
+    walkFields.set(sim, byTribe);
+  }
+  let f = byTribe.get(t.id);
+  if (!f || f.tile !== tile || f.tv !== tv || f.dist.length !== N) {
+    if (!f) {
+      if (byTribe.size >= 32) byTribe.clear(); // old camps of extinct tribes: recomputed on demand if ever needed
+      f = { tile, tv, dist: new Float32Array(N) };
+      byTribe.set(t.id, f);
+    } else if (f.dist.length !== N) f.dist = new Float32Array(N);
+    f.tile = tile;
+    f.tv = tv;
+    computeWalkField(sim, tile, f.dist);
+  }
+  return f.dist[at];
+}
+
 // ------------------------------------------------------------------ explore target
 /** True when (x,y) lies in an active meteor zone, or a plague zone this agent could still catch (as in think()). */
 function inDangerZone(sim: Simulation, a: Agent, x: number, y: number): boolean {
@@ -1203,9 +1352,15 @@ export function think(sim: Simulation, a: Agent): void {
   // migration: hungry in a neighbourhood grazed bare, with no camp store to fall back on — strike out for
   // lusher land, however far (pickExploreTarget favours lush-looking ground; steering plans the route,
   // across a ford if need be). Picking at scraps nearby (a weak food target) then loses to moving on.
-  // a trek in progress (a migrant's destination) holds through detours — until arrival, lush land, a full
-  // stomach or expiry
+  // a trek in progress holds through detours. A raider's (kind 'raid') lasts until continuingRaid says the raid
+  // is over; a migrant's lasts until arrival, lush land, a full stomach or expiry.
   let trek = a.trek;
+  let raidTrek: Tribe | null = null;
+  if (trek && trek.kind === 'raid') {
+    raidTrek = continuingRaid(sim, a, trek, tribe, hp, cap, tick);
+    if (!raidTrek) a.trek = undefined;
+    trek = undefined; // from here on `trek` is a migration only
+  }
   if (trek) {
     const tdx = trek.x - a.x;
     const tdy = trek.y - a.y;
