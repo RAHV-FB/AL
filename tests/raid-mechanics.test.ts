@@ -118,7 +118,7 @@ describe('raid treks', () => {
     expect(loot).toBeGreaterThan(5);
     expect(enemy.stockpile).toBeCloseTo(300 - loot, 6); // moved, not created
     expect(raidLeg(r), 'loaded: the raid turns for home').toBe('home');
-    expect(sim.state.events.some((e) => e.message === 'Raiders of the Raiders plundered the stockpile of the Keepers.')).toBe(true);
+    expect(sim.state.events.some((e) => e.message === 'The Raiders plundered the stockpile of the Keepers.')).toBe(true);
     brainTicks(sim, [r], 3000, () => own.stockpile > 0);
     expect(own.stockpile).toBeCloseTo(loot, 6);
     expect(r.carried).toBeLessThan(0.5);

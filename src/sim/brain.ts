@@ -32,7 +32,7 @@
  *   explore / raid (plunder on arrival), wander (juveniles stay near their mother), rest/idle.
  */
 import type { Simulation } from './simulation';
-import { ACTIONS, NONE, type ActionKind, type Agent, type TerrainType, type Tribe } from './types';
+import { ACTIONS, NONE, TERRAIN, type ActionKind, type Agent, type TerrainType, type Tribe } from './types';
 import { LIMITS, TERRAIN_INFO } from './constants';
 import { consumeFood, findFood, foodAt, tileCapacity } from './ecology';
 import {
@@ -1558,12 +1558,14 @@ export function think(sim: Simulation, a: Agent): void {
   {
     // away from camp a sociable agent would rather walk home for the night; a raider on the march sleeps where it is
     const awayFromCamp = tribe && campDist > 60 && !raidTrek ? 1 - 0.6 * soc : 1;
+    // ...but not standing in a ford: caught in the shallows at nightfall it wades on to the bank first
+    const inShallows = raidTrek !== null && a.energy >= 0.12 && sim.terrainAt(a.x, a.y) === TERRAIN.Water ? 0.15 : 1;
     const foodAtHand = hereFood >= 1 || (haveFoodTarget && fDist < 24);
     U[I_REST] = Math.max(
       0.005,
       Math.pow(fatigue, 1.5) * 1.3 +
         (a.energy < 0.12 ? 0.5 : 0) +
-        night * (0.16 + 0.3 * fatigue) * awayFromCamp +
+        night * (0.16 + 0.3 * fatigue) * awayFromCamp * inShallows +
         0.08 * chill +
         sick * 0.3 +
         (hp < 0.6 ? (0.6 - hp) * 0.8 : 0) -

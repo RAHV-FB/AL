@@ -29,7 +29,7 @@ const foragerSide = (sim: Simulation, a: Agent) => a.tribeId !== -1 && founding(
 /** Raid events in which a raider tribe plundered a forager tribe. */
 function raidsOnForagers(sim: Simulation): { tick: number; message: string }[] {
   return sim.state.events.filter((e) => {
-    const m = /^Raiders of (.+) plundered the stockpile of (.+)\.$/.exec(e.message);
+    const m = /^(.+) plundered the stockpile of (.+)\.$/.exec(e.message);
     if (!m || e.tribeId === undefined) return false;
     const target = sim.state.tribes.find((t) => m[2] === t.name || m[2] === `the ${t.name}`);
     return founding(sim, sim.getTribe(e.tribeId)) === 'Crimson Raiders' && founding(sim, target) === 'Verdant Foragers';

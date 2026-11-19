@@ -325,13 +325,16 @@ function pairKey(a: number, b: number): number {
   return a < b ? a * 1048576 + b : b * 1048576 + a;
 }
 
-/** "the Varn-kin" — but scenario names such as "The Wolf Pack" are used as-is. */
+/**
+ * The tribe's name inside a sentence: "the Varn-kin". Scenario names that already start with
+ * "The" ("The Golden Realm") get a lower-case article too; cap() restores it at a sentence start.
+ */
 export function theTribe(t: Pick<Tribe, 'name'>): string {
-  return /^the\s/i.test(t.name) ? t.name : `the ${t.name}`;
+  return /^the\s/i.test(t.name) ? `the ${t.name.slice(4)}` : `the ${t.name}`;
 }
 
 function the(t: Tribe): string {
-  return /^the\s/i.test(t.name) ? t.name : `the ${t.name}`;
+  return theTribe(t);
 }
 
 function cap(text: string): string {
@@ -848,7 +851,7 @@ export function raidStockpile(sim: Simulation, raider: Agent, target: Tribe): nu
   addHistory(sim, raider, `Raided the camp of ${the(target)}`);
   const marker = `plundered the stockpile of ${the(target)}`;
   if (!loggedRecently(sim, own.id, marker, sim.state.config.dayLength)) {
-    sim.log('conflict', 'bad', `Raiders of ${the(own)} ${marker}.`, { x: target.homeX, y: target.homeY, agentId: raider.id, tribeId: own.id });
+    sim.log('conflict', 'bad', `${cap(the(own))} ${marker}.`, { x: target.homeX, y: target.homeY, agentId: raider.id, tribeId: own.id });
   }
   return amt;
 }
@@ -1514,7 +1517,8 @@ function territoryPass(sim: Simulation, c: SocialCache): void {
         }
       }
     };
-    for (const m of g.list) stamp(m.x, m.y, 1);
+    // members away on a raid claim no land on the enemy's side (as for the camp pull and splits)
+    for (const m of g.list) if (!onRaid(m)) stamp(m.x, m.y, 1);
     stamp(t.homeX, t.homeY, K.campInfluence);
     for (let k = 0; k < nt; k++) {
       const i = touched[k];
