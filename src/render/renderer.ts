@@ -520,6 +520,35 @@ export class Renderer {
       }
       ctx.globalAlpha = 1;
     }
+    // planned route (around a river via a ford, round a lake or wall): the remaining waypoints, then the goal
+    const rt = a.route;
+    if (view.showTrails && rt && !rt.fail && rt.pts.length >= 2 && rt.i < rt.pts.length) {
+      ctx.strokeStyle = 'rgba(255,214,120,0.85)';
+      ctx.lineWidth = 1.6 * px;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      this.dash[0] = 6 * px;
+      this.dash[1] = 5 * px;
+      ctx.setLineDash(this.dash);
+      ctx.lineDashOffset = -time * 0.01 * px;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      for (let k = rt.i; k + 1 < rt.pts.length; k += 2) ctx.lineTo(rt.pts[k], rt.pts[k + 1]);
+      ctx.lineTo(rt.gx, rt.gy);
+      ctx.stroke();
+      ctx.setLineDash(this.noDash);
+      ctx.lineDashOffset = 0;
+      ctx.fillStyle = 'rgba(255,214,120,0.95)';
+      for (let k = rt.i; k + 1 < rt.pts.length - 2; k += 2) {
+        ctx.beginPath();
+        ctx.arc(rt.pts[k], rt.pts[k + 1], 2.2 * px, 0, TAU);
+        ctx.fill();
+      }
+      ctx.beginPath(); // goal marker
+      ctx.arc(rt.gx, rt.gy, 4 * px, 0, TAU);
+      ctx.lineWidth = 1.5 * px;
+      ctx.stroke();
+    }
   }
 
   /** Lines (and partner rings) from the selected agent to its kin, friends and enemies (world space, over agents). */

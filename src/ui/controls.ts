@@ -22,7 +22,7 @@ export const OVERLAYS: { value: OverlayKind; label: string; tip: string }[] = [
 
 const VIEW_TOGGLES: { key: string; label: string; tip: string }[] = [
   { key: 'showVision', label: 'Vision radius', tip: 'Draw the selected agent\'s perception radius.' },
-  { key: 'showTrails', label: 'Trails', tip: 'Motion trail behind the selected / followed agent.' },
+  { key: 'showTrails', label: 'Trails', tip: 'Motion trail behind the selected / followed agent, and its planned route (dashed gold) when it is detouring round a river, lake or wall.' },
   { key: 'showRelations', label: 'Relationships', tip: 'Lines from the selected agent to friends, enemies and kin.' },
   { key: 'showCamps', label: 'Tribe camps', tip: 'Camp markers (with food stockpiles) for every tribe.' },
   { key: 'showLabels', label: 'Name labels', tip: 'Agent names when zoomed in.' },

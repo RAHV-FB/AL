@@ -213,8 +213,32 @@ export interface Agent {
   fear?: number;
   /** Ticks since last meal (brain/lifecycle). */
   sinceMeal?: number;
+  /** Planned route around obstacles (steering.ts / pathfinding.ts); absent while steering straight. */
+  route?: AgentRoute;
+  /**
+   * A migrant's chosen destination (brain.ts): hungry on land grazed bare, it treks toward greener land and
+   * keeps this goal through detours (a bite of scraps, a fight, sleep) until it arrives, finds lush land,
+   * is fed, or the trek expires at tick `until`.
+   */
+  trek?: { x: number; y: number; until: number };
   /** Health right after the last disease update (disease.ts; infection suppresses natural healing). */
   diseaseHp?: number;
+}
+
+/**
+ * A walking route toward goal (gx,gy). pts: flat waypoints [x0,y0,x1,y1,…] (empty = the straight line was
+ * verified clear, or no route exists when `fail`); i: index of the next waypoint; t: tick the route was
+ * planned (with waypoints) or the tick of the next re-check / retry (empty pts); v: world.terrainVersion it
+ * was planned on (any terrain change re-plans).
+ */
+export interface AgentRoute {
+  gx: number;
+  gy: number;
+  pts: number[];
+  i: number;
+  t: number;
+  v: number;
+  fail?: boolean;
 }
 
 export interface LineageRecord {

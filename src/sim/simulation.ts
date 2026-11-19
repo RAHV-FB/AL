@@ -553,6 +553,15 @@ export class Simulation {
       mix(a.skills.forage); mix(a.skills.combat); mix(a.skills.social);
       mix(a.infection); mix(a.virulence); mix(a.immuneTicks); mix(a.lastAttackerId);
       mix(opt(a.fear)); mix(opt(a.sinceMeal)); mix(opt(a.diseaseHp));
+      const rt = a.route;
+      mix(rt ? 1 : 0);
+      if (rt) {
+        mix(rt.gx); mix(rt.gy); mix(rt.i); mix(rt.t); mix(rt.v); mix(rt.fail ? 1 : 0); mix(rt.pts.length);
+        for (const p of rt.pts) mix(p);
+      }
+      const tk = a.trek;
+      mix(tk ? 1 : 0);
+      if (tk) { mix(tk.x); mix(tk.y); mix(tk.until); }
       const st = a.stats;
       mix(st.foodEaten); mix(st.distance); mix(st.kills); mix(st.shared); mix(st.received); mix(st.fights);
       mix(a.children.length);

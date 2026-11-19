@@ -115,11 +115,20 @@ Each agent has:
 Every few ticks, and sooner when threatened, a utility-AI brain scores 14 actions and picks the best one: *idle, wander, explore, forage, eat, rest, flee, attack, share, mate, socialize, go home, deposit, withdraw*. The inspector shows the scores and a plain-language "thought". Agents also have:
 
 - short **memories** of rich food spots (4) and dangerous places (3)
+- a planned **route** when the straight way is blocked, and, when starving on spent land, a **trek** to greener land (see *Navigation and migration*)
 - **skills** (forage, combat, social) that improve with practice
 - an emergent **role** (forager, warrior, caretaker or explorer), chosen by comparative advantage
 - a capped personal life log
 
 Agents die of **starvation, old age, combat, disease, disasters**, or **removal** by you.
+
+### Navigation and migration
+- **Steering:** agents walk straight at their goal and slide round small obstacles (a rock, a short wall stub). Slow terrain slows them: shallows and mountains cost the most time.
+- **Route planning:** when the straight line is blocked — a river crossed only at shallow fords, a lake, a wall you painted — the agent plans a route with A* over the tile grid. Step costs follow terrain speed, so routes favour open ground and use slow shallows only where they must. The tile path is smoothed to a few waypoints. Walkable land is labelled into connected regions, so a goal on another island or behind a closed wall is rejected at once instead of searched for.
+- **What gets routed:** places — food when the near bank is bare, the tribe's camp, an enemy camp to raid, exploration and migration goals. Chasing or meeting another agent still needs a straight line, because a moving target is never caught by a long detour.
+- **Migration:** a hungry agent on land grazed bare, with no camp store to fall back on, looks farther afield (up to about 3× its usual range), and lush-looking land draws its eye even far beyond its perception. It commits to that destination as a **trek** and keeps it through a bite of scraps, a fight or a night's sleep, until it arrives, finds lush land, is fed, or gives up after 3 days. Robbing food within reach, or a rich patch in sight, still comes first.
+- **Cost control:** route searches share a per-tick budget (30,000 node expansions; one search ≤ 14,000). A refused search is retried a few ticks later. Routes are part of the save, so a loaded run follows the same waypoints.
+- **Watching it:** select an agent with the Trails view toggle on and its planned route appears as a dashed gold line with waypoints. The inspector says when it is following a route or migrating.
 
 ### Genes and trade-offs
 There are 12 genes, each in [0, 1]. `genetics.expressTraits` turns them into traits. **No gene is free.** Every benefit either costs food every tick or has a built-in drawback, so a gene spreads only where the environment rewards it.
@@ -195,7 +204,8 @@ src/
     constants.ts     terrain rules, SAVE_VERSION, LIMITS
     world.ts         procedural island generation and passable-tile search
     ecology.ts       clock, seasons, temperature, plant regrowth, soil fertility
-    brain.ts         utility AI (think/act); steering.ts handles terrain-aware movement
+    brain.ts         utility AI (think/act); steering.ts handles terrain-aware movement and route following
+    pathfinding.ts   route planning: walkable regions and weighted A* across fords, round lakes and walls
     lifecycle.ts     vitals, growth, aging and death
     genetics.ts      genes → traits, upkeep, crossover, mutation, mating
     social.ts        relationships, combat, sharing, stockpiles, tribes, territory, roles
@@ -259,6 +269,7 @@ Derived indexes (`agentById`, `tribeById`, `lineageById` and the spatial hash) l
 | `tests/eco-*.test.ts` | ecology audit regressions: spatial cold snaps, regrowth from grazed land, breeding range gate, seasonal stability, stats records |
 | `tests/ui-*.test.ts` | UI logic: brush previews match applied radii, day labels match the clock, contrast tokens |
 | `tests/lead-*.test.ts` | save/load continuity: mid-replay saves, pending interventions, diplomacy and epidemic event logs |
+| `tests/route-planning.test.ts` | route planning: regions, A* through the only ford (every leg walkable), unreachable goals, the per-tick budget, an agent crossing to the far bank, re-planning after a ford is painted over, starving migrants trekking to a lush far bank (9 of 12 cross; 0 without routing), routes in saves, Plague Island routing |
 | `scripts/ui-audit.mjs` | Playwright: drives every visible control of the built app (231 checks: tools, events, experiments, parameters, overlays, save/load, inspector, shortcuts, layout at 3 sizes, contrast, FPS) and asserts real effects |
 | `scripts/browser-smoke.mjs` | loads `dist/index.html` (or `--url`) in headless Chromium and fails on console or page errors, failed requests or a blank canvas; toggles play/pause, presses a few shortcuts and saves `docs/screenshot.png` |
 
@@ -288,7 +299,7 @@ AL_LONGRUN_TICKS=5000 npx vitest run tests/longrun.test.ts --silent=false  # qui
 - **Economy:** plant food is the only resource. Exchange means gifts between agents and a shared tribe stockpile; there is no trade between different goods.
 - **Analytics:** statistics are sampled every 30 ticks, and old history is merged to save space during long runs. The lineage registry holds at most 6,000 records. When it is full, the oldest dead ancestors are dropped first, so very deep family trees are cut short.
 - **Replay length:** the intervention log keeps only the latest 5,000 interventions. Drag-painting records a stamp about every 40 ms, so after a long editing session the earliest interventions are dropped and **Replay my interventions** is no longer exact.
-- **Navigation:** agents steer around obstacles locally and avoid targets they cannot reach in a straight line (allowing for thin obstacles), but there is no route planning: food or enemies reachable only through a long detour (a distant ford or pass) are skipped.
+- **Navigation:** routes are planned for places, not for chasing moving agents across water. Route searches are capped per tick, so in rare pile-ups an agent may wait a few ticks for its route. Agents do not avoid each other or queue at a crowded ford.
 - **Diplomacy:** wars between neighbouring warlike tribes cool only slowly; within a 12-day run they rarely end in a formal peace.
 - **Eden and the population cap:** Garden of Eden is deliberately limited by the population cap rather than by food (its land could feed many times the cap); births continue at the cap, replacing deaths.
 - **Save files:** a file from a newer save-format version is rejected with a readable error.

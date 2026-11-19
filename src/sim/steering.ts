@@ -1,14 +1,31 @@
 // OWNER: Agent Intelligence agent.
 /**
  * Low-level locomotion for agents: terrain-aware stepping with obstacle
- * avoidance, arrival, straight-line reachability checks (clearPath, used to pick
- * walkable targets), and recovery when terrain is painted underneath an agent.
- * Allocation-free; called every tick from brain.act().
+ * avoidance, arrival, straight-line reachability checks (clearPath), route following
+ * around rivers, lakes and walls (moveToward plans with pathfinding.planRoute when the
+ * straight line is blocked), and recovery when terrain is painted underneath an agent.
+ * Called every tick from brain.act(); per-tick work is allocation-free except when a
+ * new route is planned.
  */
 import type { Simulation } from './simulation';
-import type { Agent, TerrainType } from './types';
+import type { Agent, AgentRoute, TerrainType } from './types';
 import { TERRAIN_INFO } from './constants';
 import { growthFactor } from './lifecycle';
+import { planRoute } from './pathfinding';
+
+/** Route following (see pathfinding.ts). Distances in tiles, times in ticks. */
+export const ROUTE = {
+  /** Goals closer than this are always steered to directly. */
+  minDistTiles: 2.5,
+  /** A goal that moved more than this (or 10% of the distance) from the planned goal triggers a re-plan. */
+  goalTolTiles: 1.5,
+  /** A straight line verified clear is trusted for this long before it is checked again. */
+  directRecheck: 40,
+  /** After "unreachable", steer directly (wall-following) and try again after this long. */
+  failRetry: 90,
+  /** After the tick's search budget ran out, retry after this long (+ id % 4 to spread the load). */
+  budgetRetry: 3,
+};
 
 /** Deflection angles tried around obstacles: 0, ±30°, ±60°, ±90°, ±120°, ±150°, 180°. */
 const N_DEFLECT = 7;
@@ -147,7 +164,8 @@ export function clearPath(sim: Simulation, x0: number, y0: number, x1: number, y
 }
 
 /**
- * Steer toward (tx,ty). Returns true (and stops) when within `arriveDist`.
+ * Steer toward (tx,ty), following a planned route when the straight line is blocked (a river crossed at a
+ * ford, a lake, a painted wall). Returns true (and stops) when within `arriveDist`.
  * Callers must pass finite coordinates.
  */
 export function moveToward(sim: Simulation, a: Agent, tx: number, ty: number, factor: number, arriveDist: number): boolean {
@@ -156,11 +174,84 @@ export function moveToward(sim: Simulation, a: Agent, tx: number, ty: number, fa
   const d = Math.sqrt(dx * dx + dy * dy);
   if (!(d > arriveDist)) {
     halt(a);
+    if (a.route) a.route = undefined;
     return true;
+  }
+  const wp = routeWaypoint(sim, a, tx, ty, d);
+  if (wp >= 0) {
+    const r = a.route as AgentRoute;
+    const wx = r.pts[wp] - a.x;
+    const wy = r.pts[wp + 1] - a.y;
+    const wd = Math.sqrt(wx * wx + wy * wy);
+    // stop at the waypoint (it may sit at a corner of the obstacle); the next tick turns toward the next one
+    stepDir(sim, a, wx, wy, factor, wd > 0.05 ? wd : 0.05);
+    return false;
   }
   const lim = d - arriveDist * 0.5;
   stepDir(sim, a, dx, dy, factor, lim > 0.05 ? lim : 0.05);
   return false;
+}
+
+/** Plan how to reach (tx,ty) from where the agent stands: straight line, waypoints, or (for now) no route. */
+function makeRoute(sim: Simulation, a: Agent, tx: number, ty: number, tick: number): AgentRoute {
+  const v = sim.state.world.terrainVersion;
+  if (clearPath(sim, a.x, a.y, tx, ty)) return { gx: tx, gy: ty, pts: [], i: 0, t: tick + ROUTE.directRecheck, v };
+  const res = planRoute(sim, a.x, a.y, tx, ty);
+  if (res.status === 'ok' && res.pts.length >= 2) return { gx: tx, gy: ty, pts: res.pts, i: 0, t: tick, v };
+  const retry = res.status === 'budget' ? ROUTE.budgetRetry + (a.id % 4) : ROUTE.failRetry;
+  return { gx: tx, gy: ty, pts: [], i: 0, t: tick + retry, v, fail: true };
+}
+
+/**
+ * The waypoint index (into a.route.pts) to steer to this tick, or -1 to steer straight at the goal.
+ * Keeps a.route up to date: re-plans when the goal moved, the terrain changed, a re-check or retry is due,
+ * or a truncated route ran out; advances past waypoints the agent has reached.
+ */
+function routeWaypoint(sim: Simulation, a: Agent, tx: number, ty: number, d: number): number {
+  const world = sim.state.world;
+  const ts = world.tileSize;
+  if (d < ts * ROUTE.minDistTiles) return -1;
+  const tick = sim.state.tick;
+  let r = a.route;
+  if (r) {
+    const tol = Math.max(ts * ROUTE.goalTolTiles, d * 0.1);
+    if (Math.abs(r.gx - tx) > tol || Math.abs(r.gy - ty) > tol || r.v !== world.terrainVersion) r = undefined;
+    else if (r.pts.length === 0) {
+      if (tick < r.t) return -1; // straight line verified (or no route yet): steer directly until the re-check
+      r = undefined;
+    }
+  }
+  if (!r) {
+    r = makeRoute(sim, a, tx, ty, tick);
+    a.route = r;
+    if (r.pts.length === 0) return -1;
+  }
+  const pts = r.pts;
+  const last = pts.length - 2;
+  const st = stride(sim, a);
+  const reach = Math.max(ts * 0.5, st * 1.1);
+  let i = r.i;
+  while (i < last) {
+    const ex = pts[i] - a.x;
+    const ey = pts[i + 1] - a.y;
+    if (ex * ex + ey * ey > reach * reach) break;
+    i += 2;
+  }
+  r.i = i;
+  if (i >= last) {
+    // final leg. If the route ends at the goal, head straight for the (possibly moving) goal; a route that
+    // was cut short at NAV.maxWaypoints is re-planned once its last waypoint is reached.
+    const ex = pts[last] - r.gx;
+    const ey = pts[last + 1] - r.gy;
+    if (ex * ex + ey * ey <= ts * ts) return -1;
+    const fx = pts[last] - a.x;
+    const fy = pts[last + 1] - a.y;
+    if (fx * fx + fy * fy <= reach * reach) {
+      a.route = undefined;
+      return -1;
+    }
+  }
+  return i;
 }
 
 /**

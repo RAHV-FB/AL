@@ -11,8 +11,10 @@
  *      in view and of my allies close by is tallied to judge the odds of a fight.
  *   3. food: tile underfoot, a cheap local scan (which also measures local food per head =
  *      scarcity), ecology.findFood and remembered rich spots (memory.food); danger memory and active
- *      disasters are avoided; only targets that can be walked to in a straight line are chosen
- *      (steering.clearPath), so agents do not pin themselves against a river bank.
+ *      disasters are avoided. Targets in a straight line (steering.clearPath) are preferred; places beyond
+ *      a river or a lake — food when the near side is bare, the camp, an enemy camp, exploration goals — are
+ *      reached by planned routes across fords (steering.moveToward → pathfinding.planRoute), and targets that
+ *      cannot be reached at all (pathfinding.sameRegion) are never chosen.
  *   4. conflict appraisal — nothing scripted: for each out-group agent in view a motive (rob its load
  *      or drive it off a patch I need when food is scarce; chase it off my tribe's land near camp;
  *      tribal war or a personal feud; join a friend's fight) is weighed by the odds (combat power incl.
@@ -48,6 +50,7 @@ import { canMate, geneticDistance, reproduce } from './genetics';
 import { growthFactor, isAdult } from './lifecycle';
 import { temperatureAt } from './disasters';
 import { clearPath, escapeImpassable, halt, moveToward, stepDir } from './steering';
+import { sameRegion } from './pathfinding';
 
 /**
  * Re-exported for callers that think of them as properties of the agent. The brain judges fights with
@@ -479,21 +482,32 @@ function moveFoodCand(from: number, to: number): void {
   fcMem[to] = fcMem[from];
 }
 
+/** How long (ticks) a migrant keeps heading for its chosen destination. */
+const TREK_TICKS = 1800;
+
+/** Food reachable only by a detour (across a ford, around a lake) is worth this much of its straight-line score. */
+const DETOUR_FOOD_FACTOR = 0.6;
+
 /**
- * Choose the best food candidate that can be walked to in a straight line (fX/fY/fFood/fScore/fDist/
- * fFromMemory). Food seen across a river or behind a wall is skipped instead of pinning the agent
- * against the obstacle. Returns false (fScore 0) when no candidate is reachable.
+ * Choose the best food candidate (fX/fY/fFood/fScore/fDist/fFromMemory). Candidates that can be walked to in
+ * a straight line win; only when none can does the agent settle for food it must detour to (across a river
+ * at a ford, round a lake — steering plans the route), at a discount. Food that cannot be reached at all
+ * (another island, walled off) is skipped. Returns false (fScore 0) when no candidate is reachable.
  */
 function chooseFood(sim: Simulation, a: Agent): boolean {
-  for (let i = 0; i < fcLen; i++) {
-    if (fcDist[i] > 12 && !clearPath(sim, a.x, a.y, fcX[i], fcY[i])) continue;
-    fX = fcX[i];
-    fY = fcY[i];
-    fFood = fcFood[i];
-    fScore = fcScore[i];
-    fDist = fcDist[i];
-    fFromMemory = fcMem[i] === 1;
-    return true;
+  for (let pass = 0; pass < 2; pass++) {
+    for (let i = 0; i < fcLen; i++) {
+      if (fcDist[i] > 12) {
+        if (pass === 0 ? !clearPath(sim, a.x, a.y, fcX[i], fcY[i]) : !sameRegion(sim, a.x, a.y, fcX[i], fcY[i])) continue;
+      }
+      fX = fcX[i];
+      fY = fcY[i];
+      fFood = fcFood[i];
+      fScore = pass === 0 ? fcScore[i] : fcScore[i] * DETOUR_FOOD_FACTOR;
+      fDist = fcDist[i];
+      fFromMemory = fcMem[i] === 1;
+      return true;
+    }
   }
   fX = NaN;
   fY = NaN;
@@ -693,15 +707,52 @@ function perceive(sim: Simulation, a: Agent, b: Agent, pw: number): void {
 }
 
 // ------------------------------------------------------------------ explore target
-function pickExploreTarget(sim: Simulation, a: Agent, tribe: Tribe | undefined, soc: number, tick: number): boolean {
+/**
+ * How lush the land around (x,y) looks: mean standing food over ±4 tiles (every 2nd tile, 25 reads) relative
+ * to a well-stocked grassland tile, 0 (bare) .. 1 (lush), up to 1.5 for forest. Absolute food, not the
+ * fraction of capacity, so full shallows or rock (tiny capacity) do not look like good land.
+ */
+function lushness(sim: Simulation, x: number, y: number): number {
+  const w = sim.state.world;
+  const ts = w.tileSize;
+  const tx0 = Math.floor(x / ts);
+  const ty0 = Math.floor(y / ts);
+  let sum = 0;
+  let n = 0;
+  for (let oy = -4; oy <= 4; oy += 2) {
+    const ty = ty0 + oy;
+    if (ty < 0 || ty >= w.height) continue;
+    for (let ox = -4; ox <= 4; ox += 2) {
+      const tx = tx0 + ox;
+      if (tx < 0 || tx >= w.width) continue;
+      sum += w.food[ty * w.width + tx];
+      n++;
+    }
+  }
+  const ref = 8 * (sim.config.foodCapacity > 0 ? sim.config.foodCapacity : 1);
+  const v = n > 0 ? sum / n / ref : 0;
+  return v > 1.5 ? 1.5 : v > 0 ? v : 0;
+}
+
+/**
+ * Pick somewhere to explore. Land that looks lush from afar is attractive — green forest across a river is
+ * visible long before its food is in perception range — mildly for any scout and strongly for the hungry,
+ * whose search also widens (up to ~2.2× the normal range). So a starving band whose own bank is bare heads
+ * for the far bank, and steering plans the route across a ford. Unreachable places are skipped.
+ */
+function pickExploreTarget(sim: Simulation, a: Agent, tribe: Tribe | undefined, soc: number, tick: number, migrate = 0): boolean {
   const margin = sim.state.world.tileSize * 2;
   const W = sim.worldW;
   const H = sim.worldH;
-  const reach = 120 + 0.8 * a.traits.perception;
+  const hunger = hungerOf(a);
+  const need = hunger > 0.3 ? (hunger - 0.3) / 0.7 : 0; // 0 when fed, 1 when starving
+  // migrants (hungry on land grazed bare) search up to ~3× farther for somewhere worth moving to
+  const reach = (120 + 0.8 * a.traits.perception) * (1 + 1.2 * need) * (1 + migrate);
+  const tries = migrate > 0.2 ? 10 : need > 0 ? 8 : 6;
   let best = -Infinity;
   exX = NaN;
   exY = NaN;
-  for (let k = 0; k < 6; k++) {
+  for (let k = 0; k < tries; k++) {
     const ang = sim.rng.next() * Math.PI * 2;
     const dist = reach * (0.6 + 0.9 * sim.rng.next());
     const jitter = sim.rng.next();
@@ -719,10 +770,19 @@ function pickExploreTarget(sim: Simulation, a: Agent, tribe: Tribe | undefined, 
       const hx = tribe.homeX - tx;
       const hy = tribe.homeY - ty;
       const dh = Math.sqrt(hx * hx + hy * hy);
-      sc += (1 - soc) * Math.min(1, dh / 500) * 0.5 - (soc * Math.max(0, dh - 350)) / 400;
+      // the pull of home weakens for migrants: a whole band can move on when its land is spent
+      sc += (1 - soc) * Math.min(1, dh / 500) * 0.5 - ((1 - 0.8 * migrate) * soc * Math.max(0, dh - 350)) / 400;
     }
     sc -= dangerAt(a, tx, ty, tick) * 2;
-    if (sc > best && !clearPath(sim, a.x, a.y, tx, ty)) sc -= 1.5; // across water / walls: only as a last resort
+    // lush-looking land (the standing food around the spot, coarsely sampled) draws the eye — mildly for a
+    // scout, strongly for the hungry
+    sc += (0.25 + 1.4 * need + 1.5 * migrate) * lushness(sim, tx, ty);
+    if (sc > best && !clearPath(sim, a.x, a.y, tx, ty)) {
+      // across water / walls: reachable by a route (a ford, a way round) at the cost of the detour; skip
+      // places that cannot be reached at all
+      if (!sameRegion(sim, a.x, a.y, tx, ty)) continue;
+      sc -= 0.35;
+    }
     if (sc > best) {
       best = sc;
       exX = tx;
@@ -733,7 +793,9 @@ function pickExploreTarget(sim: Simulation, a: Agent, tribe: Tribe | undefined, 
 }
 
 /**
- * Whether the target of action k (as chosen by this think) can be walked to in a straight line.
+ * Whether the target of action k (as chosen by this think) can be reached. Places (the camp, an enemy camp
+ * to raid) only need to be reachable at all — steering plans a route across fords and round obstacles.
+ * Other agents must be reachable in a straight line: they move, and a long detour would never catch them.
  * Food targets are already filtered by chooseFood; flee picks open ground itself; the rest move in place.
  */
 function targetReachable(sim: Simulation, a: Agent, k: number, tribe: Tribe | undefined, attackTarget: Agent | null, raid: Tribe | null): boolean {
@@ -759,7 +821,8 @@ function targetReachable(sim: Simulation, a: Agent, k: number, tribe: Tribe | un
   const dx = x - a.x;
   const dy = y - a.y;
   if (dx * dx + dy * dy < 16 * 16) return true;
-  return clearPath(sim, a.x, a.y, x, y);
+  if (clearPath(sim, a.x, a.y, x, y)) return true;
+  return !other && sameRegion(sim, a.x, a.y, x, y);
 }
 
 // ------------------------------------------------------------------ think
@@ -987,6 +1050,7 @@ export function think(sim: Simulation, a: Agent): void {
     mem.length = w;
   }
   const haveFoodTarget = chooseFood(sim, a);
+  let migrateDrive = 0;
   // scarcity: food within the local scan per head of everyone around (0 plenty .. 1 nothing to go round)
   const scarcity = clamp01(1 - localFood / (1 + P.localN) / SCARCE_PER_HEAD);
 
@@ -1119,6 +1183,30 @@ export function think(sim: Simulation, a: Agent): void {
     (0.04 + 0.2 * curiosity) * (1 - 0.5 * soc) * (1 - 0.7 * fatigue) * (adult ? 1 : 0.25) * (1 - 0.6 * night) +
     (!haveFoodTarget && hunger > 0.25 ? hunger * 0.55 : 0) +
     (role === 'explorer' ? 0.1 : 0);
+  // migration: hungry in a neighbourhood grazed bare, with no camp store to fall back on — strike out for
+  // lusher land, however far (pickExploreTarget favours lush-looking ground; steering plans the route,
+  // across a ford if need be). Picking at scraps nearby (a weak food target) then loses to moving on.
+  // a trek in progress (a migrant's destination) holds through detours — until arrival, lush land, a full
+  // stomach or expiry
+  let trek = a.trek;
+  if (trek) {
+    const tdx = trek.x - a.x;
+    const tdy = trek.y - a.y;
+    if (tick > trek.until || hunger < 0.3 || tdx * tdx + tdy * tdy < 40 * 40 || lushness(sim, a.x, a.y) > 0.45) {
+      a.trek = undefined;
+      trek = undefined;
+    } else U[I_EXPLORE] += 0.1 + 0.35 * foodDrive * (1 - 0.6 * night);
+  }
+  if (adult && hunger > 0.45 && !(tribe && !stockLow && campDist < 300)) {
+    const bare = 1 - clamp01(lushness(sim, a.x, a.y) / 0.25);
+    if (bare > 0) {
+      // a rich patch in sight is worth eating first, and so is food within reach of a fight (a load to rob,
+      // a patch to contest); scraps are not
+      migrateDrive =
+        bare * clamp01((hunger - 0.45) / 0.35) * (haveFoodTarget ? 1 - clamp01(fScore / 3) : 1) * (rival && rivalWhy !== 3 && rivalWhy !== 7 ? 0.25 : 1);
+      U[I_EXPLORE] += foodDrive * migrateDrive * (1 - 0.6 * night) * (1 - 0.5 * fatigue);
+    }
+  }
   const exploreBase = U[I_EXPLORE];
 
   // raid: a tribe at war sends its bold, fit members against the enemy camp's stockpile
@@ -1493,7 +1581,10 @@ export function think(sim: Simulation, a: Agent): void {
         thought = `At war — raiding the camp of ${theName(raidTarget)}${P.allyN > 1 ? ` with ${P.allyN} others` : ''}`;
         break;
       }
-      if (
+      if (trek) {
+        exX = trek.x;
+        exY = trek.y;
+      } else if (
         prevAction === 'explore' &&
         Number.isFinite(prevTX) &&
         Number.isFinite(prevTY) &&
@@ -1502,20 +1593,28 @@ export function think(sim: Simulation, a: Agent): void {
       ) {
         exX = prevTX;
         exY = prevTY;
-      } else if (!pickExploreTarget(sim, a, tribe, soc, tick)) {
+      } else if (!pickExploreTarget(sim, a, tribe, soc, tick, migrateDrive)) {
         action = 'wander';
         thought = 'Restless — wandering';
         break;
       }
+      // a migrant commits to the destination it picked
+      if (!trek && migrateDrive > 0.3) a.trek = { x: exX, y: exY, until: tick + TREK_TICKS };
       a.targetX = exX;
       a.targetY = exY;
       const dir = compass(exX - a.x, exY - a.y);
+      const detour = !clearPath(sim, a.x, a.y, exX, exY) ? ' (the long way round, by a ford or pass)' : '';
       thought =
-        !haveFoodTarget && hunger > 0.25
+        trek
+          ? `${hl} (${pct(hunger)}%) — still trekking to greener land to the ${dir}`
+          : migrateDrive > 0.3
+          ? `${hl} (${pct(hunger)}%) and the land here is grazed bare — moving on to greener land to the ${dir}`
+          : !haveFoodTarget && hunger > 0.25
           ? `${hl} (${pct(hunger)}%), no food in sight — searching ${dir}`
           : prowl > 0.12
             ? `Prowling ${dir} in search of prey`
             : `Restless — exploring to the ${dir}`;
+      thought += detour;
       break;
     }
     case I_IDLE:
@@ -1561,6 +1660,8 @@ export function think(sim: Simulation, a: Agent): void {
   if (action !== prevAction || a.targetId !== prevTargetId) a.actionTicks = 0;
   a.action = action;
   a.thought = thought;
+  // a planned route only serves a move toward a goal; drop it once the agent eats, rests, flees or wanders
+  if (a.route && (action === 'eat' || action === 'rest' || action === 'idle' || action === 'flee' || action === 'wander')) a.route = undefined;
 
   const ut = a.utilities;
   for (let k = 0; k < N_ACTIONS; k++) ut[ACTIONS[k]] = Math.round(U[k] * 1000) / 1000;

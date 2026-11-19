@@ -42,6 +42,7 @@ import { expressTraits } from './genetics';
 import { initEnvironment } from './ecology';
 import { createStatsState } from './stats';
 import { normalizeIntervention } from './interventions';
+import { NAV } from './pathfinding';
 import {
   ACTIONS,
   DEATH_CAUSES,
@@ -890,6 +891,45 @@ function sanitizeAgent(a: Obj, refs: Refs, r: Repairs): void {
       r.fix('agent.diseaseHp');
       delete a.diseaseHp;
     } else a.diseaseHp = num(r, 'agent.diseaseHp', a.diseaseHp, 0, 0, traits.maxHealth);
+  }
+  // steering.ts: planned route (kept exactly when valid, so a loaded run follows the same waypoints)
+  if (a.route !== undefined) {
+    const rt = a.route;
+    const okCoord = (v: unknown, max: number) => isFiniteNum(v) && v >= 0 && v <= max;
+    const valid =
+      isObj(rt) &&
+      isFiniteNum(rt.gx) &&
+      isFiniteNum(rt.gy) &&
+      Array.isArray(rt.pts) &&
+      rt.pts.length % 2 === 0 &&
+      rt.pts.length <= 2 * NAV.maxWaypoints &&
+      rt.pts.every((v: unknown, k: number) => okCoord(v, k % 2 === 0 ? refs.W : refs.H)) &&
+      isInt(rt.i) &&
+      rt.i >= 0 &&
+      rt.i % 2 === 0 &&
+      rt.i <= rt.pts.length &&
+      isInt(rt.t) &&
+      isInt(rt.v) &&
+      (rt.fail === undefined || typeof rt.fail === 'boolean') &&
+      Object.keys(rt).every((k) => ['gx', 'gy', 'pts', 'i', 't', 'v', 'fail'].includes(k));
+    if (!valid) {
+      r.fix('agent.route');
+      delete a.route; // steering simply plans again
+    }
+  }
+  // brain.ts: a migrant's trek destination
+  if (a.trek !== undefined) {
+    const tk = a.trek;
+    const ok =
+      isObj(tk) &&
+      isFiniteNum(tk.x) && tk.x >= 0 && tk.x <= refs.W &&
+      isFiniteNum(tk.y) && tk.y >= 0 && tk.y <= refs.H &&
+      isInt(tk.until) &&
+      Object.keys(tk).every((k) => k === 'x' || k === 'y' || k === 'until');
+    if (!ok) {
+      r.fix('agent.trek');
+      delete a.trek;
+    }
   }
 }
 

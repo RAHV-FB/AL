@@ -307,8 +307,10 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
     const mCarried = meter(vit, 'Carried', 'insp-m-carried');
     const disease = h('div', 'insp-status');
     const repro = h('div', 'insp-status');
+    const navLine = h('div', 'insp-status');
+    navLine.hidden = true;
     repro.title = 'Reproductive status: breeding needs an adult that is not too old, off cooldown, well fed (threshold depends on the fertility gene), rested and healthy — plus a compatible partner nearby.';
-    vit.append(disease, repro);
+    vit.append(disease, repro, navLine);
 
     // traits
     const traitSec = section(root, 'Genes & traits');
@@ -474,6 +476,25 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
         }
         setText(repro, `${rs} · ${a.offspring} offspring`);
         repro.className = `insp-status ${rcls}`;
+
+        // navigation: a planned route (dashed gold line on the map) and a migrant's trek
+        const rt = a.route;
+        let nav = '';
+        if (a.trek) nav = `Migrating to greener land — trek ends in ${(Math.max(0, a.trek.until - s2.state.tick) / dl).toFixed(1)} days`;
+        if (rt && !rt.fail && rt.pts.length > 0) {
+          const left = Math.max(0, (rt.pts.length - rt.i) / 2);
+          let len = 0;
+          let px = a.x;
+          let py = a.y;
+          for (let k = rt.i; k + 1 < rt.pts.length; k += 2) {
+            len += Math.hypot(rt.pts[k] - px, rt.pts[k + 1] - py);
+            px = rt.pts[k];
+            py = rt.pts[k + 1];
+          }
+          nav = `${nav ? nav + ' · ' : ''}Following a planned route round water or walls: ${left} waypoint${left === 1 ? '' : 's'}, ≈${Math.round(len)} units to go`;
+        } else if (rt && rt.fail) nav = `${nav ? nav + ' · ' : ''}No way there on foot right now — will look again`;
+        setText(navLine, nav);
+        navLine.hidden = !nav;
 
         for (const r of traitRows) {
           const gv = a.genes[GENES.indexOf(r.g)] ?? 0;
