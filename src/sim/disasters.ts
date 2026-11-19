@@ -25,12 +25,12 @@ import { DISASTER_KINDS, TERRAIN, type Agent, type Disaster, type DisasterKind, 
 
 /** Human-readable explanations (shown in the UI). */
 export const DISASTER_INFO: Record<DisasterKind, { label: string; icon: string; help: string }> = {
-  drought: { label: 'Drought', icon: '☀', help: 'Plant regrowth collapses inside the area for the duration.' },
-  blight: { label: 'Blight', icon: '☣', help: 'Resource collapse: destroys standing food and damages soil fertility.' },
-  bloom: { label: 'Abundance', icon: '✿', help: 'Food bursts to capacity and regrowth is boosted for a while.' },
-  plague: { label: 'Plague', icon: '✚', help: 'Infects agents in the area with a contagious disease.' },
-  meteor: { label: 'Meteor', icon: '☄', help: 'Kills agents at the impact point, scorches terrain and food.' },
-  coldsnap: { label: 'Cold snap', icon: '❄', help: 'Temperature plunges: higher metabolic cost and stunted growth.' },
+  drought: { label: 'Drought', icon: '', help: 'Plant regrowth in the area drops by up to 90% while it lasts.' },
+  blight: { label: 'Blight', icon: '', help: 'Destroys the standing food in the area and damages the soil.' },
+  bloom: { label: 'Abundance', icon: '', help: 'Fills the area with food, and plants regrow up to three times as fast while it lasts.' },
+  plague: { label: 'Plague', icon: '', help: 'Infects agents in the area with a contagious disease.' },
+  meteor: { label: 'Meteor', icon: '', help: 'Kills agents at the impact point and scorches the land and food around it.' },
+  coldsnap: { label: 'Cold snap', icon: '', help: 'The temperature drops, so agents burn more food to keep warm and plants grow half as fast.' },
 };
 
 /** Tunable disaster constants. */
@@ -454,33 +454,33 @@ function applyImmediate(sim: Simulation, d: Disaster): void {
   const sev = big ? 'major' : 'bad';
   switch (d.kind) {
     case 'drought':
-      sim.log('disaster', sev, `${article(d, 'drought')} strikes${where} — plant regrowth down ${Math.round(90 * d.intensity)}%`, at);
+      sim.log('disaster', sev, `${article(d, 'drought')} begins${where}. Plant regrowth is down ${Math.round(90 * d.intensity)}%.`, at);
       break;
     case 'blight':
       blightArea(sim, d);
-      sim.log('disaster', sev, `${article(d, 'blight')} strikes${where} — crops wither and the soil sickens`, at);
+      sim.log('disaster', sev, `${article(d, 'blight')} begins${where}. It destroys standing food and damages the soil.`, at);
       break;
     case 'bloom':
       bloomArea(sim, d);
-      sim.log('disaster', 'good', `A season of abundance${where} — plants burst into bloom`, at);
+      sim.log('disaster', 'good', `Abundance begins${where}. The land fills with food and plants regrow faster.`, at);
       break;
     case 'plague': {
       const n = plagueOutbreak(sim, d);
       const v = Math.min(1, d.intensity * configVirulence(sim));
       if (n > 0) {
-        sim.log('disease', n >= 20 || d.radius <= 0 ? 'major' : 'bad', `Plague outbreak${where} — ${n} infected (virulence ${v.toFixed(2)})`, at);
+        sim.log('disease', n >= 20 || d.radius <= 0 ? 'major' : 'bad', `Plague outbreak${where}: ${n} infected (virulence ${v.toFixed(2)}).`, at);
       } else {
-        sim.log('disease', 'info', 'A plague outbreak fails to take hold', at);
+        sim.log('disease', 'info', 'A plague outbreak infects no one.', at);
       }
       break;
     }
     case 'meteor': {
       const [killed, injured] = meteorImpact(sim, d);
-      sim.log('disaster', 'major', `Meteor strike! ${killed} killed, ${injured} injured`, at);
+      sim.log('disaster', 'major', `Meteor strike: ${killed} killed, ${injured} injured.`, at);
       break;
     }
     case 'coldsnap':
-      sim.log('disaster', sev, `${article(d, 'cold snap')} grips the land — temperatures plunge ${Math.round(coldMagnitude(d) * d.intensity)}°`, at);
+      sim.log('disaster', sev, `${article(d, 'cold snap')} begins${where}. Temperatures drop by ${Math.round(coldMagnitude(d) * d.intensity)}°C.`, at);
       break;
   }
 }
@@ -489,19 +489,19 @@ function logEnd(sim: Simulation, d: Disaster): void {
   const at = { x: d.x, y: d.y };
   switch (d.kind) {
     case 'drought':
-      sim.log('disaster', 'good', 'The drought has broken — plants can regrow', at);
+      sim.log('disaster', 'good', 'The drought is over. Plants can regrow.', at);
       break;
     case 'blight':
-      sim.log('disaster', 'good', 'The blight has run its course; the soil begins to recover', at);
+      sim.log('disaster', 'good', 'The blight is over. The soil starts to recover.', at);
       break;
     case 'bloom':
-      sim.log('disaster', 'info', 'The season of abundance has ended', at);
+      sim.log('disaster', 'info', 'The abundance is over.', at);
       break;
     case 'coldsnap':
-      sim.log('disaster', 'good', 'The cold snap has ended; temperatures recover', at);
+      sim.log('disaster', 'good', 'The cold snap is over. Temperatures rise again.', at);
       break;
     case 'plague':
-      if (d.radius > 0) sim.log('disease', 'info', 'The plague-ridden area is no longer contagious', at);
+      if (d.radius > 0) sim.log('disease', 'info', 'The plague area is no longer contagious.', at);
       break;
     default:
       break;

@@ -114,7 +114,7 @@ describe('ecology: environment clock', () => {
     expect(sim.state.env.year).toBe(2);
     expect(sim.state.env.day).toBe(Math.floor((sim.state.tick - 1 + 6) / 20));
     const msgs = sim.state.events.filter((e) => e.category === 'environment').map((e) => e.message);
-    expect(msgs.filter((m) => m.startsWith('Winter has come — plant growth slows to a crawl'))).toHaveLength(2);
+    expect(msgs.filter((m) => m.startsWith('Winter: plants grow slowly until spring'))).toHaveLength(2);
     expect(msgs.some((m) => m.startsWith('Year 2 begins'))).toBe(true);
     expect(msgs.some((m) => m.startsWith('Year 3 begins'))).toBe(true);
     expect(seasonName(sim.state.env)).toBe('Spring');

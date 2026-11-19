@@ -140,7 +140,7 @@ describe('stats', () => {
     sim.run(31);
     const evo = sim.state.events.filter((e) => e.category === 'evolution' && /speed/.test(e.message));
     expect(evo.length).toBe(1);
-    expect(evo[0].message).toMatch(/risen/);
+    expect(evo[0].message).toMatch(/is up/);
   });
 
   it('summarises live numbers', () => {

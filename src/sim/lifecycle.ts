@@ -161,7 +161,7 @@ function fallbackCause(a: Agent): DeathCause {
 
 function die(sim: Simulation, a: Agent, cause: DeathCause): void {
   const text =
-    cause === 'old_age' ? 'Died of old age' : cause === 'starvation' ? 'Starved to death' : cause === 'disease' ? 'Succumbed to illness' : cause === 'combat' ? 'Died of wounds' : 'Died';
+    cause === 'old_age' ? 'Died of old age' : cause === 'starvation' ? 'Starved to death' : cause === 'disease' ? 'Died of illness' : cause === 'combat' ? 'Died of wounds' : 'Died';
   addHistory(sim, a, `${text} at age ${Math.floor(a.age)}`);
   sim.killAgent(a, cause);
 }

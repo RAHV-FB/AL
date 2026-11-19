@@ -157,7 +157,13 @@ interface Tile {
 
 // ------------------------------------------------------------------ panel
 
-export function createAnalyticsPanel(container: HTMLElement): AnalyticsPanel {
+export interface AnalyticsPanelOptions {
+  /** Move the camera to a world position (a tribe row in the Overview calls it with the camp position). */
+  onJump?(x: number, y: number): void;
+}
+
+export function createAnalyticsPanel(container: HTMLElement, opts: AnalyticsPanelOptions = {}): AnalyticsPanel {
+  void opts;
   container.textContent = '';
   container.classList.add('an-root');
 

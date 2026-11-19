@@ -205,7 +205,7 @@ describe('requirements: offline, self-contained, no network', () => {
 describe('README matches the code', () => {
   it('lists every preset by name and id, with the right count', () => {
     for (const sc of SCENARIOS) {
-      expect(README, sc.id).toContain(`**${sc.name}** (\`${sc.id}\`)`);
+      expect(README, sc.id).toContain(`${sc.name} (\`${sc.id}\`)`);
     }
     expect(README).toContain(`the ${WORDS[SCENARIOS.length]} experiments`);
   });
@@ -238,7 +238,7 @@ describe('README matches the code', () => {
     expect(APP_SRC).toContain("'dblclick'"); // double-click to follow
     expect(APP_SRC).toMatch(/shift/i); // Shift-click smite
     expect(APP_SRC).toMatch(/'drop'/); // drop a save file
-    for (const doc of ['`Space`', '`.`', '`<` `>`', '`1`–`9`', '`+` `-`', '`0`', '`F`', '`[` `]`', '`O`', '`Esc`', '`H` or `?`', '`Ctrl`+`S`']) expect(README, doc).toContain(doc);
+    for (const doc of ['`Space`', '`.`', '`<` `>`', '`1` to `9`', '`+` `-`', '`0`', '`F`', '`[` `]`', '`O`', '`Esc`', '`H` or `?`', '`Ctrl`+`S`']) expect(README, doc).toContain(doc);
   });
 
   it('states counts, defaults and caps that match the code', () => {

@@ -146,6 +146,13 @@ export const SOCIAL_TUNING = {
   raidIncident: -0.04,
   /** Inter-tribe relations decay toward 0 by this factor every tribePeriod. */
   relDrift: 0.985,
+  /**
+   * Relations between old rivals (a scenario's `rivalries`, inherited by daughter tribes) decay by this factor
+   * instead: a half-life of about 11.5 days against relDrift's 1.5, so a war between rivals kept apart by a
+   * river lasts long enough for raiding parties to cross (from -0.6 it takes about 9 days without contact to
+   * fall out of war).
+   */
+  rivalDrift: 0.997,
   /** Starting relation of a daughter tribe and its parent (fission in good times): friendly for ≈1 day of relDrift. */
   sisterRelation: 0.75,
   // territory
@@ -360,6 +367,12 @@ function liveTribe(sim: Simulation, id: TribeId): Tribe | undefined {
   return t && t.extinctTick === -1 ? t : undefined;
 }
 
+/** True while the agent is on a raid (a trek of kind 'raid', brain.ts). */
+function onRaid(a: Agent): boolean {
+  const tk = a.trek;
+  return tk !== undefined && tk.kind === 'raid';
+}
+
 function dist2(ax: number, ay: number, bx: number, by: number): number {
   const dx = ax - bx;
   const dy = ay - by;
@@ -488,6 +501,38 @@ export function changeTribeRelation(sim: Simulation, ta: Tribe, tb: Tribe, delta
   checkDiplomacy(sim, ta, tb);
 }
 
+/** True when the two tribes are old rivals (state.diplomacy.rivals). */
+export function areRivals(sim: Simulation, a: TribeId, b: TribeId): boolean {
+  const rv = sim.state.diplomacy?.rivals;
+  return rv !== undefined && rv.length > 0 && rv.includes(pairKey(a, b));
+}
+
+function dropRival(sim: Simulation, key: number): void {
+  const rv = sim.state.diplomacy?.rivals;
+  if (!rv) return;
+  const i = rv.indexOf(key);
+  if (i >= 0) rv.splice(i, 1);
+}
+
+/**
+ * Declare an old rivalry (scenario setup): both tribes start at `relation` toward each other, and their enmity
+ * cools at rivalDrift instead of relDrift until it ends in peace. A relation below warDeclare is announced as a
+ * war right away.
+ */
+export function declareRivalry(sim: Simulation, ta: Tribe, tb: Tribe, relation: number): void {
+  if (ta === tb || ta.id === tb.id || ta.extinctTick !== -1 || tb.extinctTick !== -1 || !Number.isFinite(relation)) return;
+  // the log bookkeeping must exist before the relations change, or it would be rebuilt from them and the war
+  // would never be announced
+  const d = diplomacyOf(sim);
+  const rv = (d.rivals ??= []);
+  const key = pairKey(ta.id, tb.id);
+  if (!rv.includes(key)) rv.push(key);
+  const v = clampAff(relation);
+  ta.relations[tb.id] = v;
+  tb.relations[ta.id] = v;
+  checkDiplomacy(sim, ta, tb);
+}
+
 function checkDiplomacy(sim: Simulation, ta: Tribe, tb: Tribe): void {
   const c = cacheOf(sim);
   const m = meanRelation(ta, tb);
@@ -502,6 +547,8 @@ function checkDiplomacy(sim: Simulation, ta: Tribe, tb: Tribe): void {
     c.wars.delete(key);
     sim.log('conflict', 'good', `Peace: ${the(ta)} and ${the(tb)} have ended their war.`, where);
   }
+  // an old rivalry is settled once relations are back near neutral
+  if (m > K.peace) dropRival(sim, key);
   if (!c.alliances.has(key)) {
     if (m > K.alliance) {
       c.alliances.add(key);
@@ -1167,7 +1214,7 @@ function tribePass(sim: Simulation, c: SocialCache): void {
     moveCamp(sim, t, g.list);
   }
 
-  // --- diplomacy: drift toward neutral, drop dead tribes, log transitions
+  // --- diplomacy: drift toward neutral (old rivals only slowly), drop dead tribes, log transitions
   for (const t of tribes) {
     if (t.extinctTick !== -1) continue;
     for (const key in t.relations) {
@@ -1177,7 +1224,7 @@ function tribePass(sim: Simulation, c: SocialCache): void {
         delete t.relations[oid];
         continue;
       }
-      const v = t.relations[oid] * K.relDrift;
+      const v = t.relations[oid] * (areRivals(sim, t.id, oid) ? K.rivalDrift : K.relDrift);
       t.relations[oid] = Number.isFinite(v) ? clampAff(v) : 0;
     }
   }
@@ -1223,6 +1270,7 @@ function markExtinct(sim: Simulation, t: Tribe, c: SocialCache): void {
     c.wars.delete(key);
     c.alliances.delete(key);
     c.feuds.delete(key);
+    dropRival(sim, key);
   }
   t.relations = {};
   c.groups.delete(t.id);
@@ -1295,10 +1343,15 @@ function considerFission(sim: Simulation, c: SocialCache): void {
     const list = g.list;
     const n = list.length;
     if (n < K.fissionMinMembers || s.tick - t.foundedTick < K.fissionMinAge) continue;
+    // members away on a raid are coming back: they neither stretch the tribe nor leave with a faction (a raiding
+    // party marching on an enemy camp used to be split off as a new tribe halfway there)
     let far = 0;
+    let home = 0;
     let pole: Agent | null = null;
     let poleD = -1;
     for (const m of list) {
+      if (onRaid(m)) continue;
+      home++;
       const d = dist2(m.x, m.y, t.homeX, t.homeY);
       if (d > far2) far++;
       if (d > poleD) {
@@ -1307,16 +1360,18 @@ function considerFission(sim: Simulation, c: SocialCache): void {
       }
     }
     const big = n > K.fissionSize;
-    const stretched = far >= Math.max(K.fissionMinFaction, K.fissionStretch * n);
+    const stretched = far >= Math.max(K.fissionMinFaction, K.fissionStretch * home);
     if (!pole || (!big && !stretched)) continue;
     if (!sim.rng.chance(big ? 0.3 : 0.2)) continue;
 
     const px = pole.x;
     const py = pole.y;
-    const byPole = list.slice().sort((p, q) => dist2(p.x, p.y, px, py) - dist2(q.x, q.y, px, py) || p.id - q.id);
+    const byPole = (home < n ? list.filter((m) => !onRaid(m)) : list.slice()).sort(
+      (p, q) => dist2(p.x, p.y, px, py) - dist2(q.x, q.y, px, py) || p.id - q.id,
+    );
     let k = 0;
     for (const m of byPole) if (dist2(m.x, m.y, px, py) < dist2(m.x, m.y, t.homeX, t.homeY)) k++;
-    k = Math.max(Math.ceil(0.25 * n), Math.min(Math.floor(0.6 * n), k));
+    k = Math.max(Math.ceil(0.25 * home), Math.min(Math.floor(0.6 * home), k));
     if (k < K.fissionMinFaction) continue;
     const faction = byPole.slice(0, k);
     let founder: Agent | null = null;
@@ -1357,6 +1412,20 @@ function split(sim: Simulation, parent: Tribe, founder: Agent, faction: Agent[],
   }
   nt.relations[parent.id] = rel;
   parent.relations[nt.id] = rel;
+  // ... and its old rivalries
+  const rv = sim.state.diplomacy?.rivals;
+  if (rv && rv.length) {
+    for (const key of rv.slice()) {
+      const lo = Math.floor(key / 1048576);
+      const hi = key - lo * 1048576;
+      const other = lo === parent.id ? hi : hi === parent.id ? lo : NONE;
+      const o = other === NONE ? undefined : liveTribe(sim, other);
+      if (o && o !== nt) {
+        const k = pairKey(nt.id, o.id);
+        if (!rv.includes(k)) rv.push(k);
+      }
+    }
+  }
   addHistory(sim, founder, `Led ${others.length} followers away from ${the(parent)} to found ${the(nt)}`);
   for (const m of others) addHistory(sim, m, `Followed ${founder.name} to found ${the(nt)}`);
   sim.log('tribe', 'major', `${cap(the(nt))} split from ${the(parent)} (${faction.length} members led by ${founder.name}).`, {

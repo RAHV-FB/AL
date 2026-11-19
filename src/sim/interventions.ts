@@ -31,16 +31,16 @@ import {
 
 /** One-sentence explanations of every intervention (for tooltips / help panels). */
 export const INTERVENTION_HELP: Record<Intervention['kind'], string> = {
-  spawn: 'Drop a group of new adult agents with the chosen genetics, unaffiliated, as a brand-new tribe or as reinforcements for an existing one.',
-  remove: 'Remove every agent inside the brush circle from the world.',
-  killAgent: 'Remove one specific agent from the world.',
-  addFood: "Add food to every tile under the brush (up to 1.5x the tile's normal capacity).",
-  removeFood: 'Strip all standing food from the tiles under the brush, creating an instant famine zone.',
-  paintTerrain: 'Reshape the land by painting terrain; agents caught on newly impassable tiles are pushed to the nearest open ground.',
-  fertilize: 'Enrich the soil under the brush so it holds more food and regrows faster (negative amounts deplete it).',
-  disaster: 'Unleash a drought, blight, bloom, plague, meteor or cold snap centred on a point (radius 0 = whole world).',
-  setConfig: 'Change simulation parameters such as mutation rate, plant regrowth or aggression while the run continues.',
-  boostAgent: 'Fully heal, feed and rest one specific agent.',
+  spawn: 'Add a group of adult agents with the chosen genes. They can stay unaffiliated, found a new tribe or join an existing one.',
+  remove: 'Remove every agent inside the brush circle.',
+  killAgent: 'Remove one chosen agent from the world.',
+  addFood: "Add food to every tile under the brush, up to 1.5 times the tile's normal capacity.",
+  removeFood: 'Remove all standing food from the tiles under the brush.',
+  paintTerrain: 'Paint terrain onto the map. Agents left on impassable tiles move to the nearest open ground, or die if there is none nearby.',
+  fertilize: 'Make the soil under the brush richer, so it holds more food and regrows faster. Negative amounts make it poorer.',
+  disaster: 'Start a drought, blight, plague, meteor, cold snap or abundance around a point. Radius 0 covers the whole world.',
+  setConfig: 'Change settings such as mutation rate, plant regrowth or aggression while the simulation runs.',
+  boostAgent: 'Fully heal, feed and rest one agent.',
 };
 
 // ------------------------------------------------------------------ helpers
@@ -265,7 +265,7 @@ export function applyIntervention(sim: Simulation, raw: Intervention): void {
       const a = sim.getAgent(iv.id);
       if (!a) break;
       sim.killAgent(a, 'removed');
-      sim.log('intervention', 'bad', `${a.name} was removed`, { x: a.x, y: a.y, agentId: a.id });
+      sim.log('intervention', 'bad', `${a.name} was removed.`, { x: a.x, y: a.y, agentId: a.id });
       break;
     }
     case 'boostAgent': {
@@ -276,7 +276,7 @@ export function applyIntervention(sim: Simulation, raw: Intervention): void {
       a.energy = 1;
       if (a.sinceMeal !== undefined) a.sinceMeal = 0;
       addHistory(sim, a, 'Healed and fed by the experimenter');
-      sim.log('intervention', 'good', `${a.name} was healed and fed`, { x: a.x, y: a.y, agentId: a.id });
+      sim.log('intervention', 'good', `${a.name} was healed and fed.`, { x: a.x, y: a.y, agentId: a.id });
       break;
     }
     case 'addFood':
@@ -343,7 +343,7 @@ function spawn(sim: Simulation, iv: SpawnSpec): void {
   }
 
   if (made.length === 0) {
-    sim.log('intervention', 'bad', capped ? 'Spawn blocked: population cap reached' : 'Spawn failed: no open ground nearby', { x: cx, y: cy });
+    sim.log('intervention', 'bad', capped ? 'Spawn blocked: population cap reached.' : 'Spawn failed: no open ground nearby.', { x: cx, y: cy });
     return;
   }
 
@@ -394,10 +394,10 @@ function spawn(sim: Simulation, iv: SpawnSpec): void {
   let msg = `Spawned ${plural(made.length, 'agent')}`;
   if (tribe) {
     const name = theTribe(tribe);
-    msg += founded ? ` founding ${name}` : revived ? ` reviving ${name.replace(/^the /i, 'the extinct ')}` : ` into ${name}`;
+    msg += founded ? `, founding ${name}` : revived ? `, reviving ${name.replace(/^the /i, 'the extinct ')}` : ` into ${name}`;
   }
   if (made.length < count) msg += capped ? ' (population cap reached)' : ` (${count - made.length} found no room)`;
-  sim.log('intervention', 'info', msg, { x: cx, y: cy, tribeId: tribe ? tribe.id : NONE });
+  sim.log('intervention', 'info', `${msg}.`, { x: cx, y: cy, tribeId: tribe ? tribe.id : NONE });
 }
 
 // ------------------------------------------------------------------ agents
@@ -406,7 +406,7 @@ function remove(sim: Simulation, x: number, y: number, r: number): void {
   if (!isPoint(x, y)) return;
   const victims = agentsInRadius(sim, x, y, brushRadius(sim, r));
   for (const a of victims) sim.killAgent(a, 'removed');
-  if (victims.length) sim.log('intervention', 'bad', `Removed ${plural(victims.length, 'agent')}`, { x, y });
+  if (victims.length) sim.log('intervention', 'bad', `Removed ${plural(victims.length, 'agent')}.`, { x, y });
 }
 
 // ------------------------------------------------------------------ food & soil
@@ -423,7 +423,7 @@ function addFood(sim: Simulation, x: number, y: number, r: number, amount: numbe
     food[i] = next;
     total += next - cur;
   });
-  if (total > 0) sim.log('intervention', 'good', `Added ${fmt(total)} food`, { x, y });
+  if (total > 0) sim.log('intervention', 'good', `Added ${fmt(total)} food.`, { x, y });
 }
 
 function removeFood(sim: Simulation, x: number, y: number, r: number): void {
@@ -434,7 +434,7 @@ function removeFood(sim: Simulation, x: number, y: number, r: number): void {
     if (food[i] > 0) total += food[i];
     food[i] = 0;
   });
-  sim.log('intervention', 'bad', `Destroyed ${fmt(total)} food`, { x, y });
+  sim.log('intervention', 'bad', `Destroyed ${fmt(total)} food.`, { x, y });
 }
 
 function fertilize(sim: Simulation, x: number, y: number, r: number, amount: number): void {
@@ -452,7 +452,7 @@ function fertilize(sim: Simulation, x: number, y: number, r: number, amount: num
     }
     tiles++;
   });
-  if (tiles > 0) sim.log('intervention', amt > 0 ? 'good' : 'bad', `${amt > 0 ? 'Fertilized' : 'Depleted'} ${plural(tiles, 'tile')} (${amt > 0 ? '+' : ''}${fmt(amt)})`, { x, y });
+  if (tiles > 0) sim.log('intervention', amt > 0 ? 'good' : 'bad', `${amt > 0 ? 'Fertilized' : 'Depleted'} ${plural(tiles, 'tile')} (${amt > 0 ? '+' : ''}${fmt(amt)}).`, { x, y });
 }
 
 // ------------------------------------------------------------------ terrain
@@ -507,10 +507,10 @@ function paintTerrain(sim: Simulation, x: number, y: number, r: number, terrain:
     }
   }
 
-  let msg = `Painted ${info.name.toLowerCase()} (${plural(changed, 'tile')})`;
-  if (moved) msg += `, ${moved} displaced`;
+  let msg = `Painted ${plural(changed, 'tile')} of ${info.name.toLowerCase()}`;
+  if (moved) msg += `, ${plural(moved, 'agent')} displaced`;
   if (doomed.length) msg += `, ${doomed.length} trapped and killed`;
-  sim.log('intervention', doomed.length ? 'bad' : 'info', msg, { x, y });
+  sim.log('intervention', doomed.length ? 'bad' : 'info', `${msg}.`, { x, y });
 }
 
 // ------------------------------------------------------------------ disasters
@@ -524,7 +524,7 @@ function disaster(sim: Simulation, kind: DisasterKind, x: number, y: number, r: 
   const dur = Math.round(clamp(num(duration, 600), 1, 100000));
   const label = DISASTER_INFO[kind]?.label ?? kind;
   // log the cause before startDisaster logs its immediate effects
-  sim.log('intervention', kind === 'bloom' ? 'good' : 'bad', `${label} unleashed${radius === 0 ? ' worldwide' : ''}`, { x: dx, y: dy });
+  sim.log('intervention', kind === 'bloom' ? 'good' : 'bad', `${label} triggered${radius === 0 ? ' worldwide' : ''}.`, { x: dx, y: dy });
   startDisaster(sim, kind, dx, dy, radius, inten, dur);
 }
 
@@ -560,6 +560,6 @@ function setConfig(sim: Simulation, raw: Partial<SimConfig>): void {
     cfg[key] = v;
   }
   if (changes.length === 0) return;
-  const shown = changes.slice(0, 3).join(', ') + (changes.length > 3 ? ` (+${changes.length - 3} more)` : '');
-  sim.log('intervention', 'info', `Settings changed: ${shown}`);
+  const shown = changes.slice(0, 3).join(', ') + (changes.length > 3 ? ` and ${changes.length - 3} more` : '');
+  sim.log('intervention', 'info', `Settings changed: ${shown}.`);
 }

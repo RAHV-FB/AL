@@ -16,6 +16,8 @@ export interface InspectorHandlers {
   onFollow(id: number): void; // camera follows agent
   onKill(id: number): void; // enqueue killAgent
   onBoost(id: number): void; // enqueue boostAgent
+  /** Move the camera to this agent without following it (optional). */
+  onShowOnMap?(id: number): void;
 }
 
 export interface Inspector {
