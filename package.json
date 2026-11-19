@@ -12,7 +12,8 @@
     "test": "vitest run",
     "bench": "vitest run tests/perf.bench.test.ts --silent=false",
     "smoke:browser": "node scripts/browser-smoke.mjs",
-    "balance": "vitest run tests/balance.report.test.ts --silent=false"
+    "balance": "vitest run tests/balance.report.test.ts --silent=false",
+    "release": "npm run build && node -e \"require('fs').copyFileSync('dist/index.html','release/artificial-life.html')\""
   },
   "devDependencies": {
     "typescript": "^5.9.3",

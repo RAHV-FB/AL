@@ -7,7 +7,7 @@
 import './analytics.css';
 import type { Simulation } from '../sim/simulation';
 import { GENES, NONE, type ActionKind, type Agent, type AgentId, type GeneName, type LineageRecord, type Traits } from '../sim/types';
-import { CAUSE_LABELS, GENE_DESCRIPTIONS, GENE_LABELS, ROLE_LABELS, tribeColor } from './analytics';
+import { CAUSE_LABELS, GENE_DESCRIPTIONS, GENE_LABELS, ROLE_LABELS, dayOfTick, tribeColor } from './analytics';
 
 export interface InspectorHandlers {
   onSelect(id: number): void; // select another agent (e.g. click a relative)
@@ -415,7 +415,7 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
       const cause = a ? a.deathCause : rec ? rec.deathCause : null;
       deathBanner.hidden = alive;
       if (!alive) {
-        const when = deathTick >= 0 ? ` on day ${Math.floor(deathTick / dl)}` : '';
+        const when = deathTick >= 0 ? ` on day ${dayOfTick(s2, deathTick)}` : '';
         setText(deathBanner, `Died${when}${cause ? ` — ${CAUSE_LABELS[cause].toLowerCase()}` : ''}, aged ${(ageTicks / dl).toFixed(1)} days.`);
       }
       for (const b of [bFollow, bBoost, bKill]) b.disabled = !alive;
@@ -537,7 +537,7 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
           (e) => `${e.tick}|${e.text}`,
           (e) => {
             const li = h('li');
-            li.append(h('span', 'insp-hist-t', `Day ${(e.tick / dl).toFixed(1)}`), h('span', 'insp-hist-x', e.text));
+            li.append(h('span', 'insp-hist-t', `Day ${dayOfTick(s2, e.tick)}`), h('span', 'insp-hist-x', e.text));
             return li;
           },
           () => {},

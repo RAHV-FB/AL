@@ -32,6 +32,7 @@ import { LIMITS } from './constants';
 import { GENE_COUNT, GENES, G, NONE, type Agent, type GenomeTemplate, type Traits } from './types';
 import { addHistory, createAgent, isAdult } from './lifecycle';
 import { adjustRelationship } from './social';
+import { localFoodFraction } from './ecology';
 
 // ------------------------------------------------------------------ helpers
 
@@ -205,8 +206,20 @@ export const REPRO = {
   /** Agents older than this fraction of their longevity are past breeding age. */
   maxAgeFrac: 0.9,
   minEnergy: 0.25,
-  /** Injured / very sick agents do not breed. */
-  minHealthFrac: 0.3,
+  /** Body condition: agents still recovering from starvation, wounds or illness do not breed. */
+  minHealthFrac: 0.5,
+  /**
+   * Breeding needs a food-rich home range: the capacity-weighted standing-food fraction of the
+   * tiles within rangeTiles of the couple (ecology.localFoodFraction, sampled every rangeStride
+   * tiles) must reach each parent's rangeFoodThreshold (minRangeFood at fertility 0, lowered by
+   * rangeFertilityDrop × fertility: r-strategists breed on poorer land). As a growing population
+   * grazes its land down — first around its crowded camps — births stop well before the stock is
+   * exhausted (emergent density dependence; there is no global population check).
+   */
+  rangeTiles: 3,
+  rangeStride: 1,
+  minRangeFood: 0.72,
+  rangeFertilityDrop: 0.4,
   /** Stamina each parent spends on a birth. */
   energyCost: 0.12,
   /** Max distance (world units) of the birth spot from the parents' midpoint. */
@@ -217,6 +230,11 @@ export const REPRO = {
   mateBond: 0.15,
   maxSiblingLinks: 3,
 };
+
+/** Minimum standing-food fraction of the home range to breed: 0.72 (fertility 0) … 0.32 (fertility 1). */
+export function rangeFoodThreshold(t: Traits): number {
+  return REPRO.minRangeFood - REPRO.rangeFertilityDrop * unit(t.fertility);
+}
 
 /** Minimum stomach fraction (food / maxFood) to breed: 0.72 (fertility 0) … 0.5 (fertility 1). */
 export function mateFoodThreshold(t: Traits): number {
@@ -272,7 +290,9 @@ export function canMate(sim: Simulation, a: Agent, b: Agent): boolean {
   if (!isFertile(a) || !isFertile(b)) return false;
   if (areCloseKin(a, b)) return false;
   if (geneticDistance(a.genes, b.genes) > sim.config.mateCompatibility) return false;
-  return sim.canSpawn();
+  if (!sim.canSpawn()) return false;
+  const need = Math.max(rangeFoodThreshold(a.traits), rangeFoodThreshold(b.traits));
+  return localFoodFraction(sim, (a.x + b.x) / 2, (a.y + b.y) / 2, REPRO.rangeTiles, REPRO.rangeStride) >= need;
 }
 
 /** Passable spot within REPRO.spawnRadius of the parents' midpoint (falls back to a parent's position). */

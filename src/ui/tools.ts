@@ -121,9 +121,17 @@ export function toolHelp(tool: ToolDef, s: ToolSettings): { title: string; lines
   return { title: tool.name, lines };
 }
 
+/** Largest impact radius the Disaster tool requests for a meteor (world units). */
+export const METEOR_MAX_RADIUS = 120;
+
+/** Radius the tool really affects — the brush preview and HUD must show this, not the raw slider value. */
+export function effectiveRadius(tool: ToolId, s: ToolSettings): number {
+  return tool === 'disaster' && s.disaster === 'meteor' ? Math.min(s.radius, METEOR_MAX_RADIUS) : s.radius;
+}
+
 /** Build the intervention a brush/click tool applies at world point (x,y). */
 export function brushIntervention(tool: ToolId, s: ToolSettings, x: number, y: number, dayLength: number): Intervention | null {
-  const radius = s.radius;
+  const radius = effectiveRadius(tool, s);
   switch (tool) {
     case 'remove':
       return { kind: 'remove', x, y, radius };
@@ -141,7 +149,7 @@ export function brushIntervention(tool: ToolId, s: ToolSettings, x: number, y: n
         disaster: s.disaster,
         x,
         y,
-        radius: s.disaster === 'meteor' ? Math.min(radius, 120) : radius,
+        radius,
         intensity: s.intensity,
         duration: Math.max(1, Math.round(s.durationDays * dayLength)),
       };

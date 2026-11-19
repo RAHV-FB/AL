@@ -128,7 +128,21 @@ try {
     notes.push(`no button matching ${label} ${re}`);
     return false;
   };
-  await tryClick('speed', /(^|\s)(4|8|10|16)\s*[x×]|fast|speed/i);
+  // The speed selector is a radio group ("Simulation speed"); matching buttons by text would hit an
+  // experiment card instead ("…how fast can life fill a world?").
+  const setSpeed = async (label) => {
+    const radio = page.getByRole('radiogroup', { name: /speed/i }).getByRole('radio', { name: label, exact: true });
+    if (!(await radio.count())) {
+      notes.push(`no speed control "${label}"`);
+      return false;
+    }
+    await radio.click({ timeout: 2000 }).catch((e) => problems.push(`click speed ${label} failed: ${e.message}`));
+    if ((await radio.getAttribute('aria-checked').catch(() => null)) !== 'true') problems.push(`speed ${label} did not become active`);
+    log(`  set speed ${label}`);
+    await page.waitForTimeout(300);
+    return true;
+  };
+  await setSpeed('4×');
   await page.waitForTimeout(1500);
 
   if (takeShot) {
@@ -139,7 +153,7 @@ try {
 
   await tryClick('pause', /pause/i);
   await tryClick('play', /play|resume/i);
-  await tryClick('normal speed', /(^|\s)1\s*[x×]/i);
+  await setSpeed('1×');
   // keyboard shortcuts (documented in README): pause, single step, help on/off, deselect
   await page.locator('body').click({ position: { x: 720, y: 450 } }).catch(() => {});
   for (const key of ['Space', 'Period', 'Space', 'h', 'Escape']) {

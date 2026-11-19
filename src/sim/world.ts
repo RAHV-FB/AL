@@ -6,7 +6,8 @@
  *   1. seeded gradient-noise fBm fields: domain-warped elevation, moisture, fine detail
  *   2. optional island falloff (deep ocean around the map edge)
  *   3. quantile thresholds → DeepWater / Water / land / Rock (coverage ≈ the option values)
- *   4. optional divide: meandering river with shallow fords, or a rock range with passes
+ *   4. optional divide: meandering river with shallow fords, or a rock range with passes (cut on
+ *      through flanking natural highlands when those would leave no rock-free route across)
  *   5. moisture (+ proximity to water) ranked over land → Desert / Grass / Forest; beaches → Sand
  *   6. repair: ≥ 56 % passable tiles and every passable region connected (shallow causeways)
  *   7. fertility (terrain × moisture × detail × opts.fertility) and initial food
@@ -256,6 +257,40 @@ function pickRows(H: number, count: number, rng: Rng, good: (y: number) => boole
 }
 
 /**
+ * True when passable, rock-free ground connects the land west of a north–south divide (x more than
+ * `margin` tiles left of pathX[y]) with the land east of it (4-neighbour moves).
+ */
+function rockFreeCrossing(T: Uint8Array, W: number, H: number, pathX: Float64Array, margin: number): boolean {
+  const N = W * H;
+  const seen = new Uint8Array(N);
+  const queue = new Int32Array(N);
+  let tail = 0;
+  const open = (i: number): boolean => T[i] !== TERRAIN.Rock && isPassableType(T[i]);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W && x + 0.5 < pathX[y] - margin; x++) {
+      const i = y * W + x;
+      if (open(i)) {
+        seen[i] = 1;
+        queue[tail++] = i;
+      }
+    }
+  }
+  for (let head = 0; head < tail; head++) {
+    const i = queue[head];
+    const x = i % W;
+    const y = (i - x) / W;
+    if (x + 0.5 > pathX[y] + margin) return true;
+    for (let k = 0; k < 4; k++) {
+      const j = k === 0 ? (x > 0 ? i - 1 : -1) : k === 1 ? (x < W - 1 ? i + 1 : -1) : k === 2 ? i - W : i + W;
+      if (j < 0 || j >= N || seen[j] || !open(j)) continue;
+      seen[j] = 1;
+      queue[tail++] = j;
+    }
+  }
+  return false;
+}
+
+/**
  * Connect every passable region to the largest one by carving the cheapest
  * shallow-water causeway (0-1 BFS: passable tiles cost 0, impassable 1).
  * Tiles flagged in `blocked` are never carved. Returns the number of carved tiles.
@@ -468,6 +503,34 @@ export function generateWorld(config: SimConfig, rng: Rng, opts: WorldGenOptions
           elev[i] = Math.max(elev[i], top + 0.15 * (1 - d / hw));
         }
         fixed[i] = 1;
+      }
+    }
+    // The passes must lead through the highlands, not just through the ridge: when natural rock
+    // (mountainLevel) flanking the ridge leaves no rock-free route between the lands beyond it
+    // (more than 20 % of the width west / east of the ridge line), carry the pass corridors on through
+    // that rock — first only the rock touching the ridge, then (if still closed) all rock in the pass
+    // rows within reach. Worlds whose passes are already open are left untouched.
+    const maxExt = Math.max(4, Math.ceil(W * 0.25));
+    for (let attempt = 0; attempt < 2 && !rockFreeCrossing(T, W, H, pathX, W * 0.2); attempt++) {
+      for (let y = 0; y < H; y++) {
+        let inPass = false;
+        for (const p of passes) if (Math.abs(y - p) <= passHalf) inPass = true;
+        if (!inPass) continue;
+        for (const dir of [-1, 1]) {
+          let carved = 0;
+          for (let x = Math.floor(pathX[y]); x >= 0 && x < W && carved < maxExt; x += dir) {
+            const i = y * W + x;
+            if (ring[i] || isWaterType(T[i])) break;
+            if (T[i] !== TERRAIN.Rock) {
+              if (attempt > 0 || Math.abs(x + 0.5 - pathX[y]) < hw + 2) continue; // inside the (ragged) ridge
+              break; // open ground: this side of the pass is through
+            }
+            T[i] = TERRAIN.Grass;
+            elev[i] = clamp(elev[i], sea + 0.02, top - 0.02);
+            fixed[i] = 1;
+            carved++;
+          }
+        }
       }
     }
   }

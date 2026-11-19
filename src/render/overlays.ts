@@ -12,6 +12,8 @@ import { RAMPS, hslToRgb, hueColor, type Ramp } from './colors';
 import type { OverlayKind } from './renderer';
 
 const GRID_CELL = 16; // world units per density/disease bin
+/** Width of the overlay legend panel (CSS px). */
+export const LEGEND_WIDTH = 178;
 
 function canvas(w: number, h: number): HTMLCanvasElement {
   const c = document.createElement('canvas');
@@ -405,7 +407,7 @@ export class OverlayLayer {
   drawLegend(ctx: CanvasRenderingContext2D, sim: Simulation, kind: OverlayKind, right: number, bottom: number): number {
     if (kind === 'none') return 0;
     const pad = 10;
-    const w = 178;
+    const w = LEGEND_WIDTH;
     ctx.font = '600 11px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
     ctx.textBaseline = 'alphabetic';
     if (kind === 'territory') {

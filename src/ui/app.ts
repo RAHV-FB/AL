@@ -12,7 +12,7 @@ import { createAnalyticsPanel, type AnalyticsPanel } from './analytics';
 import { createInspector, type Inspector } from './inspector';
 import { createEventLog, type EventLogPanel } from './eventlog';
 import { fmtInt, h, icon, installTooltips, store, Toaster } from './dom';
-import { DEFAULT_SETTINGS, Painter, TOOLS, brushColor, brushIntervention, toolById, type ToolDef, type ToolId, type ToolSettings } from './tools';
+import { DEFAULT_SETTINGS, Painter, TOOLS, brushColor, brushIntervention, effectiveRadius, toolById, type ToolDef, type ToolId, type ToolSettings } from './tools';
 import { PopulationDesigner } from './designer';
 import { buildLeftSidebar, OVERLAYS, viewPrefs, type LeftSidebar } from './controls';
 
@@ -113,6 +113,8 @@ export class App {
   private simError = false;
   private renderErrLogged = false;
   private panelErrLogged = false;
+  /** Smoothed cost of one simulation tick in ms (see simulate()). */
+  private tickCost = 1;
   private lastEventId = 0;
   private unseenEvents = 0;
   private toastQueue: SimEvent[] = [];
@@ -210,9 +212,15 @@ export class App {
     window.addEventListener('blur', () => this.keys.clear());
     new ResizeObserver(() => this.onResize()).observe(this.stage);
     document.addEventListener('mousedown', (e) => {
-      // keep keyboard shortcuts working after clicking buttons (no lingering focus)
+      // keep keyboard shortcuts working after clicking buttons (no lingering focus): buttons never
+      // take focus, and a text box / dropdown that had it gives it up — otherwise e.g. typing a
+      // seed and clicking Restart would leave every shortcut key typing into the seed box
       const t = e.target as Element | null;
-      if (t && t.closest && t.closest('button, .chip')) e.preventDefault();
+      if (t && t.closest && t.closest('button, .chip')) {
+        e.preventDefault();
+        const a = document.activeElement;
+        if (a instanceof HTMLElement && a.matches('input:not([type=range]):not([type=checkbox]), select, textarea')) a.blur();
+      }
     });
 
     // ---------------------------------------------------------- boot
@@ -329,7 +337,10 @@ export class App {
     el.cursor = h('div', { class: 'cursor-info mono' });
     el.toolHud = h('div', { class: 'tool-hud' });
     el.keysHint = h('button', { type: 'button', class: 'keys-hint', onclick: () => this.showHelp(true) }, h('kbd', null, 'H'), ' shortcuts');
-    this.stage.append(rail, h('div', { class: 'hud-top' }, el.paused, el.follow), el.toolHud, el.cursor, el.keysHint);
+    // One row: tool HUD on the left, status pills centred in what is left, so the two never
+    // overlap on a narrow stage (e.g. 1280 px wide with both sidebars open).
+    const hudRow = h('div', { class: 'hud-row' }, el.toolHud, h('div', { class: 'hud-top' }, el.paused, el.follow));
+    this.stage.append(rail, hudRow, el.cursor, el.keysHint);
   }
 
   private buildHelp(): HTMLElement {
@@ -344,7 +355,7 @@ export class App {
         { class: 'key-grid' },
         h('div', null, h('h3', null, 'Time'), row(['Space'], 'Play / pause'), row(['.'], 'Advance one tick'), row(['<', '>'], 'Slower / faster'), h('h3', null, 'Camera'), row(['Wheel'], 'Zoom at cursor'), row(['Drag'], 'Pan (Inspect tool, or any click tool)'), row(['Right-drag'], 'Pan with any tool'), row(['W', 'A', 'S', 'D'], 'Pan (or arrow keys)'), row(['+', '−'], 'Zoom in / out'), row(['0'], 'Fit the whole world'), row(['F'], 'Follow selected agent')),
         h('div', null, h('h3', null, 'Tools'), row(['1', '–', '9'], 'Choose a tool'), ...TOOLS.map((t) => row([t.key], t.name)), row(['[', ']'], 'Brush smaller / larger (or Alt + wheel)'), row(['Shift', 'Click'], 'Smite (with Bless tool)')),
-        h('div', null, h('h3', null, 'Panels'), row(['O'], 'Cycle data overlay'), row(['Esc'], 'Deselect / close'), row(['H'], 'This help'), row(['Ctrl', 'S'], 'Save experiment'), row(['Ctrl', 'O'], 'Load experiment'), h('h3', null, 'Tips'), h('ul', { class: 'tips' }, h('li', null, 'Paint a wall across the map and watch the two halves drift apart genetically.'), h('li', null, 'Spawn "Warlike raiders" next to "Gentle foragers" and compare in the Stats tab.'), h('li', null, 'While paused, each edit advances the world by a single tick so you can see it applied.'), h('li', null, 'Hover any control for an explanation.'))),
+        h('div', null, h('h3', null, 'Panels'), row(['O'], 'Cycle data overlay'), row(['Esc'], 'Deselect, back to Inspect, close'), row(['H'], 'This help'), row(['Ctrl', 'S'], 'Save experiment'), row(['Ctrl', 'O'], 'Load experiment'), h('h3', null, 'Tips'), h('ul', { class: 'tips' }, h('li', null, 'Paint a wall across the map and watch the two halves drift apart genetically.'), h('li', null, 'Spawn "Warlike raiders" next to "Gentle foragers" and compare in the Stats tab.'), h('li', null, 'While paused, each edit advances the world by a single tick so you can see it applied.'), h('li', null, 'Hover any control for an explanation.'))),
       ),
     );
     const back = h('div', { class: 'modal-back', onclick: (e: Event) => { if (e.target === back) this.showHelp(false); } }, modal);
@@ -403,8 +414,14 @@ export class App {
       this.toaster.show('You have not made any interventions in this run yet — use the tools, global events or parameters first.', { kind: 'info', title: 'Nothing to replay' });
       return;
     }
+    // the log keeps only the newest entries: once any were dropped the replay cannot match the run
+    const dropped = (this.sim.state as { interventionLogDropped?: number }).interventionLogDropped ?? 0;
     if (this.startScenario(this.scenario, { seed, replay: log, quiet: true })) {
-      this.toaster.show(`Restarted with seed ${seed}; your ${fmtInt(log.length)} interventions will be re-applied at their original ticks.`, { kind: 'good', title: 'Replaying your interventions' });
+      if (dropped > 0) {
+        this.toaster.show(`Only your latest ${fmtInt(log.length)} interventions were kept; the first ${fmtInt(dropped)} were dropped from the log, so this replay will not reproduce your run exactly.`, { kind: 'bad', title: 'Replay is incomplete', timeout: 9000 });
+      } else {
+        this.toaster.show(`Restarted with seed ${seed}; your ${fmtInt(log.length)} interventions will be re-applied at their original ticks.`, { kind: 'good', title: 'Replaying your interventions' });
+      }
     }
   }
 
@@ -864,9 +881,10 @@ export class App {
     this.refreshToolHud();
   }
 
-  private refreshToolHud(): void {
+  /** Tool name + effective brush size in the HUD (also called when tool options change). */
+  refreshToolHud(): void {
     this.el.toolHud.replaceChildren(icon(this.tool.icon, 13), h('span', null, this.tool.name));
-    if (this.tool.brush) this.el.toolHud.append(h('span', { class: 'muted mono' }, `· ${Math.round(this.settings.radius)} u`));
+    if (this.tool.brush) this.el.toolHud.append(h('span', { class: 'muted mono' }, `· ${Math.round(effectiveRadius(this.tool.id, this.settings))} u`));
   }
 
   private cursorStyle = 'default';
@@ -927,8 +945,10 @@ export class App {
         this.toggleFollow();
         break;
       case 'Escape':
+        // deselect and cancel the current tool (back to Inspect), as documented
         this.stopFollow();
         this.select(-1);
+        if (this.tool.id !== 'inspect') this.setTool('inspect', false);
         break;
       case 'h':
       case 'H':
@@ -1038,24 +1058,28 @@ export class App {
     }
     let ticks = 0;
     const t0 = performance.now();
+    // Another tick is run only if it is expected to finish inside the budget. Checking only
+    // "budget not yet exceeded" overshoots by up to one tick (several ms at ~1000 agents), which
+    // pushes busy frames past the display refresh.
+    const fits = () => performance.now() - t0 + this.tickCost <= STEP_BUDGET_MS;
     try {
       if (this.running) {
         const sp = SPEEDS[this.speedIdx];
         if (sp === 0) {
           do {
-            this.sim.step();
+            this.stepTimed();
             ticks++;
-          } while (performance.now() - t0 < STEP_BUDGET_MS);
+          } while (fits());
         } else {
           const perSec = BASE_TPS * sp;
           this.tickAcc = Math.min(this.tickAcc + (dt / 1000) * perSec, perSec * 0.25 + 1);
           let n = Math.floor(this.tickAcc);
           this.tickAcc -= n;
           while (n > 0) {
-            this.sim.step();
+            this.stepTimed();
             ticks++;
             n--;
-            if (n > 0 && performance.now() - t0 > STEP_BUDGET_MS) {
+            if (n > 0 && !fits()) {
               this.tickAcc = 0;
               break;
             }
@@ -1070,6 +1094,14 @@ export class App {
     }
     this.needsApply = false;
     this.ticksCounted += ticks;
+  }
+
+  /** One simulation tick, timed into the smoothed per-tick cost used for frame budgeting. */
+  private stepTimed(): void {
+    const t = performance.now();
+    this.sim.step();
+    const ms = performance.now() - t;
+    this.tickCost += (Math.min(ms, 50) - this.tickCost) * 0.1;
   }
 
   private updateCamera(now: number): void {
@@ -1115,12 +1147,13 @@ export class App {
       const w = this.camera.screenToWorld(this.pointer.x, this.pointer.y);
       const b = this.view.brush;
       const color = brushColor(t, this.settings);
+      const radius = effectiveRadius(t.id, this.settings); // e.g. meteors are capped: preview what really happens
       if (b) {
         b.x = w.x;
         b.y = w.y;
-        b.radius = this.settings.radius;
+        b.radius = radius;
         b.color = color;
-      } else this.view.brush = { x: w.x, y: w.y, radius: this.settings.radius, color };
+      } else this.view.brush = { x: w.x, y: w.y, radius, color };
     } else this.view.brush = null;
   }
 

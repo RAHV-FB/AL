@@ -28,5 +28,6 @@ export const LIMITS = {
   foodMemory: 4,
   dangerMemory: 3,
   statSamples: 1200,
+  /** Beyond this the oldest entries are dropped (state.interventionLogDropped counts them; replays become inexact). */
   interventionLog: 5000,
 };

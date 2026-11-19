@@ -20,6 +20,9 @@ import { DEFAULT_CONFIG } from './config';
 import { LIMITS, SAVE_VERSION, TERRAIN_INFO } from './constants';
 import { agentName, tribeName } from './names';
 import {
+  ACTIONS,
+  DEATH_CAUSES,
+  DISASTER_KINDS,
   NONE,
   type Agent,
   type AgentId,
@@ -45,7 +48,7 @@ import { think, act } from './brain';
 import { updateVitals } from './lifecycle';
 import { updateSocial } from './social';
 import { createStatsState, updateStats } from './stats';
-import { applyIntervention } from './interventions';
+import { applyIntervention, normalizeIntervention } from './interventions';
 
 export interface CreateOptions {
   scenario: ScenarioDef;
@@ -58,6 +61,7 @@ export interface CreateOptions {
 }
 
 const EMPTY_ROLES = (): Record<Role, number> => ({ none: 0, forager: 0, warrior: 0, caretaker: 0, explorer: 0 });
+const ROLE_ORDER: Role[] = ['none', 'forager', 'warrior', 'caretaker', 'explorer'];
 
 export class Simulation {
   state: SimState;
@@ -74,6 +78,8 @@ export class Simulation {
   private replayQueue: InterventionRecord[] = [];
   private pendingBirths: Agent[] = [];
   private stepping = false;
+  /** True while step() applies interventions (phase 1, before any agent is processed). */
+  private intervening = false;
   private deadThisTick = 0;
 
   /** World size in world units. */
@@ -124,8 +130,16 @@ export class Simulation {
       applyIntervention(sim, { kind: 'spawn', ...pop });
     }
     sim.flush();
-    if (opts.replay) sim.replayQueue = opts.replay.map((r) => ({ tick: r.tick, intervention: structuredCloneSafe(r.intervention) }));
+    if (opts.replay) {
+      // step() applies the queue head-first, so it must be in tick order (stable: same-tick entries keep
+      // their recorded order); entries without a usable tick would block the queue forever.
+      sim.replayQueue = opts.replay
+        .filter((r) => r && typeof r.tick === 'number' && Number.isFinite(r.tick))
+        .map((r) => ({ tick: r.tick, intervention: structuredCloneSafe(r.intervention) }))
+        .sort((p, q) => p.tick - q.tick);
+    }
     sim.log('environment', 'info', `Experiment "${scenario.name}" started (seed ${config.seed}).`);
+    state.rngState = rng.getState(); // spawning the founders used the generator
     return sim;
   }
 
@@ -168,7 +182,10 @@ export class Simulation {
     this.stepping = true;
     this.deadThisTick = 0;
 
-    // 1. scheduled + replayed + user interventions
+    // 1. scheduled + replayed + user interventions. Nothing iterates the agent array yet, so agents they
+    //    spawn join the world at once: later interventions of this tick (remove, paint, …), the agent
+    //    loop and the tribe recount all see them. Deaths are still flushed at the end of the tick.
+    this.intervening = true;
     if (s.scheduled.length) this.processScheduled();
     if (this.replayQueue.length) {
       while (this.replayQueue.length && this.replayQueue[0].tick <= s.tick) {
@@ -181,6 +198,7 @@ export class Simulation {
       this.queue = [];
       for (const iv of q) this.applyRecorded(iv);
     }
+    this.intervening = false;
 
     // 2-4. environment
     updateEnvironment(this);
@@ -236,11 +254,25 @@ export class Simulation {
     s.scheduled = s.scheduled.filter((e) => e.tick >= s.tick);
   }
 
+  /**
+   * Record and apply a user / replayed intervention. The canonical form (finite numbers, handler
+   * defaults filled in, JSON-safe) is both what gets recorded and what gets applied, so a replay —
+   * also of a log that went through a save file — re-applies exactly what the original run applied.
+   * Interventions that cannot have any effect (unknown kind, no target point, …) are not recorded.
+   */
   private applyRecorded(iv: Intervention): void {
     const s = this.state;
-    s.interventionLog.push({ tick: s.tick, intervention: structuredCloneSafe(iv) });
-    if (s.interventionLog.length > LIMITS.interventionLog) s.interventionLog.shift();
-    applyIntervention(this, iv);
+    const n = normalizeIntervention(iv, this);
+    if (!n) return;
+    s.interventionLog.push({ tick: s.tick, intervention: n });
+    if (s.interventionLog.length > LIMITS.interventionLog) {
+      s.interventionLog.shift();
+      s.interventionLogDropped = (s.interventionLogDropped ?? 0) + 1;
+      if (s.interventionLogDropped === 1) {
+        this.log('intervention', 'bad', `The intervention log is full (${LIMITS.interventionLog} entries): the oldest are being dropped, so a replay can no longer reproduce this run exactly.`);
+      }
+    }
+    applyIntervention(this, n);
   }
 
   /** Remove dead agents and append newborns. Safe to call outside step(). */
@@ -254,6 +286,9 @@ export class Simulation {
       else this.agentById.delete(a.id);
     }
     agents.length = w;
+    // every agent killed so far has just left the array, so `population` must stop subtracting them
+    // (otherwise it under-counts until the next step() and canSpawn() lets spawns exceed maxAgents)
+    this.deadThisTick = 0;
     if (this.pendingBirths.length) {
       for (const b of this.pendingBirths) {
         if (!b.alive) continue;
@@ -287,8 +322,9 @@ export class Simulation {
   }
 
   /**
-   * Register a newly created agent (from lifecycle.createAgent). During a tick it
-   * joins the world at the end of the tick; outside a tick it is added immediately.
+   * Register a newly created agent (from lifecycle.createAgent). Born during a tick's agent / social
+   * phases it joins the world at the end of the tick; outside a tick, or spawned by an intervention at
+   * the start of one, it is added immediately.
    * Also creates its lineage record and bumps birth counters when it has parents.
    */
   addAgent(agent: Agent): void {
@@ -314,7 +350,7 @@ export class Simulation {
         if (pr) pr.offspring++;
       }
     }
-    if (this.stepping) this.pendingBirths.push(agent);
+    if (this.stepping && !this.intervening) this.pendingBirths.push(agent);
     else {
       this.state.agents.push(agent);
       this.agentById.set(agent.id, agent);
@@ -456,8 +492,17 @@ export class Simulation {
 
   // ------------------------------------------------------------ diagnostics
 
-  /** Deterministic fingerprint of the full simulation state (for tests). */
-  hash(): string {
+  /**
+   * Deterministic fingerprint of the simulation state (for tests). Covers everything that feeds
+   * back into the trajectory or that a replay / save → load must reproduce: counters and RNG,
+   * config, clock, every agent field that persists between ticks (vitals, kinematics, behaviour
+   * timers, targets, disease, relationships, memories, children), tribes incl. diplomacy, the
+   * lineage registry, disasters, schedules, the event log, statistics and every world layer.
+   * Only derived / presentational agent fields (traits, utilities, thought, history) are skipped.
+   * `{ events: false }` leaves out the event log (and nextEventId) to compare trajectories alone.
+   */
+  hash(opts: { events?: boolean } = {}): string {
+    const withEvents = opts.events !== false;
     let h1 = 0x811c9dc5 | 0;
     let h2 = 0x01000193 | 0;
     const mix = (v: number) => {
@@ -466,25 +511,108 @@ export class Simulation {
       h1 = Math.imul(h1 ^ q, 0x01000193);
       h2 = Math.imul(h2 ^ (q >>> 7) ^ h1, 0x5bd1e995);
     };
+    const mixStr = (str: string) => {
+      mix(str.length);
+      for (let i = 0; i < str.length; i++) mix(str.charCodeAt(i));
+    };
+    const opt = (v: number | undefined) => (v === undefined ? -7 : v);
     const s = this.state;
     mix(s.tick);
-    for (const v of s.rngState) mix(v);
+    // the live generator: state.rngState is only a snapshot refreshed by step() (and saved by serializeSim)
+    for (const v of this.rng.getState()) mix(v);
+    mix(s.nextAgentId);
+    mix(s.nextTribeId);
+    if (withEvents) mix(s.nextEventId);
+    mix(s.nextDisasterId);
+    mixStr(s.scenarioId);
+    const cfg = s.config as unknown as Record<string, number | boolean>;
+    for (const k of Object.keys(DEFAULT_CONFIG)) {
+      const v = cfg[k];
+      mix(typeof v === 'boolean' ? (v ? 1 : 0) : v);
+    }
+    const e = s.env;
+    mix(e.timeOfDay); mix(e.daylight); mix(e.day); mix(e.season); mix(e.seasonProgress); mix(e.year); mix(e.temperature); mix(e.tempOffset); mix(e.seasonGrowth);
+
     mix(s.agents.length);
     for (const a of s.agents) {
       mix(a.id); mix(a.x); mix(a.y); mix(a.health); mix(a.food); mix(a.energy); mix(a.carried); mix(a.tribeId); mix(a.age);
       for (const g of a.genes) mix(g);
+      mix(a.alive ? 1 : 0); mix(a.generation); mix(a.parents[0]); mix(a.parents[1]); mix(a.birthTick);
+      mix(a.vx); mix(a.vy); mix(a.heading);
+      mix(ACTIONS.indexOf(a.action)); mix(a.actionTicks); mix(a.targetX); mix(a.targetY); mix(a.targetId); mix(a.decisionCooldown);
+      mix(a.reproCooldown); mix(a.offspring); mix(ROLE_ORDER.indexOf(a.role));
+      mix(a.skills.forage); mix(a.skills.combat); mix(a.skills.social);
+      mix(a.infection); mix(a.virulence); mix(a.immuneTicks); mix(a.lastAttackerId);
+      mix(opt(a.fear)); mix(opt(a.sinceMeal)); mix(opt(a.diseaseHp));
+      const st = a.stats;
+      mix(st.foodEaten); mix(st.distance); mix(st.kills); mix(st.shared); mix(st.received); mix(st.fights);
+      mix(a.children.length);
+      for (const c of a.children) mix(c);
+      mix(a.relationships.length);
+      for (const r of a.relationships) { mix(r.id); mix(r.affinity); mix(r.kin); mix(r.lastTick); mix(r.interactions); }
+      mix(a.memory.food.length);
+      for (const m of a.memory.food) { mix(m.x); mix(m.y); mix(m.value); mix(m.tick); }
+      mix(a.memory.danger.length);
+      for (const m of a.memory.danger) { mix(m.x); mix(m.y); mix(m.value); mix(m.tick); }
     }
-    for (const t of s.tribes) { mix(t.id); mix(t.stockpile); mix(t.members); mix(t.homeX); mix(t.homeY); }
-    const f = s.world.food;
+    mix(s.tribes.length);
+    for (const t of s.tribes) {
+      mix(t.id); mix(t.stockpile); mix(t.members); mix(t.homeX); mix(t.homeY);
+      mix(t.extinctTick); mix(t.foundedTick); mix(t.founderId); mix(t.peakMembers); mix(t.totalJoined); mix(t.territory); mix(t.hue); mix(t.parentTribeId);
+      for (const k of Object.keys(t.relations)) { mix(Number(k)); mix(t.relations[Number(k)]); }
+      for (const r of ROLE_ORDER) mix(t.roles[r] ?? 0);
+      for (const g of t.meanGenes) mix(g);
+      mixStr(t.name);
+    }
+    mix(s.lineage.length);
+    for (const l of s.lineage) { mix(l.id); mix(l.deathTick); mix(DEATH_CAUSES.indexOf(l.deathCause as DeathCause)); mix(l.offspring); mix(l.tribeId); }
+    mix(s.disasters.length);
+    for (const d of s.disasters) {
+      mix(d.id); mix(DISASTER_KINDS.indexOf(d.kind)); mix(d.x); mix(d.y); mix(d.radius); mix(d.startTick); mix(d.duration); mix(d.intensity); mix(d.active ? 1 : 0);
+    }
+    mix(s.scheduled.length);
+    for (const ev of s.scheduled) { mix(ev.tick); mix(opt(ev.repeat)); mixStr(ev.intervention.kind); }
+    mix(s.interventionLog.length);
+    mix(opt(s.interventionLogDropped));
+    for (const r of s.interventionLog) { mix(r.tick); mixStr(r.intervention.kind); }
+    if (withEvents) {
+      mix(s.events.length);
+      for (const ev of s.events) { mix(ev.id); mix(ev.tick); mixStr(ev.message); }
+    }
+    const stats = s.stats;
+    mix(stats.samples.length);
+    mix(stats.totals.births); mix(stats.totals.deaths); mix(stats.totals.peakPopulation); mix(stats.totals.peakTick);
+    mix(stats.counters.births); mix(stats.counters.deaths); mix(stats.counters.fights); mix(stats.counters.shares);
+    for (const c of DEATH_CAUSES) mix(stats.counters.deathsByCause[c] ?? 0);
+    const last = stats.samples[stats.samples.length - 1];
+    if (last) { mix(last.tick); mix(last.population); mix(last.births); mix(last.deaths); }
+
+    const w = s.world;
+    mix(w.terrainVersion);
+    const f = w.food;
     let sum = 0;
     for (let i = 0; i < f.length; i++) sum += f[i] * ((i % 97) + 1);
     mix(sum);
     let fert = 0;
-    for (let i = 0; i < s.world.fertility.length; i++) fert += s.world.fertility[i];
+    let base = 0;
+    let climate = 0;
+    for (let i = 0; i < w.fertility.length; i++) {
+      const k = (i % 89) + 1;
+      fert += w.fertility[i];
+      base += w.baseFertility[i] * k;
+      climate += w.climateMod[i] * k;
+    }
     mix(fert);
+    mix(base);
+    mix(climate);
     let terr = 0;
-    for (let i = 0; i < s.world.terrain.length; i++) terr = (terr * 31 + s.world.terrain[i]) | 0;
+    let owner = 0;
+    for (let i = 0; i < w.terrain.length; i++) {
+      terr = (terr * 31 + w.terrain[i]) | 0;
+      owner = (owner * 31 + w.territory[i]) | 0;
+    }
     mix(terr);
+    mix(owner);
     return (h1 >>> 0).toString(16).padStart(8, '0') + (h2 >>> 0).toString(16).padStart(8, '0');
   }
 }

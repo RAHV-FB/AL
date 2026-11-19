@@ -1,8 +1,10 @@
 // OWNER: Simulation Core agent.
 /**
- * User / scenario interventions. Every handler validates its (possibly
- * deserialised, hand-edited) input, is deterministic (randomness only from
- * sim.rng, agents walked in array order) and logs a short 'intervention' event.
+ * User / scenario interventions. Every intervention is first reduced to its canonical form
+ * (normalizeIntervention: finite numbers, the handlers' defaults filled in, JSON-safe), then
+ * applied by a handler that is deterministic (randomness only from sim.rng, agents walked in
+ * array order) and logs a short 'intervention' event. Simulation records the canonical form, so a
+ * replay — also one of a log that went through a save file — applies exactly the same thing.
  */
 import type { Simulation } from './simulation';
 import { DEFAULT_CONFIG, PARAM_SPECS } from './config';
@@ -14,10 +16,12 @@ import { foundTribe, joinTribe } from './social';
 import { defaultFertility, findPassableNear } from './world';
 import {
   DISASTER_KINDS,
+  GENES,
   NONE,
   TERRAIN_COUNT,
   type Agent,
   type DisasterKind,
+  type GenomeTemplate,
   type Intervention,
   type SimConfig,
   type SpawnSpec,
@@ -67,8 +71,136 @@ function capacity(sim: Simulation, i: number): number {
 }
 
 /** Brush radius in world units: finite, >= 0, at most the world's larger dimension. */
-function brushRadius(sim: Simulation, r: unknown): number {
+function brushRadius(sim: InterventionBounds, r: unknown): number {
   return clamp(num(r, 0), 0, Math.max(sim.worldW, sim.worldH));
+}
+
+// ------------------------------------------------------------------ canonical form
+
+/** World size in world units — all normalizeIntervention needs (a Simulation qualifies). */
+export interface InterventionBounds {
+  readonly worldW: number;
+  readonly worldH: number;
+}
+
+const MAX_SPAWN = 5000;
+const MAX_FOOD_AMOUNT = 1e4;
+const MAX_FERTILIZE = 1.2;
+const MAX_TRIBE_NAME = 40;
+const DISASTER_DEFAULTS = { radius: 80, intensity: 0.7, duration: 600, maxDuration: 100000 };
+
+type Raw = Record<string, unknown>;
+const isObj = (v: unknown): v is Raw => typeof v === 'object' && v !== null && !Array.isArray(v);
+const isInt = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v);
+
+/** Gene means / spread that randomGenes can use (non-finite values mean "not given"). */
+function normalizeTemplate(v: unknown): GenomeTemplate | undefined {
+  if (!isObj(v)) return undefined;
+  const t: GenomeTemplate = {};
+  let n = 0;
+  for (const g of GENES) {
+    const m = v[g];
+    if (typeof m === 'number' && Number.isFinite(m)) {
+      t[g] = m;
+      n++;
+    }
+  }
+  if (typeof v.spread === 'number' && Number.isFinite(v.spread)) {
+    t.spread = v.spread;
+    n++;
+  }
+  return n > 0 ? t : undefined;
+}
+
+/** The settings a setConfig patch really changes: known, non-frozen keys with valid values, clamped / rounded. */
+function normalizeConfigPatch(raw: Raw): Partial<SimConfig> {
+  const out: Record<string, number | boolean> = {};
+  for (const key of Object.keys(raw) as (keyof SimConfig)[]) {
+    if (!Object.prototype.hasOwnProperty.call(DEFAULT_CONFIG, key) || FROZEN_KEYS.has(key)) continue;
+    const def = DEFAULT_CONFIG[key];
+    const v = raw[key];
+    if (typeof def === 'boolean') {
+      if (typeof v === 'boolean') out[key] = v;
+    } else if (typeof def === 'number' && typeof v === 'number' && Number.isFinite(v)) {
+      const spec = PARAM_SPECS.find((s) => s.key === key);
+      const range: [number, number] | undefined = spec ? [spec.min, spec.max] : EXTRA_RANGES[key];
+      const val = range ? clamp(v, range[0], range[1]) : v;
+      out[key] = INT_KEYS.has(key) ? Math.round(val) : val;
+    }
+  }
+  return out as Partial<SimConfig>;
+}
+
+/**
+ * Canonical form of an intervention: exactly what applyIntervention acts on, as plain JSON data
+ * (every number finite; invalid values replaced by the handler's defaults; ranges clamped; unknown
+ * fields dropped). Returns null when the intervention cannot have any effect (not an object, unknown
+ * kind, no valid target point, nothing to spawn / add, invalid terrain or disaster kind, a settings
+ * patch that changes nothing valid, an id that can never be allocated).
+ * Idempotent: normalizeIntervention(normalizeIntervention(x)) equals normalizeIntervention(x).
+ */
+export function normalizeIntervention(iv: unknown, bounds: InterventionBounds): Intervention | null {
+  if (!isObj(iv)) return null;
+  const { x, y } = iv;
+  const point = isPoint(x, y);
+  const radius = brushRadius(bounds, iv.radius);
+  switch (iv.kind) {
+    case 'spawn': {
+      const count = clamp(Math.floor(num(iv.count, 0)), 0, MAX_SPAWN);
+      if (count === 0 || !point) return null;
+      const out: Extract<Intervention, { kind: 'spawn' }> = { kind: 'spawn', x: x as number, y: y as number, count, radius };
+      const template = normalizeTemplate(iv.template);
+      if (template) out.template = template;
+      if (iv.tribe === 'new' || iv.tribe === 'none' || isInt(iv.tribe)) out.tribe = iv.tribe;
+      if (typeof iv.tribeName === 'string') {
+        const name = iv.tribeName.trim().slice(0, MAX_TRIBE_NAME).trim();
+        if (name) out.tribeName = name;
+      }
+      return out;
+    }
+    case 'remove':
+      return point ? { kind: 'remove', x: x as number, y: y as number, radius } : null;
+    case 'removeFood':
+      return point ? { kind: 'removeFood', x: x as number, y: y as number, radius } : null;
+    case 'addFood': {
+      const amount = clamp(num(iv.amount, 0), 0, MAX_FOOD_AMOUNT);
+      return point && amount > 0 ? { kind: 'addFood', x: x as number, y: y as number, radius, amount } : null;
+    }
+    case 'fertilize': {
+      const amount = clamp(num(iv.amount, 0), -MAX_FERTILIZE, MAX_FERTILIZE);
+      return point && amount !== 0 ? { kind: 'fertilize', x: x as number, y: y as number, radius, amount } : null;
+    }
+    case 'paintTerrain': {
+      const t = iv.terrain;
+      return point && isInt(t) && t >= 0 && t < TERRAIN_COUNT ? { kind: 'paintTerrain', x: x as number, y: y as number, radius, terrain: t as TerrainType } : null;
+    }
+    case 'disaster': {
+      const kind = iv.disaster;
+      if (typeof kind !== 'string' || !DISASTER_KINDS.includes(kind as DisasterKind)) return null;
+      // radius 0 means "worldwide": an invalid or negative radius must not escalate to that
+      let r = num(iv.radius, DISASTER_DEFAULTS.radius);
+      if (r < 0) r = DISASTER_DEFAULTS.radius;
+      return {
+        kind: 'disaster',
+        disaster: kind as DisasterKind,
+        x: num(x, bounds.worldW / 2),
+        y: num(y, bounds.worldH / 2),
+        radius: brushRadius(bounds, r),
+        intensity: clamp(num(iv.intensity, DISASTER_DEFAULTS.intensity), 0.05, 1),
+        duration: Math.round(clamp(num(iv.duration, DISASTER_DEFAULTS.duration), 1, DISASTER_DEFAULTS.maxDuration)),
+      };
+    }
+    case 'setConfig': {
+      if (!isObj(iv.patch)) return null;
+      const patch = normalizeConfigPatch(iv.patch);
+      return Object.keys(patch).length ? { kind: 'setConfig', patch } : null;
+    }
+    case 'killAgent':
+    case 'boostAgent':
+      return isInt(iv.id) && iv.id >= 1 ? { kind: iv.kind, id: iv.id } : null;
+    default:
+      return null; // unknown kinds (corrupt saves) are ignored
+  }
 }
 
 /**
@@ -119,8 +251,9 @@ function agentsInRadius(sim: Simulation, x: number, y: number, radius: number): 
 // ------------------------------------------------------------------ main entry
 
 /** Apply one intervention immediately (called by Simulation at tick start). Must be deterministic. */
-export function applyIntervention(sim: Simulation, iv: Intervention): void {
-  if (!iv || typeof iv !== 'object') return;
+export function applyIntervention(sim: Simulation, raw: Intervention): void {
+  const iv = normalizeIntervention(raw, sim);
+  if (!iv) return;
   switch (iv.kind) {
     case 'spawn':
       spawn(sim, iv);
@@ -164,15 +297,13 @@ export function applyIntervention(sim: Simulation, iv: Intervention): void {
     case 'setConfig':
       setConfig(sim, iv.patch);
       break;
-    default:
-      break; // unknown kinds (corrupt saves) are ignored
   }
 }
 
 // ------------------------------------------------------------------ spawn
 
 function spawn(sim: Simulation, iv: SpawnSpec): void {
-  const count = clamp(Math.floor(num(iv.count, 0)), 0, 5000);
+  const count = clamp(Math.floor(num(iv.count, 0)), 0, MAX_SPAWN);
   if (count === 0 || !isPoint(iv.x, iv.y)) return;
   const ts = sim.state.world.tileSize;
   const radius = Math.max(brushRadius(sim, iv.radius), ts * 0.75); // never stack agents on one point
@@ -199,10 +330,11 @@ function spawn(sim: Simulation, iv: SpawnSpec): void {
     if (!p) continue;
     const genes = randomGenes(sim.rng, iv.template);
     const traits = expressTraits(genes);
-    const maturity = Math.max(0, num(traits.maturityAge, 600));
-    let age = Math.round(maturity * (1 + 0.2 * sim.rng.next())); // young adults
+    // founders are young adults: at or a little past their OWN maturity age (700–1100 ticks by body size)
+    const maturity = Math.max(0, Math.ceil(num(traits.maturityAge, 600)));
+    let age = Math.round(maturity * (1 + 0.2 * sim.rng.next()));
     const longevity = num(traits.longevity, Infinity);
-    if (age > longevity * 0.5) age = Math.floor(longevity * 0.5);
+    if (age > longevity * 0.5) age = Math.max(maturity, Math.floor(longevity * 0.5)); // never juveniles
     const food = Math.max(0, num(traits.maxFood, 100)) * 0.85;
     const a = createAgent(sim, { x: p.x, y: p.y, genes, age, food });
     sim.addAgent(a);
@@ -216,30 +348,38 @@ function spawn(sim: Simulation, iv: SpawnSpec): void {
 
   let tribe: Tribe | undefined;
   let founded = false;
+  let revived = false;
+  /** Camp at the centre of the group rather than wherever the first founder landed. */
+  const settle = (t: Tribe): void => {
+    let mx = 0;
+    let my = 0;
+    for (const a of made) {
+      mx += a.x;
+      my += a.y;
+    }
+    const home = findPassableNear(sim, mx / made.length, my / made.length, search, true);
+    if (home) {
+      t.homeX = home.x;
+      t.homeY = home.y;
+    }
+  };
   if (sim.config.tribesEnabled !== false) {
     if (iv.tribe === 'new') {
       const hueGene = iv.template?.hue;
       const hue = typeof hueGene === 'number' && Number.isFinite(hueGene) ? (clamp(hueGene, 0, 1) * 360) % 360 : undefined;
-      const name = typeof iv.tribeName === 'string' && iv.tribeName.trim() ? iv.tribeName.trim().slice(0, 40) : undefined;
+      const name = iv.tribeName || undefined; // already trimmed / capped by normalizeIntervention
       tribe = foundTribe(sim, made[0], made.slice(1), name, hue);
       founded = true;
-      // camp at the centre of the group rather than wherever the first founder landed
-      let mx = 0;
-      let my = 0;
-      for (const a of made) {
-        mx += a.x;
-        my += a.y;
-      }
-      const home = findPassableNear(sim, mx / made.length, my / made.length, search, true);
-      if (home) {
-        tribe.homeX = home.x;
-        tribe.homeY = home.y;
-      }
+      settle(tribe);
     } else if (typeof iv.tribe === 'number') {
-      const t = sim.getTribe(iv.tribe); // joinTribe revives a recently extinct tribe
+      const t = sim.getTribe(iv.tribe);
       if (t) {
         tribe = t;
-        for (const a of made) joinTribe(sim, a, t.id);
+        revived = t.extinctTick !== -1;
+        for (const a of made) joinTribe(sim, a, t.id); // joinTribe revives a recently extinct tribe
+        // its old camp was abandoned when it died out (and may since have been flooded or walled in):
+        // the newcomers settle where they arrive
+        if (revived) settle(t);
       }
     }
   }
@@ -251,7 +391,7 @@ function spawn(sim: Simulation, iv: SpawnSpec): void {
   }
 
   let msg = `Spawned ${plural(made.length, 'agent')}`;
-  if (tribe) msg += founded ? ` founding the ${tribe.name}` : ` into the ${tribe.name}`;
+  if (tribe) msg += founded ? ` founding the ${tribe.name}` : revived ? ` reviving the extinct ${tribe.name}` : ` into the ${tribe.name}`;
   if (made.length < count) msg += capped ? ' (population cap reached)' : ` (${count - made.length} found no room)`;
   sim.log('intervention', 'info', msg, { x: cx, y: cy, tribeId: tribe ? tribe.id : NONE });
 }
@@ -401,28 +541,16 @@ const LABELS: Partial<Record<keyof SimConfig, string>> = {
   tribesEnabled: 'Tribes',
 };
 
-function setConfig(sim: Simulation, patch: Partial<SimConfig>): void {
-  if (!patch || typeof patch !== 'object') return;
+function setConfig(sim: Simulation, raw: Partial<SimConfig>): void {
+  if (!isObj(raw)) return;
+  const patch = normalizeConfigPatch(raw) as Record<string, number | boolean>;
   const cfg = sim.state.config as unknown as Record<string, number | boolean>;
   const changes: string[] = [];
   for (const key of Object.keys(patch) as (keyof SimConfig)[]) {
-    if (!Object.prototype.hasOwnProperty.call(DEFAULT_CONFIG, key) || FROZEN_KEYS.has(key)) continue;
-    const def = DEFAULT_CONFIG[key];
-    const v: unknown = (patch as Record<string, unknown>)[key];
-    const spec = PARAM_SPECS.find((s) => s.key === key);
-    const label = spec?.label ?? LABELS[key] ?? key;
-    if (typeof def === 'boolean') {
-      if (typeof v !== 'boolean') continue;
-      if (cfg[key] !== v) changes.push(`${label} ${v ? 'on' : 'off'}`);
-      cfg[key] = v;
-    } else if (typeof def === 'number') {
-      if (typeof v !== 'number' || !Number.isFinite(v)) continue;
-      const range: [number, number] | undefined = spec ? [spec.min, spec.max] : EXTRA_RANGES[key];
-      let val = range ? clamp(v, range[0], range[1]) : v;
-      if (INT_KEYS.has(key)) val = Math.round(val);
-      if (cfg[key] !== val) changes.push(`${label} ${fmt(val)}`);
-      cfg[key] = val;
-    }
+    const v = patch[key];
+    const label = PARAM_SPECS.find((s) => s.key === key)?.label ?? LABELS[key] ?? key;
+    if (cfg[key] !== v) changes.push(typeof v === 'boolean' ? `${label} ${v ? 'on' : 'off'}` : `${label} ${fmt(v)}`);
+    cfg[key] = v;
   }
   if (changes.length === 0) return;
   const shown = changes.slice(0, 3).join(', ') + (changes.length > 3 ? ` (+${changes.length - 3} more)` : '');

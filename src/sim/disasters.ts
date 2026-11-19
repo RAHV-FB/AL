@@ -229,13 +229,58 @@ function coldMagnitude(d: Disaster): number {
   return d.radius <= 0 ? 20 : 12 + 8 * Math.min(1, d.radius / 400);
 }
 
-/** Combined temperature offset of all active cold snaps at tick t. */
+/**
+ * Combined temperature offset of all active GLOBAL (radius 0) cold snaps at tick t. This is
+ * env.tempOffset, i.e. part of the world-wide env.temperature. Local cold snaps only chill their
+ * own area (see temperatureAt) and never lower the global temperature.
+ */
 function coldOffset(sim: Simulation, t: number): number {
   let off = 0;
   for (const d of sim.state.disasters) {
-    if (d.active && d.kind === 'coldsnap') off -= coldMagnitude(d) * d.intensity * envelope(d, t);
+    if (d.active && d.kind === 'coldsnap' && !(d.radius > 0)) off -= coldMagnitude(d) * d.intensity * envelope(d, t);
   }
   return off < T.minTempOffset ? T.minTempOffset : off === 0 ? 0 : off;
+}
+
+/**
+ * Temperature offset (°C, ≤ 0) of the active LOCAL cold snaps at world position (x, y) at the
+ * current tick: magnitude × intensity × end-of-disaster envelope × edge falloff (full strength
+ * inside edgeInner·radius, smooth to 0 at the radius). 0 outside every local cold snap.
+ */
+export function localColdOffsetAt(sim: Simulation, x: number, y: number): number {
+  const list = sim.state.disasters;
+  if (!Array.isArray(list) || list.length === 0) return 0;
+  const t = sim.state.tick;
+  let off = 0;
+  for (let i = 0; i < list.length; i++) {
+    const d = list[i];
+    if (!d.active || d.kind !== 'coldsnap' || !(d.radius > 0)) continue;
+    const dx = x - d.x;
+    const dy = y - d.y;
+    const d2 = dx * dx + dy * dy;
+    if (!(d2 < d.radius * d.radius)) continue;
+    const wt = edgeWeight(Math.sqrt(d2), d.radius);
+    if (wt > 0) off -= coldMagnitude(d) * d.intensity * envelope(d, t) * wt;
+  }
+  return off < 0 ? off : 0;
+}
+
+/**
+ * Temperature (°C-ish) at a world position: the global env.temperature (season, daily swing and
+ * global cold snaps) plus local cold snaps around (x, y). The combined cold-snap offset never
+ * goes below DISASTER_TUNING.minTempOffset. Use this for anything physical at a place (cold
+ * stress); env.temperature remains the world-wide value shown in the UI.
+ */
+export function temperatureAt(sim: Simulation, x: number, y: number): number {
+  const env = sim.state.env;
+  const base = Number.isFinite(env.temperature) ? env.temperature : 15;
+  let local = localColdOffsetAt(sim, x, y);
+  if (local < 0) {
+    const global = Number.isFinite(env.tempOffset) && env.tempOffset < 0 ? env.tempOffset : 0;
+    const floor = T.minTempOffset - global; // ≤ 0 while the global offset is above its own floor
+    if (local < floor) local = floor < 0 ? floor : 0;
+  }
+  return base + local;
 }
 
 // ---------------------------------------------------------------- immediate effects

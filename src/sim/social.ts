@@ -14,9 +14,19 @@
  *                         spoilage, camp drift, diplomacy drift + events, fission
  *   - every 120 ticks ... territory map (influence discs) + border friction between tribes
  *
+ * Group dynamics (tuned for roughly 5–15 living tribes per 1000 agents, sizes ≈10–120): a band needs
+ * founder + foundMinCompanions willing members; tribes split above fissionSize (or when a sizeable
+ * share lives far from camp) into daughters that inherit the parent's diplomacy and part as friends;
+ * members of dwindling bands drift into larger, liked neighbours.
+ * Conflict: combat (attack), theft (steal — loot respects carryCapacity), raids on the stockpile of a
+ * tribe at war (raidStockpile). Each incident shifts tribe relations with diminishing returns
+ * (hostilitySink) and weighted by tribe size (actWeight), so wars track how often two peoples clash
+ * and cool down via relDrift once contact stops.
+ *
  * Determinism: randomness only via sim.rng, iteration in array order. The per-simulation cache
  * below only holds scratch buffers and log de-duplication sets — never anything that feeds back
- * into simulation state, so save/load replays identically.
+ * into simulation state, so save/load replays identically (raid logs are de-duplicated from the
+ * persisted event log itself).
  */
 import type { Simulation } from './simulation';
 import { LIMITS, TERRAIN_INFO } from './constants';
@@ -92,17 +102,19 @@ export const SOCIAL_TUNING = {
   foundSociability: 0.45,
   /** Fallback founding companions need at least this much familiarity (otherwise affinity > 0.2 or kin). */
   foundFamiliarity: 0.05,
+  /** A band needs at least this many willing companions besides the founder (no 3-person "tribes"). */
+  foundMinCompanions: 4,
   foundProb: 0.1,
   joinProb: 0.4,
   /** Nearby-tribe attraction needed to join (neutral member 0.3, friend / kin 1, grudge -2). */
   joinScore: 0.6,
-  /** Members of tribes this small drift into a strongly liked, larger neighbouring tribe. */
-  assimilateBelow: 5,
-  assimilateScore: 2,
+  /** Members of tribes this small drift into a liked, larger neighbouring tribe. */
+  assimilateBelow: 12,
+  assimilateScore: 1.2,
   maxFounding: 14,
   /** Spontaneous founding stops at this many living tribes; fission may go up to maxLivingTribes. */
-  maxFoundedTribes: 32,
-  maxLivingTribes: 48,
+  maxFoundedTribes: 16,
+  maxLivingTribes: 24,
   leaveSociability: 0.35,
   /** Deposit / withdraw range around the camp (world units). */
   campRadius: 24,
@@ -114,12 +126,23 @@ export const SOCIAL_TUNING = {
   campPull: 300,
   campStep: 6,
   extinctGrace: 10,
-  fissionSize: 45,
-  fissionFar: 240,
+  /** Tribes above this size split; smaller ones only when stretched (fissionStretch of them beyond fissionFar). */
+  fissionSize: 120,
+  fissionFar: 280,
+  fissionStretch: 0.35,
   fissionMinAge: 900,
-  fissionMinMembers: 12,
+  fissionMinMembers: 40,
+  /** Smallest faction that can leave to found a daughter tribe. */
+  fissionMinFaction: 10,
+  // raids (brain sends members of tribes at war to plunder the enemy camp)
+  /** Fraction of the enemy stockpile one raider can grab per raid (also limited by carry capacity). */
+  raidShare: 0.25,
+  /** Tribe-relation change per successful raid (both directions). */
+  raidIncident: -0.04,
   /** Inter-tribe relations decay toward 0 by this factor every tribePeriod. */
   relDrift: 0.985,
+  /** Starting relation of a daughter tribe and its parent (fission in good times): friendly for ≈1 day of relDrift. */
+  sisterRelation: 0.75,
   // territory
   territoryRadius: 6, // tiles
   territoryMin: 0.35,
@@ -135,6 +158,15 @@ export const SOCIAL_TUNING = {
 const K = SOCIAL_TUNING;
 /** Max distance from a tribe's camp for depositFood / withdrawFood (world units). */
 export const CAMP_RADIUS = K.campRadius;
+
+/** Food an agent can carry per unit of body size (gathering, loot, gifts that overflow the stomach). */
+export const CARRY_PER_SIZE = 25;
+
+/** How much food an agent can carry (besides its stomach). Every path that adds to `carried` respects it. */
+export function carryCapacity(a: Agent): number {
+  const c = CARRY_PER_SIZE * a.traits.size;
+  return Number.isFinite(c) && c > 0 ? c : 0;
+}
 
 const ROLES: Role[] = ['none', 'forager', 'warrior', 'caretaker', 'explorer'];
 const PASSABLE = new Uint8Array(TERRAIN_COUNT);
@@ -255,6 +287,27 @@ function cap(text: string): string {
 
 function meanRelation(a: Tribe, b: Tribe): number {
   return ((a.relations[b.id] ?? 0) + (b.relations[a.id] ?? 0)) / 2;
+}
+
+/**
+ * Diminishing returns of hostility: each new incident between two tribes already at odds deepens the
+ * enmity less (× √(1 + relation), at least `floor`). With relDrift pulling back toward 0, a war settles at
+ * a depth set by how often the two sides actually clash (≈ -0.9 when they fight every few dozen ticks,
+ * ≈ -0.6 at one clash per ~100 ticks) and cools down once contact stops, instead of staying pinned at -1.
+ */
+function hostilitySink(a: Tribe, b: Tribe, floor: number): number {
+  const m = meanRelation(a, b);
+  return m < 0 ? Math.max(floor, Math.sqrt(Math.max(0, 1 + m))) : 1;
+}
+
+/**
+ * Weight of one member's act (a brawl, a raid) on relations between whole tribes: full for small bands,
+ * √(base / members of the smaller tribe) for large ones (≥ min), so two big neighbouring peoples are not
+ * driven into war by a handful of hungry individuals within an hour, while sustained fighting still is.
+ */
+function actWeight(a: Tribe, b: Tribe, base: number, min: number): number {
+  const n = Math.max(1, Math.min(a.members, b.members));
+  return Math.max(min, Math.min(1, Math.sqrt(base / n)));
 }
 
 function liveTribe(sim: Simulation, id: TribeId): Tribe | undefined {
@@ -445,12 +498,14 @@ function rememberDanger(a: Agent, x: number, y: number, value: number, tick: num
   mem.push({ x, y, value, tick });
 }
 
-/** Attacker takes a share of the defender's carried food (all of it on a kill) and, when the
- *  defender is badly hurt or dead, a little stomach food. Pure transfer — no food is created. */
+/** Attacker takes a share of the defender's carried food (all of it on a kill, up to its carry capacity)
+ *  and, when the defender is badly hurt or dead, stomach food (most of it on a kill). Pure transfer —
+ *  no food is created. */
 function steal(attacker: Agent, defender: Agent): void {
   const dead = !(defender.health > 0);
   const hp = dead ? 0 : clamp01(defender.health / defender.traits.maxHealth);
-  let carryRoom = Math.max(0, attacker.traits.maxFood - attacker.carried);
+  // loot goes into the attacker's carry load, which is limited like any other load (carryCapacity)
+  let carryRoom = Math.max(0, carryCapacity(attacker) - attacker.carried);
   if (defender.carried > 0 && carryRoom > 0) {
     const frac = dead ? 1 : (0.2 + 0.5 * (1 - hp)) * (0.6 + 0.4 * clamp01(attacker.traits.aggression));
     const take = Math.min(defender.carried * frac, carryRoom);
@@ -460,7 +515,8 @@ function steal(attacker: Agent, defender: Agent): void {
   }
   if ((dead || hp < 0.3) && defender.food > 0) {
     const stomachRoom = Math.max(0, attacker.traits.maxFood - attacker.food);
-    const take = Math.min(defender.food * (dead ? 0.5 : 0.12), stomachRoom + carryRoom);
+    // a kill is eaten: most of the victim's stomach goes to the killer (the rest is lost with the body)
+    const take = Math.min(defender.food * (dead ? 0.75 : 0.12), stomachRoom + carryRoom);
     if (take > 0) {
       defender.food = Math.max(0, defender.food - take);
       const toStomach = Math.min(take, stomachRoom);
@@ -481,7 +537,7 @@ function handleKill(sim: Simulation, killer: Agent, victim: Agent): void {
   const tk = liveTribe(sim, killer.tribeId);
   const tv = liveTribe(sim, victim.tribeId);
   if (tk && tv && tk !== tv) {
-    changeTribeRelation(sim, tk, tv, K.tribeKill);
+    changeTribeRelation(sim, tk, tv, K.tribeKill * hostilitySink(tk, tv, 0.3) * actWeight(tk, tv, 16, 0.35));
     const c = cacheOf(sim);
     const key = pairKey(tk.id, tv.id);
     if (!c.feuds.has(key)) {
@@ -547,7 +603,7 @@ export function attack(sim: Simulation, attacker: Agent, defender: Agent): void 
     }
     const ta = liveTribe(sim, attacker.tribeId);
     const td = liveTribe(sim, defender.tribeId);
-    if (ta && td && ta !== td) changeTribeRelation(sim, ta, td, K.tribeIncident);
+    if (ta && td && ta !== td) changeTribeRelation(sim, ta, td, K.tribeIncident * hostilitySink(ta, td, 0.15) * actWeight(ta, td, 8, 0.25));
   }
 
   // 3. retaliation by the defender, then group defence by nearby tribe-mates / kin
@@ -593,6 +649,10 @@ export function attack(sim: Simulation, attacker: Agent, defender: Agent): void 
 /** Give food from giver to receiver (from carried first, then stomach). Returns amount transferred. */
 export function shareFood(sim: Simulation, giver: Agent, receiver: Agent, amount: number): number {
   if (giver === receiver || !giver.alive || !receiver.alive || !(amount > 0)) return 0;
+  // never give more than the receiver can hold (stomach room + free carry capacity)
+  const canTake = Math.max(0, receiver.traits.maxFood - receiver.food) + Math.max(0, carryCapacity(receiver) - Math.max(0, receiver.carried));
+  if (amount > canTake) amount = canTake;
+  if (!(amount > 0)) return 0;
   const fromCarried = giver.carried > 0 ? Math.min(giver.carried, amount) : 0;
   const spare = Math.max(0, giver.food - 0.5 * giver.traits.maxFood);
   const fromStomach = Math.min(amount - fromCarried, spare);
@@ -657,6 +717,46 @@ export function withdrawFood(sim: Simulation, a: Agent, amount: number): number 
   t.stockpile = Math.max(0, t.stockpile - amt);
   a.food += amt;
   a.stats.foodEaten += amt;
+  return amt;
+}
+
+/**
+ * True when an event for `tribeId` containing `marker` was logged within the last `window` ticks.
+ * Derived from the persisted event log (not from a cache), so replays and loaded saves log identically.
+ */
+function loggedRecently(sim: Simulation, tribeId: TribeId, marker: string, window: number): boolean {
+  const ev = sim.state.events;
+  const since = sim.state.tick - window;
+  for (let i = ev.length - 1, seen = 0; i >= 0 && seen < 100; i--, seen++) {
+    const e = ev[i];
+    if (e.tick < since) break;
+    if (e.tribeId === tribeId && e.message.includes(marker)) return true;
+  }
+  return false;
+}
+
+/**
+ * Raid: a member of a tribe at war with `target` (own relation below warHostile) who stands at the
+ * enemy camp grabs part of its stockpile into its carry load (limited by carryCapacity). Each raid is an
+ * incident that worsens relations further. Pure transfer — returns the amount taken.
+ */
+export function raidStockpile(sim: Simulation, raider: Agent, target: Tribe): number {
+  const own = liveTribe(sim, raider.tribeId);
+  if (!own || own === target || target.extinctTick !== -1 || !raider.alive || !isAdult(raider)) return 0;
+  if (!((own.relations[target.id] ?? 0) < K.warHostile)) return 0;
+  if (!(target.stockpile > 0) || !nearCamp(raider, target)) return 0;
+  const room = carryCapacity(raider) - Math.max(0, raider.carried);
+  const amt = Math.min(room, target.stockpile, Math.max(5, target.stockpile * K.raidShare));
+  if (!(amt > 0.5)) return 0;
+  target.stockpile = Math.max(0, target.stockpile - amt);
+  raider.carried = Math.max(0, raider.carried) + amt;
+  learn(raider, 'combat', 0.01);
+  changeTribeRelation(sim, own, target, K.raidIncident * hostilitySink(own, target, 0.15) * actWeight(own, target, 8, 0.25));
+  addHistory(sim, raider, `Raided the camp of ${the(target)}`);
+  const marker = `plundered the stockpile of ${the(target)}`;
+  if (!loggedRecently(sim, own.id, marker, sim.state.config.dayLength)) {
+    sim.log('conflict', 'bad', `Raiders of ${the(own)} ${marker}.`, { x: target.homeX, y: target.homeY, agentId: raider.id, tribeId: own.id });
+  }
   return amt;
 }
 
@@ -912,7 +1012,7 @@ function considerJoinOrFound(sim: Simulation, a: Agent, nb: Agent[]): void {
     eligible.push(o);
     if (eligible.length >= K.maxFounding) break;
   }
-  if (eligible.length < 2) return;
+  if (eligible.length < K.foundMinCompanions) return;
   if (countLivingTribes(sim) >= K.maxFoundedTribes) return;
   if (!sim.rng.chance(Math.min(1, K.foundProb * soc * coop))) return;
 
@@ -1162,7 +1262,7 @@ function considerFission(sim: Simulation, c: SocialCache): void {
       }
     }
     const big = n > K.fissionSize;
-    const stretched = far >= Math.max(6, 0.3 * n);
+    const stretched = far >= Math.max(K.fissionMinFaction, K.fissionStretch * n);
     if (!pole || (!big && !stretched)) continue;
     if (!sim.rng.chance(big ? 0.3 : 0.2)) continue;
 
@@ -1172,7 +1272,7 @@ function considerFission(sim: Simulation, c: SocialCache): void {
     let k = 0;
     for (const m of byPole) if (dist2(m.x, m.y, px, py) < dist2(m.x, m.y, t.homeX, t.homeY)) k++;
     k = Math.max(Math.ceil(0.25 * n), Math.min(Math.floor(0.6 * n), k));
-    if (k < 5) continue;
+    if (k < K.fissionMinFaction) continue;
     const faction = byPole.slice(0, k);
     let founder: Agent | null = null;
     for (const m of faction) {
@@ -1190,11 +1290,26 @@ function split(sim: Simulation, parent: Tribe, founder: Agent, faction: Agent[],
   const hue = (parent.hue + (rng.chance(0.5) ? 1 : -1) * rng.range(25, 50) + 360) % 360;
   const others = faction.filter((m) => m !== founder);
   const nt = foundTribe(sim, founder, others, undefined, hue, parent.id);
-  // daughter takes a proportional share of the store; sister tribes start on good terms unless hungry
+  // the recount already ran this pass: move the faction's roles with it so roles keep adding up to members
+  for (const m of faction) {
+    if (parent.roles[m.role] > 0) parent.roles[m.role]--;
+    nt.roles[m.role] = (nt.roles[m.role] ?? 0) + 1;
+  }
+  // daughter takes a proportional share of the store; sister tribes part as friends (above allyFriendly,
+  // so the two halves do not start out as rival neighbours) unless the split was driven by hunger
   const share = n > 0 ? Math.max(0, parent.stockpile) * (faction.length / n) * 0.5 : 0;
   parent.stockpile = Math.max(0, parent.stockpile - share);
   nt.stockpile = share;
-  const rel = scarcity > 0.5 ? 0 : 0.25;
+  const rel = scarcity > 0.5 ? 0 : K.sisterRelation;
+  // the daughter inherits the parent's stance toward everyone else (its sisters included), a little faded
+  for (const key in parent.relations) {
+    const oid = Number(key);
+    const o = sim.getTribe(oid);
+    if (!o || o === nt || o.extinctTick !== -1) continue;
+    const v = clampAff(parent.relations[oid] * 0.8);
+    nt.relations[oid] = v;
+    o.relations[nt.id] = clampAff((o.relations[parent.id] ?? parent.relations[oid]) * 0.8);
+  }
   nt.relations[parent.id] = rel;
   parent.relations[nt.id] = rel;
   addHistory(sim, founder, `Led ${others.length} followers away from ${the(parent)} to found ${the(nt)}`);

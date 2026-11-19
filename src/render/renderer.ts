@@ -11,7 +11,7 @@ import type { Simulation } from '../sim/simulation';
 import type { Agent, EnvState } from '../sim/types';
 import { Camera } from './camera';
 import { TerrainLayer } from './terrainLayer';
-import { OverlayLayer } from './overlays';
+import { LEGEND_WIDTH, OverlayLayer } from './overlays';
 import { DisasterFx } from './effects';
 import { AgentPainter, agentRadius, miniBars } from './agents';
 import { Minimap } from './minimap';
@@ -141,6 +141,9 @@ export class Renderer {
     return this.minimap.rect;
   }
 
+  /** Overlay legend placement in CSS px from the last frame (visible=false when not drawn). */
+  readonly legendRect = { x: 0, y: 0, w: 0, h: 0, visible: false };
+
   /** Draw one frame. `time` is a monotonically increasing ms clock for animation only. */
   render(sim: Simulation, view: ViewOptions, time: number): void {
     const t0 = performance.now();
@@ -243,8 +246,16 @@ export class Renderer {
     this.fx.drawScreen(ctx, time, vw, vh, this.toSX, this.toSY);
 
     const ins = view.insets ?? NO_INSETS;
+    const lr = this.legendRect;
+    lr.visible = false;
     if (view.showLegend !== false && view.overlay !== 'none') {
-      this.overlays.drawLegend(ctx, sim, view.overlay, vw - ins.right - 12, vh - ins.bottom - 12);
+      const right = vw - ins.right - 12;
+      const bottom = vh - ins.bottom - 12;
+      lr.h = this.overlays.drawLegend(ctx, sim, view.overlay, right, bottom);
+      lr.w = LEGEND_WIDTH;
+      lr.x = right - lr.w;
+      lr.y = bottom - lr.h;
+      lr.visible = lr.h > 0;
     }
     if (view.showMinimap !== false && vw > 480 && vh > 320) {
       const mw = Math.round(Math.max(130, Math.min(220, vw * 0.15)));

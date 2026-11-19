@@ -7,6 +7,7 @@ import './analytics.css';
 import type { Simulation } from '../sim/simulation';
 import { DEATH_CAUSES, GENE_COUNT, GENES, HIST_BINS, type ActionKind, type DeathCause, type GeneName, type Role, type StatsSample } from '../sim/types';
 import { ROLES, currentSummary } from '../sim/stats';
+import { DAY_START } from '../sim/ecology';
 import { BarChart, Heatmap, LineChart, PALETTE, Sparkline, StackedAreaChart, esc, formatNum, formatPct } from './charts';
 
 export interface AnalyticsPanel {
@@ -66,6 +67,16 @@ export const GENE_DESCRIPTIONS: Record<GeneName, string> = {
   efficiency: 'Food gained per bite.',
   hue: 'Neutral marker gene — colour only; drifts at random and traces lineages.',
 };
+
+/**
+ * Calendar day (1-based) of a tick, numbered exactly like the top-bar clock: "Day 1" is the first
+ * day, and the clock starts DAY_START into it (same formula as ecology's clock), so the event log,
+ * inspector and stats never label a moment with a different day than the clock showed.
+ */
+export function dayOfTick(sim: Simulation, tick: number): number {
+  const dl = Math.max(1, Math.round(sim.config.dayLength || 600));
+  return Math.floor((Math.max(0, tick) + Math.round(DAY_START * dl)) / dl) + 1;
+}
 
 export function tribeColor(hue: number): string {
   return `hsl(${Math.round(((hue % 360) + 360) % 360)}, 62%, 56%)`;
@@ -328,9 +339,8 @@ export function createAnalyticsPanel(container: HTMLElement): AnalyticsPanel {
   function updateKpis(s: Simulation, samples: StatsSample[]): void {
     const sum = currentSummary(s);
     const last = samples[samples.length - 1];
-    const dayLen = Math.max(1, s.config.dayLength || 600);
     setText(tPop.value, formatNum(sum.population));
-    setText(tPop.sub, `peak ${formatNum(sum.peakPopulation)} · day ${Math.floor(sum.peakTick / dayLen)}`);
+    setText(tPop.sub, `peak ${formatNum(sum.peakPopulation)} · day ${dayOfTick(s, sum.peakTick)}`);
     setText(tBirths.value, rateFmt(sum.birthsPerDay));
     setText(tBirths.sub, `${formatNum(sum.totalBirths)} total`);
     setText(tDeaths.value, rateFmt(sum.deathsPerDay));

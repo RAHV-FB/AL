@@ -1,7 +1,8 @@
 // OWNER: Agent Intelligence agent.
 /**
  * Low-level locomotion for agents: terrain-aware stepping with obstacle
- * avoidance, arrival, and recovery when terrain is painted underneath an agent.
+ * avoidance, arrival, straight-line reachability checks (clearPath, used to pick
+ * walkable targets), and recovery when terrain is painted underneath an agent.
  * Allocation-free; called every tick from brain.act().
  */
 import type { Simulation } from './simulation';
@@ -91,6 +92,32 @@ export function stepDir(sim: Simulation, a: Agent, dx: number, dy: number, facto
   halt(a);
   a.heading = h + Math.PI * 0.5;
   return 0;
+}
+
+/** Impassable samples in a row (half a tile apart) that make clearPath() report a blocked line. */
+const BLOCKED_RUN = 3;
+
+/**
+ * True when the straight line (x0,y0)→(x1,y1) can be walked: it never crosses a stretch of impassable
+ * terrain thicker than about a tile (deep water, walls) and ends on passable ground. Thin obstacles are
+ * left to stepDir's wall-following, but a river or a painted wall between an agent and its goal would
+ * otherwise pin it against the bank (see brain.ts: targets are chosen with this check). Samples every half
+ * tile, so the cost is ≈ 2 × length / tileSize tile lookups; allocation-free.
+ */
+export function clearPath(sim: Simulation, x0: number, y0: number, x1: number, y1: number): boolean {
+  if (!sim.passableAt(x1, y1)) return false;
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const d = Math.sqrt(dx * dx + dy * dy);
+  if (!(d > 0)) return Number.isFinite(d);
+  const n = Math.ceil(d / (sim.state.world.tileSize * 0.5));
+  let run = 0;
+  for (let i = 1; i < n; i++) {
+    const t = i / n;
+    if (sim.passableAt(x0 + dx * t, y0 + dy * t)) run = 0;
+    else if (++run >= BLOCKED_RUN) return false;
+  }
+  return true;
 }
 
 /**

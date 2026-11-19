@@ -6,6 +6,7 @@
 import './analytics.css';
 import type { Simulation } from '../sim/simulation';
 import type { EventCategory, SimEvent } from '../sim/types';
+import { dayOfTick } from './analytics';
 
 export interface EventLogPanel {
   update(sim: Simulation): void;
@@ -102,14 +103,13 @@ export function createEventLog(container: HTMLElement, onJump: (x: number, y: nu
     for (const { count } of chipEls.values()) count.textContent = '0';
   }
 
-  function row(ev: SimEvent, dayLen: number): HTMLElement {
+  function row(ev: SimEvent, s: Simulation): HTMLElement {
     const c = CAT.get(ev.category) ?? { id: ev.category, label: ev.category, icon: '•' };
     const li = h('li', `ev-row ev-c-${ev.category} ev-s-${ev.severity}`);
     li.dataset.id = String(ev.id);
     const icon = h('span', 'ev-icon', c.icon);
     icon.title = c.label;
-    const day = Math.floor(ev.tick / dayLen);
-    const time = h('span', 'ev-time', `Day ${day}`);
+    const time = h('span', 'ev-time', `Day ${dayOfTick(s, ev.tick)}`);
     time.title = `Tick ${ev.tick}`;
     const msg = h('span', 'ev-msg', ev.message);
     li.append(icon, time, msg);
@@ -153,10 +153,9 @@ export function createEventLog(container: HTMLElement, onJump: (x: number, y: nu
     // collect new events (they are appended in id order)
     let i = events.length - 1;
     while (i > 0 && events[i - 1].id > lastId) i--;
-    const dayLen = Math.max(1, s.config.dayLength || 600);
     const start = Math.max(i, events.length - MAX_ROWS);
     const frag = document.createDocumentFragment();
-    for (let k = events.length - 1; k >= start; k--) frag.append(row(events[k], dayLen));
+    for (let k = events.length - 1; k >= start; k--) frag.append(row(events[k], s));
     for (let k = i; k < events.length; k++) {
       const cat = events[k].category;
       counts.set(cat, (counts.get(cat) ?? 0) + 1);

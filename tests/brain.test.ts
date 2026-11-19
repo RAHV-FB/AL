@@ -5,6 +5,7 @@ import { act, carryCapacity, think } from '../src/sim/brain';
 import { createAgent } from '../src/sim/lifecycle';
 import { randomGenes } from '../src/sim/genetics';
 import { foundTribe } from '../src/sim/social';
+import { tileCapacity } from '../src/sim/ecology';
 import { ACTIONS, TERRAIN, type Agent, type GenomeTemplate, type ScenarioDef } from '../src/sim/types';
 
 // ------------------------------------------------------------------ helpers
@@ -167,7 +168,10 @@ describe('brain: decisions', () => {
 
   it('two compatible fertile adults court each other and have a child', () => {
     const sim = makeSim(7);
-    sim.state.world.food.fill(0);
+    // a well-stocked home range (genetics.canMate requires food around the couple); both are sated, so
+    // they do not stop to eat
+    const w = sim.state.world;
+    for (let i = 0; i < w.food.length; i++) w.food[i] = tileCapacity(sim, i);
     const a = spawn(sim, 150, 120, { fertility: 0.9 });
     const b = spawn(sim, 175, 120, { fertility: 0.9 });
     for (const x of [a, b]) {

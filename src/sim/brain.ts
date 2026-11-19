@@ -2,29 +2,57 @@
 /**
  * Agent mind — a utility-based autonomous controller.
  *
- * think(sim, a)  (every ~6–14 ticks per agent, staggered; shorter when threatened)
+ * think(sim, a)  (every ~6–14 ticks per agent, staggered; 3–5 when threatened or fighting)
  *   1. needs: hunger, fatigue, health, infection; environment: night, winter/cold.
- *   2. perception (radius = perception × (0.55 + 0.45·daylight)): neighbours are
- *      classified into threats, fight-back / prey / enemy targets, potential mates,
- *      needy friends & own children, friends to socialise with, tribe cohesion.
- *   3. food: tile underfoot, a cheap local scan, ecology.findFood, and remembered
- *      rich spots (memory.food); danger memory and active disasters are avoided.
- *   4. a utility for every ActionKind (traits × config biases × skills × role ×
- *      tribe logistics), small rng noise + hysteresis, argmax → action, target,
- *      readable thought, a.utilities, a.decisionCooldown, smoothed a.fear.
+ *   2. perception (radius = perception × (0.55 + 0.45·daylight)): neighbours are classified into
+ *      threats (attackers, enemies, and — for timid agents — aggressive, stronger strangers),
+ *      fight-back / defend targets, conflict candidates, potential mates, needy friends & own
+ *      children, friends to socialise with, tribe cohesion. The adult strength of every band (tribe)
+ *      in view and of my allies close by is tallied to judge the odds of a fight.
+ *   3. food: tile underfoot, a cheap local scan (which also measures local food per head =
+ *      scarcity), ecology.findFood and remembered rich spots (memory.food); danger memory and active
+ *      disasters are avoided; only targets that can be walked to in a straight line are chosen
+ *      (steering.clearPath), so agents do not pin themselves against a river bank.
+ *   4. conflict appraisal — nothing scripted: for each out-group agent in view a motive (rob its load
+ *      or drive it off a patch I need when food is scarce; chase it off my tribe's land near camp;
+ *      tribal war or a personal feud; join a friend's fight) is weighed by the odds (combat power incl.
+ *      the band backing it vs. my allies) against my boldness (aggression gene × aggressionBias, combat
+ *      skill, health), then by temperament. Tribes at war send bold members to raid the enemy camp.
+ *   5. a utility for every ActionKind (traits × config biases × skills × role × tribe logistics),
+ *      small rng noise + hysteresis, argmax → action (choices whose target cannot be walked to are
+ *      dropped), target, readable thought, a.utilities, a.decisionCooldown, smoothed a.fear.
  * act(sim, a)    (every tick, allocation-free; targets re-resolved by id)
  *   steering with obstacle avoidance (steering.ts) and the action's effect:
  *   eat/gather, flee, attack, share, mate, socialise, camp deposit/withdraw,
- *   explore, wander (juveniles stay near their mother), rest/idle.
+ *   explore / raid (plunder on arrival), wander (juveniles stay near their mother), rest/idle.
  */
 import type { Simulation } from './simulation';
 import { ACTIONS, NONE, type ActionKind, type Agent, type TerrainType, type Tribe } from './types';
 import { LIMITS, TERRAIN_INFO } from './constants';
 import { consumeFood, findFood, foodAt, tileCapacity } from './ecology';
-import { adjustRelationship, attack, depositFood, isFriendly, isHostile, shareFood, withdrawFood } from './social';
-import { canMate, reproduce } from './genetics';
+import {
+  SOCIAL_TUNING,
+  adjustRelationship,
+  attack,
+  carryCapacity,
+  combatPower,
+  depositFood,
+  isFriendly,
+  isHostile,
+  raidStockpile,
+  shareFood,
+  stockpileCapacity,
+  withdrawFood,
+} from './social';
+import { canMate, geneticDistance, reproduce } from './genetics';
 import { growthFactor, isAdult } from './lifecycle';
-import { escapeImpassable, halt, moveToward, stepDir } from './steering';
+import { clearPath, escapeImpassable, halt, moveToward, stepDir } from './steering';
+
+/**
+ * Re-exported for callers that think of them as properties of the agent. The brain judges fights with
+ * the same combatPower that social.attack uses to resolve them, so agents read the odds correctly.
+ */
+export { carryCapacity, combatPower };
 
 // ------------------------------------------------------------------ tuning
 const MAX_NEIGHBOURS = 48;
@@ -39,8 +67,27 @@ const SHARE_RANGE = 8;
 const MATE_RANGE = 8;
 const SOCIAL_RANGE = 10;
 const CAMP_RANGE = 20;
-const CARRY_PER_SIZE = 25;
 const MAX_MATE_CHECKS = 8;
+/** Food candidates kept per think (best first) so an unreachable best can fall back to the next one. */
+const FOOD_CANDS = 4;
+/** Out-group agents appraised as conflict targets per think (the nearest are kept). */
+const MAX_CANDS = 12;
+/** Bands (tribes) whose adult strength in view is tallied per think. */
+const TALLY_MAX = 16;
+/** Allies within this distance count as backing in a fight. */
+const FIGHT_R = 40;
+/** Crowding radius for local food per head (≈ the local food scan). */
+const LOCAL_R = 44;
+/** Local food per head (scan sum / agents nearby) below which food counts as scarce (0 → scarcity 1). */
+const SCARCE_PER_HEAD = 40;
+/** Outsiders closer than this to my tribe's camp, standing on my tribe's land, can be challenged. */
+const TERRITORY_R = 160;
+/** Enemy camps farther than this are not worth raiding. */
+const RAID_RANGE = 900;
+/** Genetic distance (0..1) below which another agent looks like "one of us" (hostility toward it fades). */
+const ALIKE_DIST = 0.3;
+/** Distance a fleeing agent aims for (its escape point must be open ground). */
+const FLEE_DIST = 80;
 
 const N_ACTIONS = ACTIONS.length;
 const I_IDLE = ACTIONS.indexOf('idle');
@@ -59,25 +106,59 @@ const I_DEPOSIT = ACTIONS.indexOf('deposit');
 const I_WITHDRAW = ACTIONS.indexOf('withdraw');
 
 const COMPASS = ['east', 'south-east', 'south', 'south-west', 'west', 'north-west', 'north', 'north-east'];
+/** Escape-heading rotations tried by a fleeing agent: 0, ±30°, ±60°, ±90°. */
+const FLEE_COS = new Float64Array(7);
+const FLEE_SIN = new Float64Array(7);
+for (let k = 0; k < 7; k++) {
+  const ang = (k === 0 ? 0 : (k & 1 ? 1 : -1) * Math.ceil(k / 2)) * (Math.PI / 6);
+  FLEE_COS[k] = Math.cos(ang);
+  FLEE_SIN[k] = Math.sin(ang);
+}
 
 // ------------------------------------------------------------------ scratch (module-level, reused)
 const near: Agent[] = [];
+/** combatPower of near[i] when the pre-pass needed it (out-group adults), else NaN (computed on demand). */
+const nearPow = new Float64Array(MAX_NEIGHBOURS * 2);
 const aggressors: Agent[] = [];
 const kids: Agent[] = [];
 const U = new Float64Array(N_ACTIONS);
+// conflict candidates (out-group agents I might pick a fight with), appraised after perception
+const cands: Agent[] = [];
+const candProx = new Float64Array(MAX_CANDS);
+const candAff = new Float64Array(MAX_CANDS);
+const candPow = new Float64Array(MAX_CANDS);
+/** Ids of agents my friends are currently attacking (I may join in). */
+const engaged = new Int32Array(8);
+let engagedN = 0;
+/** Adult combat power per tribe in view. */
+const tallyId = new Int32Array(TALLY_MAX);
+const tallyPow = new Float64Array(TALLY_MAX);
+let tallyLen = 0;
 
 /** Per-think perception results (reset at the start of every think). */
 const P = {
   r: 1,
   myPow: 1,
   aggEff: 0,
+  aggBias: 1,
+  /** 0 (bold) .. 1 (timid): how strongly I avoid aggressive, stronger strangers. */
+  timid: 0,
+  skCombat: 0,
+  hunger: 0,
   hp: 1,
   adult: true,
   matingReady: false,
   mateChecks: 0,
   surplus: 0,
   sawAttacker: false,
+  /** My last attacker was among the neighbours (whether or not I still hold a grudge). */
+  sawLast: false,
   attacked: false,
+  /** Combat power and number of friendly adults within FIGHT_R. */
+  allyPow: 0,
+  allyN: 0,
+  /** Agents within LOCAL_R (crowding for scarcity). */
+  localN: 0,
   threat: null as Agent | null,
   threatW: 0,
   threatLevel: 0,
@@ -85,9 +166,6 @@ const P = {
   escY: 0,
   avenge: null as Agent | null,
   avengeScore: 0,
-  prey: null as Agent | null,
-  preyScore: 0,
-  preyHostile: false,
   mate: null as Agent | null,
   mateScore: 0,
   needy: null as Agent | null,
@@ -107,7 +185,14 @@ const P = {
 function resetPercept(): void {
   P.mateChecks = 0;
   P.sawAttacker = false;
+  P.sawLast = false;
   P.attacked = false;
+  P.allyPow = 0;
+  P.allyN = 0;
+  P.localN = 0;
+  cands.length = 0;
+  engagedN = 0;
+  tallyLen = 0;
   P.threat = null;
   P.threatW = 0;
   P.threatLevel = 0;
@@ -115,9 +200,6 @@ function resetPercept(): void {
   P.escY = 0;
   P.avenge = null;
   P.avengeScore = 0;
-  P.prey = null;
-  P.preyScore = 0;
-  P.preyHostile = false;
   P.mate = null;
   P.mateScore = 0;
   P.needy = null;
@@ -136,7 +218,17 @@ function resetPercept(): void {
   kids.length = 0;
 }
 
-// best food candidate (think only)
+// food candidates, best first (think only); the chosen one is copied to fX/fY/...
+const fcX = new Float64Array(FOOD_CANDS);
+const fcY = new Float64Array(FOOD_CANDS);
+const fcFood = new Float64Array(FOOD_CANDS);
+const fcScore = new Float64Array(FOOD_CANDS);
+const fcDist = new Float64Array(FOOD_CANDS);
+const fcMem = new Uint8Array(FOOD_CANDS);
+let fcLen = 0;
+/** Total food on the passable tiles of the local scan (scarcity). */
+let localFood = 0;
+// chosen food target (think only; also written by adjacentFood for act)
 let fX = NaN;
 let fY = NaN;
 let fFood = 0;
@@ -184,17 +276,9 @@ function liveTribe(sim: Simulation, a: Agent): Tribe | undefined {
   return t && t.extinctTick === -1 && Number.isFinite(t.homeX) && Number.isFinite(t.homeY) ? t : undefined;
 }
 
-/** How much food an agent can carry for its tribe. */
-export function carryCapacity(a: Agent): number {
-  return CARRY_PER_SIZE * a.traits.size;
-}
-
-/** Effective fighting power (strength × growth × condition × combat skill). */
-export function combatPower(b: Agent): number {
-  const t = b.traits;
-  const hpF = clamp01(b.health / (t.maxHealth > 0 ? t.maxHealth : 1));
-  const p = t.strength * growthFactor(b) * (0.3 + 0.7 * hpF) * (0.75 + 0.5 * clamp01(b.skills.combat));
-  return p > 0.01 && Number.isFinite(p) ? p : 0.01;
+/** "the Varn-kin", but scenario names such as "The Wolf Pack" are used as they are. */
+function theName(t: Tribe): string {
+  return /^the\s/i.test(t.name) ? t.name : `the ${t.name}`;
 }
 
 function hungerOf(b: Agent): number {
@@ -348,25 +432,74 @@ function dangerAt(a: Agent, x: number, y: number, tick: number): number {
 }
 
 // ------------------------------------------------------------------ food choice
+/** Offer a food target; the FOOD_CANDS best (food / distance, minus remembered danger) are kept, best first. */
 function considerFood(a: Agent, x: number, y: number, food: number, bonus: number, fromMemory: boolean, tick: number): void {
   if (!(food >= 0.75) || !Number.isFinite(x) || !Number.isFinite(y)) return;
   const dx = x - a.x;
   const dy = y - a.y;
   const d = Math.sqrt(dx * dx + dy * dy);
   let sc = (food * bonus) / (1 + d / 60);
-  if (!(sc > fScore)) return; // danger can only lower the score
+  const worst = fcLen < FOOD_CANDS ? 0 : fcScore[FOOD_CANDS - 1];
+  if (!(sc > worst)) return; // danger can only lower the score
   if (a.memory.danger.length) sc *= 1 - 0.8 * dangerAt(a, x, y, tick);
-  if (sc > fScore) {
-    fScore = sc;
-    fX = x;
-    fY = y;
-    fFood = food;
-    fDist = d;
-    fFromMemory = fromMemory;
+  if (!(sc > worst)) return;
+  // the same tile can be offered twice (continuity target, scan, findFood, memory): keep the better offer
+  for (let i = 0; i < fcLen; i++) {
+    if (Math.abs(fcX[i] - x) < 0.5 && Math.abs(fcY[i] - y) < 0.5) {
+      if (!(sc > fcScore[i])) return;
+      for (let j = i; j < fcLen - 1; j++) moveFoodCand(j + 1, j);
+      fcLen--;
+      break;
+    }
   }
+  let i = fcLen < FOOD_CANDS ? fcLen++ : FOOD_CANDS - 1;
+  while (i > 0 && fcScore[i - 1] < sc) {
+    moveFoodCand(i - 1, i);
+    i--;
+  }
+  fcX[i] = x;
+  fcY[i] = y;
+  fcFood[i] = food;
+  fcScore[i] = sc;
+  fcDist[i] = d;
+  fcMem[i] = fromMemory ? 1 : 0;
 }
 
-/** Cheap scan of the tiles around the agent (excluding the one underfoot). */
+function moveFoodCand(from: number, to: number): void {
+  fcX[to] = fcX[from];
+  fcY[to] = fcY[from];
+  fcFood[to] = fcFood[from];
+  fcScore[to] = fcScore[from];
+  fcDist[to] = fcDist[from];
+  fcMem[to] = fcMem[from];
+}
+
+/**
+ * Choose the best food candidate that can be walked to in a straight line (fX/fY/fFood/fScore/fDist/
+ * fFromMemory). Food seen across a river or behind a wall is skipped instead of pinning the agent
+ * against the obstacle. Returns false (fScore 0) when no candidate is reachable.
+ */
+function chooseFood(sim: Simulation, a: Agent): boolean {
+  for (let i = 0; i < fcLen; i++) {
+    if (fcDist[i] > 12 && !clearPath(sim, a.x, a.y, fcX[i], fcY[i])) continue;
+    fX = fcX[i];
+    fY = fcY[i];
+    fFood = fcFood[i];
+    fScore = fcScore[i];
+    fDist = fcDist[i];
+    fFromMemory = fcMem[i] === 1;
+    return true;
+  }
+  fX = NaN;
+  fY = NaN;
+  fFood = 0;
+  fScore = 0;
+  fDist = 0;
+  fFromMemory = false;
+  return false;
+}
+
+/** Cheap scan of the tiles around the agent: offers food targets (not the tile underfoot) and sums localFood. */
 function scanLocalFood(sim: Simulation, a: Agent, tick: number): void {
   const w = sim.state.world;
   const ts = w.tileSize;
@@ -377,14 +510,15 @@ function scanLocalFood(sim: Simulation, a: Agent, tick: number): void {
     const ty = ty0 + oy;
     if (ty < 0 || ty >= w.height) continue;
     for (let ox = -R; ox <= R; ox++) {
-      if (ox === 0 && oy === 0) continue;
       const tx = tx0 + ox;
       if (tx < 0 || tx >= w.width) continue;
       const idx = ty * w.width + tx;
       const f = w.food[idx];
-      if (!(f >= 0.75)) continue;
+      if (!(f > 0)) continue;
       if (!TERRAIN_INFO[w.terrain[idx] as TerrainType].passable) continue;
-      considerFood(a, (tx + 0.5) * ts, (ty + 0.5) * ts, f, 1, false, tick);
+      localFood += f;
+      if (ox === 0 && oy === 0) continue;
+      if (f >= 0.75) considerFood(a, (tx + 0.5) * ts, (ty + 0.5) * ts, f, 1, false, tick);
     }
   }
 }
@@ -417,7 +551,22 @@ function adjacentFood(sim: Simulation, a: Agent): boolean {
 }
 
 // ------------------------------------------------------------------ perception
-function perceive(sim: Simulation, a: Agent, b: Agent): void {
+/** Keep b as a conflict candidate (the MAX_CANDS nearest are kept). */
+function addCandidate(b: Agent, prox: number, aff: number, powB: number): void {
+  let k = cands.length;
+  if (k >= MAX_CANDS) {
+    let far = 0;
+    for (let i = 1; i < MAX_CANDS; i++) if (candProx[i] < candProx[far]) far = i;
+    if (!(prox > candProx[far])) return;
+    k = far;
+    cands[k] = b;
+  } else cands.push(b);
+  candProx[k] = prox;
+  candAff[k] = aff;
+  candPow[k] = powB;
+}
+
+function perceive(sim: Simulation, a: Agent, b: Agent, pw: number): void {
   if (!b.alive || b === a) return;
   const dx = b.x - a.x;
   const dy = b.y - a.y;
@@ -427,58 +576,59 @@ function perceive(sim: Simulation, a: Agent, b: Agent): void {
   const kin = relKin;
   const aff = relAff;
   const attackingMe = b.action === 'attack' && b.targetId === a.id;
-  const grudge = b.id === a.lastAttackerId;
+  // My last attacker stays an enemy while it keeps attacking me or while the wound still rankles
+  // (personal affinity, which decays). lastAttackerId itself is never cleared, so on its own it would
+  // turn a long-reconciled tribe-mate into a permanent target.
+  if (b.id === a.lastAttackerId) P.sawLast = true;
+  const grudge = b.id === a.lastAttackerId && (attackingMe || aff < -0.1);
   if (grudge) P.sawAttacker = true;
   const friendly = !attackingMe && (kin > 0 || aff > 0.3 || isFriendly(sim, a, b));
   const bAdult = isAdult(b);
 
   if (!friendly || grudge) {
-    const ratio = combatPower(b) / P.myPow;
+    const powB = pw > 0 ? pw : combatPower(b);
+    const ratio = powB / P.myPow;
     const hostile = attackingMe || grudge || isHostile(sim, a, b);
     if ((hostile || (b.action === 'attack' && b.targetId !== NONE)) && aggressors.length < 8) aggressors.push(b);
     // ratio below which I stand my ground when attacked
-    const brave = 0.8 + 0.6 * Math.min(1.5, P.aggEff) + 0.3 * clamp01(a.skills.combat) - 0.7 * (1 - P.hp);
-    if ((attackingMe || grudge) && P.adult && ratio < brave) {
+    const brave = 0.8 + 0.6 * Math.min(1.5, P.aggEff) + 0.3 * P.skCombat - 0.7 * (1 - P.hp);
+    // fight back against whoever is attacking me — or a fresh enemy (deep grudge) close by
+    if ((attackingMe || (grudge && aff < SOCIAL_TUNING.grudge && prox > 0.5)) && P.adult && ratio < brave) {
       const sc = (attackingMe ? 1.5 : 0.8) * (0.5 + 0.5 * prox) * (brave - ratio + 0.2);
       if (sc > P.avengeScore) {
         P.avengeScore = sc;
         P.avenge = b;
       }
       if (attackingMe) P.attacked = true;
-    } else if (
-      attackingMe ||
-      (grudge && prox > 0.25) ||
-      (hostile && ratio > 1.1) ||
-      (!P.adult && hostile) ||
-      (b.action === 'attack' && ratio > 1.6 && b.traits.aggression > 0.6 && prox > 0.5)
-    ) {
-      const w = clamp(ratio, 0.3, 3) * (0.25 + 0.75 * prox) * (attackingMe ? 1.6 : hostile ? 1 : 0.5);
-      P.threatLevel += w;
-      if (d > 1e-6) {
-        P.escX -= (dx / d) * w;
-        P.escY -= (dy / d) * w;
+    } else {
+      let w = 0;
+      const bAgg = clamp(b.traits.aggression * P.aggBias, 0, 2);
+      if (attackingMe || (!P.adult && hostile && prox > 0.3)) {
+        w = clamp(ratio, 0.3, 3) * (0.25 + 0.75 * prox) * (attackingMe ? 1.6 : 1);
+      } else if (hostile && ratio > Math.max(1.1, brave - 0.2) && prox > 0.45) {
+        // a clearly stronger enemy (war, feud, old attacker) close by: keep away — more so the fiercer it
+        // is; bold agents only give way to enemies well above their own strength
+        w = clamp(ratio, 0.3, 3) * prox * (0.4 + 0.6 * Math.min(1, bAgg)) * (b.action === 'attack' ? 1.3 : 1);
+      } else if (P.timid > 0 && prox > 0.5 && kin === 0) {
+        // timid agents give aggressive, stronger strangers a wide berth (wider while they are fighting)
+        const menace = bAgg * ratio * (b.action === 'attack' ? 1.5 : 1);
+        if (menace > 0.7 + 0.8 * (1 - P.timid)) w = clamp(ratio, 0.3, 3) * prox * 0.4 * P.timid;
       }
-      if (w > P.threatW) {
-        P.threatW = w;
-        P.threat = b;
-      }
-      if (attackingMe) P.attacked = true;
-    }
-    // prey / enemy to attack (initiated by me)
-    if (!friendly && P.adult && !attackingMe && kin === 0) {
-      let sc = 0;
-      if (ratio < 0.87) {
-        const loot = b.carried > 1 || b.food > b.traits.maxFood * 0.4 ? 1 : 0.6;
-        sc = (1 - ratio) * loot * (bAdult ? 1 : 0.4);
-      }
-      if (hostile && ratio < 1.15) sc += 0.35 * (1.35 - ratio);
-      sc *= 0.5 + 0.5 * prox;
-      if (sc > P.preyScore) {
-        P.preyScore = sc;
-        P.prey = b;
-        P.preyHostile = hostile;
+      if (w > 0) {
+        P.threatLevel += w;
+        if (d > 1e-6) {
+          P.escX -= (dx / d) * w;
+          P.escY -= (dy / d) * w;
+        }
+        if (w > P.threatW) {
+          P.threatW = w;
+          P.threat = b;
+        }
+        if (attackingMe) P.attacked = true;
       }
     }
+    // a fight I might start: appraised once perception (allies, bands, scarcity) is complete
+    if (!friendly && P.adult && !attackingMe && kin === 0) addCandidate(b, prox, aff, powB);
   }
 
   if (friendly) {
@@ -486,13 +636,20 @@ function perceive(sim: Simulation, a: Agent, b: Agent): void {
     P.cohY += b.y;
     P.cohN++;
     if (d < 40) P.friendsNear++;
+    if (bAdult && d < FIGHT_R && b.action !== 'flee') {
+      P.allyPow += pw > 0 ? pw : combatPower(b);
+      P.allyN++;
+    }
+    if (b.action === 'attack' && b.targetId !== NONE && b.targetId !== a.id && engagedN < engaged.length) engaged[engagedN++] = b.targetId;
     const myChild = kin === 1 && (b.parents[0] === a.id || b.parents[1] === a.id);
     if (myChild && !bAdult && kids.length < 4) kids.push(b);
-    // needy friend / kin / own child (I share when I have surplus)
+    // needy friend / kin / own child (I share when I have surplus — and am not hungry myself, otherwise
+    // two hungry carriers would just swap their loads back and forth)
     if (P.surplus >= 4) {
       const bh = hungerOf(b);
       const juvenileChild = myChild && !bAdult;
-      if (juvenileChild ? bh > 0.35 : kin > 0 ? bh > 0.55 : bh > 0.65 && P.surplus >= 8) {
+      const canGive = P.hunger <= (juvenileChild ? 0.6 : 0.45) && bh > P.hunger + 0.15;
+      if (canGive && (juvenileChild ? bh > 0.35 : kin > 0 ? bh > 0.55 : bh > 0.65 && P.surplus >= 8)) {
         const kinF = juvenileChild ? 2.2 : kin > 0 ? 1.5 : 1;
         const sc = bh * kinF * (0.6 + 0.4 * prox);
         if (sc > P.needyScore) {
@@ -560,6 +717,7 @@ function pickExploreTarget(sim: Simulation, a: Agent, tribe: Tribe | undefined, 
       sc += (1 - soc) * Math.min(1, dh / 500) * 0.5 - (soc * Math.max(0, dh - 350)) / 400;
     }
     sc -= dangerAt(a, tx, ty, tick) * 2;
+    if (sc > best && !clearPath(sim, a.x, a.y, tx, ty)) sc -= 1.5; // across water / walls: only as a last resort
     if (sc > best) {
       best = sc;
       exX = tx;
@@ -567,6 +725,36 @@ function pickExploreTarget(sim: Simulation, a: Agent, tribe: Tribe | undefined, 
     }
   }
   return best > -Infinity;
+}
+
+/**
+ * Whether the target of action k (as chosen by this think) can be walked to in a straight line.
+ * Food targets are already filtered by chooseFood; flee picks open ground itself; the rest move in place.
+ */
+function targetReachable(sim: Simulation, a: Agent, k: number, tribe: Tribe | undefined, attackTarget: Agent | null, raid: Tribe | null): boolean {
+  let x = NaN;
+  let y = NaN;
+  let other: Agent | null = null;
+  if (k === I_ATTACK) other = attackTarget;
+  else if (k === I_SHARE) other = P.needy;
+  else if (k === I_MATE) other = P.mate;
+  else if (k === I_SOCIAL) other = P.friend;
+  else if ((k === I_HOME || k === I_DEPOSIT || k === I_WITHDRAW) && tribe) {
+    x = tribe.homeX;
+    y = tribe.homeY;
+  } else if (k === I_EXPLORE && raid) {
+    x = raid.homeX;
+    y = raid.homeY;
+  } else return true;
+  if (other) {
+    x = other.x;
+    y = other.y;
+  }
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return true;
+  const dx = x - a.x;
+  const dy = y - a.y;
+  if (dx * dx + dy * dy < 16 * 16) return true;
+  return clearPath(sim, a.x, a.y, x, y);
 }
 
 // ------------------------------------------------------------------ think
@@ -592,7 +780,8 @@ export function think(sim: Simulation, a: Agent): void {
   const cold = clamp01((8 - env.temperature) / 18);
   const chill = Math.max(winter, cold);
   const adult = isAdult(a);
-  const aggEff = clamp(tr.aggression * cfg.aggressionBias, 0, 2);
+  const aggBias = Number.isFinite(cfg.aggressionBias) ? clamp(cfg.aggressionBias, 0, 3) : 1;
+  const aggEff = clamp(tr.aggression * aggBias, 0, 2);
   const altEff = clamp(tr.altruism * cfg.cooperationBias, 0, 2);
   const fertEff = clamp(tr.fertility * cfg.reproductionRate, 0, 2);
   const soc = clamp01(tr.sociability);
@@ -611,6 +800,10 @@ export function think(sim: Simulation, a: Agent): void {
   resetPercept();
   P.myPow = combatPower(a);
   P.aggEff = aggEff;
+  P.aggBias = aggBias;
+  P.timid = clamp01(1 - 1.4 * aggEff);
+  P.skCombat = skCombat;
+  P.hunger = hunger;
   P.hp = hp;
   P.adult = adult;
   P.surplus = a.carried + Math.max(0, a.food - maxFood * 0.55);
@@ -624,13 +817,33 @@ export function think(sim: Simulation, a: Agent): void {
     if (n > MAX_NEIGHBOURS * 2) n = MAX_NEIGHBOURS * 2;
   }
   P.r = r;
-  for (let i = 0; i < n; i++) perceive(sim, a, near[i]);
-  if (!P.sawAttacker && a.lastAttackerId !== NONE) {
+  // pre-pass: local crowding, and the adult strength of every other band (tribe) in view
+  for (let i = 0; i < n; i++) {
+    const b = near[i];
+    nearPow[i] = NaN;
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    if (dx * dx + dy * dy < LOCAL_R * LOCAL_R) P.localN++;
+    if (b.tribeId === NONE || b.tribeId === a.tribeId || b.action === 'flee' || !isAdult(b)) continue;
+    const pw = combatPower(b);
+    nearPow[i] = pw;
+    let k = 0;
+    while (k < tallyLen && tallyId[k] !== b.tribeId) k++;
+    if (k === tallyLen) {
+      if (tallyLen >= TALLY_MAX) continue;
+      tallyId[k] = b.tribeId;
+      tallyPow[k] = 0;
+      tallyLen++;
+    }
+    tallyPow[k] += pw;
+  }
+  for (let i = 0; i < n; i++) perceive(sim, a, near[i], nearPow[i]);
+  if (!P.sawLast && a.lastAttackerId !== NONE) {
     const atk = sim.getAgent(a.lastAttackerId);
     if (atk) {
       const dx = atk.x - a.x;
       const dy = atk.y - a.y;
-      if (dx * dx + dy * dy <= percR * percR) perceive(sim, a, atk);
+      if (dx * dx + dy * dy <= percR * percR) perceive(sim, a, atk, combatPower(atk));
     }
   }
 
@@ -718,18 +931,16 @@ export function think(sim: Simulation, a: Agent): void {
   const hereFood = foodAt(sim, a.x, a.y);
   const hereIdx = sim.tileIndex(a.x, a.y);
   const stockLow = tribe ? tribe.stockpile < Math.max(30, tribe.members * 5) : false;
+  // free room in the camp store: nobody gathers for (or tries to deposit into) a full stockpile
+  const storeRoom = tribe ? stockpileCapacity(tribe) - Math.max(0, tribe.stockpile) : 0;
   const gatherDrive =
-    tribe && adult && hunger < 0.3 && a.carried < cap * 0.9
+    tribe && adult && hunger < 0.3 && a.carried < cap * 0.9 && storeRoom > cap * 0.5
       ? (0.06 + 0.16 * skForage + 0.12 * Math.min(1, altEff) * (stockLow ? 1 : 0.35) + 0.06 * soc + (role === 'forager' ? 0.1 : 0)) *
         (1 - 0.6 * night)
       : 0;
   const wantFood = hunger > 0.12 || gatherDrive > 0;
-  fX = NaN;
-  fY = NaN;
-  fFood = 0;
-  fScore = 0;
-  fDist = 0;
-  fFromMemory = false;
+  fcLen = 0;
+  localFood = 0;
   // continuity: keep heading to the current forage target while it still has food
   if (a.action === 'forage' && Number.isFinite(a.targetX) && Number.isFinite(a.targetY) && sim.tileIndex(a.targetX, a.targetY) !== hereIdx) {
     considerFood(a, a.targetX, a.targetY, foodAt(sim, a.targetX, a.targetY), 1.3, false, tick);
@@ -765,7 +976,9 @@ export function think(sim: Simulation, a: Agent): void {
     }
     mem.length = w;
   }
-  const haveFoodTarget = fScore > 0;
+  const haveFoodTarget = chooseFood(sim, a);
+  // scarcity: food within the local scan per head of everyone around (0 plenty .. 1 nothing to go round)
+  const scarcity = clamp01(1 - localFood / (1 + P.localN) / SCARCE_PER_HEAD);
 
   // ---- tribe camp
   let campDist = 0;
@@ -792,6 +1005,95 @@ export function think(sim: Simulation, a: Agent): void {
   const foodDrive = hungerDrive * (1 + 0.25 * skForage) * (0.75 + 0.25 * clamp(tr.efficiency, 0.3, 1.5));
   U.fill(0);
 
+  // ---- conflict appraisal: which out-group agent (if any) is worth a fight, and why
+  let rival: Agent | null = null;
+  let rivalScore = 0;
+  let rivalWhy = 0; // 3 war / feud, 4 rob / hunt, 5 territory, 6 contest a patch, 7 join a friend's fight
+  if (adult && cands.length) {
+    // the odds I accept: bold, skilled, healthy agents take on more — and the starving grow desperate
+    const boldness =
+      0.7 + 0.45 * Math.min(1.5, aggEff) + 0.25 * skCombat + (role === 'warrior' ? 0.1 : 0) - 0.6 * (1 - hp) + 0.5 * Math.max(0, hunger - 0.6);
+    // odds below which I expect to win outright (and so also take stomach food, not just a carried load)
+    const decisive = 0.55 + 0.35 * hunger;
+    // allies close by may join in (they do not strike automatically, so they count partly)
+    const myBack = P.myPow + 0.3 * Math.min(P.allyPow, 3 * P.myPow);
+    const room = Math.max(0, cap - a.carried) + Math.max(0, maxFood - a.food);
+    const land = s.world.territory;
+    const myTid = tribe ? tribe.id : NONE;
+    const tribeNeed = Math.max(scarcity, stockLow ? 0.5 : 0);
+    for (let k = 0; k < cands.length; k++) {
+      const b = cands[k];
+      if (!b.alive) continue;
+      const powB = candPow[k];
+      const bAdult = isAdult(b);
+      // the defender's tribe-mates in view back it up (social.attack: nearby mates strike the attacker)
+      let band = 0;
+      if (b.tribeId !== NONE) {
+        for (let j = 0; j < tallyLen; j++) {
+          if (tallyId[j] === b.tribeId) {
+            band = tallyPow[j];
+            break;
+          }
+        }
+      }
+      const backers = Math.max(0, band - (bAdult && b.action !== 'flee' ? powB : 0));
+      const odds = (powB + 0.3 * Math.min(backers, 3 * powB)) / myBack;
+      const fav = clamp01((boldness - odds) * 2 + 0.5);
+      if (!(fav > 0)) continue;
+      const rel = tribe && b.tribeId !== NONE && b.tribeId !== myTid ? (tribe.relations[b.tribeId] ?? 0) : 0;
+      // how readily I prey on b's people: friendly tribes much less, enemies more — and those who look
+      // like my own kind (similar genomes: kindred bands, the same species) less than strangers
+      const relF = clamp(1 - 1.2 * rel, 0.2, 1.6);
+      const kinF = 1 - 0.6 * clamp01(1 - geneticDistance(a.genes, b.genes) / ALIKE_DIST);
+      // 1. food: rob its load (a decisive win also yields stomach food), or drive it off a patch I need
+      let food = 0;
+      let foodWhy = 4;
+      if (hunger > 0.2) {
+        const stealable = Math.max(0, b.carried) + (odds < decisive ? 0.45 * b.food : 0);
+        const lootQ = clamp01(Math.min(stealable, room) / 15) * (bAdult ? 1 : 0.5);
+        let patchQ = 0;
+        if (scarcity > 0.05 && (b.action === 'eat' || b.action === 'forage')) patchQ = clamp01(foodAt(sim, b.x, b.y) / 6) * scarcity;
+        food = foodDrive * Math.max(lootQ, patchQ) * relF;
+        if (patchQ > lootQ) foodWhy = 6;
+      }
+      // 2. territory: an outsider using my tribe's land near our camp
+      let turf = 0;
+      if (tribe && b.tribeId !== myTid && rel < SOCIAL_TUNING.allyFriendly) {
+        const cx = b.x - tribe.homeX;
+        const cy = b.y - tribe.homeY;
+        const dc = Math.sqrt(cx * cx + cy * cy);
+        if (dc < TERRITORY_R) {
+          const ti = sim.tileIndex(b.x, b.y);
+          if (ti >= 0 && land[ti] === myTid) {
+            const use = b.action === 'eat' || b.action === 'forage' || b.carried > 2 ? 1 : 0.35;
+            turf = 0.45 * (1 - dc / TERRITORY_R) * use * (0.6 * (1 - Math.max(0, rel)) + 0.8 * Math.max(0, -rel) + 0.6 * tribeNeed);
+          }
+        }
+      }
+      // 3. tribal war or a personal feud
+      let feud = rel < SOCIAL_TUNING.warHostile ? 0.35 * clamp01((-rel - 0.25) / 0.5) : 0;
+      if (candAff[k] < SOCIAL_TUNING.grudge) feud = Math.max(feud, 0.35 * clamp01((-candAff[k] - 0.3) / 0.5));
+      // 4. pile in when a friend is already fighting it
+      let assist = 0;
+      for (let j = 0; j < engagedN; j++) {
+        if (engaged[j] === b.id) {
+          assist = 0.2 + 0.15 * Math.min(1.5, aggEff);
+          break;
+        }
+      }
+      // an enemy that is running away has been dealt with — only a robber keeps chasing a load
+      const running = b.action === 'flee' ? 0.35 : 1;
+      const motive = (food + (turf + feud) * running) * kinF + assist * running;
+      if (!(motive > 0)) continue;
+      const sc = motive * fav * (0.5 + 0.5 * candProx[k]);
+      if (sc > rivalScore) {
+        rivalScore = sc;
+        rival = b;
+        rivalWhy = feud >= food && feud >= turf && feud >= assist ? 3 : assist >= food && assist >= turf ? 7 : turf >= food ? 5 : foodWhy;
+      }
+    }
+  }
+
   // idle: loiter at camp when content
   U[I_IDLE] = 0.04 + (tribe && campDist < 40 && hunger < 0.4 ? 0.08 * soc : 0);
 
@@ -801,12 +1103,49 @@ export function think(sim: Simulation, a: Agent): void {
   // explore: curious, fast, perceptive, unsociable agents; or hungry with no food in sight
   const curiosity = 0.5 * (clamp01((tr.perception - 25) / 115) + clamp01((tr.speed - 0.5) / 1.7));
   // aggressive adults with no victim in sight prowl the land looking for prey
-  const prowl = adult && !P.prey && aggEff > 0.7 ? (aggEff - 0.7) * (0.3 + 0.7 * hunger) * 0.8 * (1 - 0.6 * fatigue) * (1 - 0.5 * night) : 0;
+  const prowl = adult && !rival && aggEff > 0.7 ? (aggEff - 0.7) * (0.1 + 0.9 * hunger) * 0.8 * (1 - 0.6 * fatigue) * (1 - 0.5 * night) : 0;
   U[I_EXPLORE] =
     prowl +
     (0.04 + 0.2 * curiosity) * (1 - 0.5 * soc) * (1 - 0.7 * fatigue) * (adult ? 1 : 0.25) * (1 - 0.6 * night) +
     (!haveFoodTarget && hunger > 0.25 ? hunger * 0.55 : 0) +
     (role === 'explorer' ? 0.1 : 0);
+  const exploreBase = U[I_EXPLORE];
+
+  // raid: a tribe at war sends its bold, fit members against the enemy camp's stockpile
+  let raidTarget: Tribe | null = null;
+  if (tribe && adult && aggEff > 0.45 && hunger < 0.8 && fatigue < 0.55 && hp > 0.6 && daylight > 0.3 && a.carried < cap * 0.5) {
+    let rv = 0;
+    for (const key in tribe.relations) {
+      const rel = tribe.relations[key];
+      if (!(rel < SOCIAL_TUNING.warHostile)) continue;
+      const et = sim.getTribe(Number(key));
+      if (!et || et === tribe || et.extinctTick !== -1) continue;
+      const dx = et.homeX - a.x;
+      const dy = et.homeY - a.y;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (!(d < RAID_RANGE)) continue;
+      const v = (-rel * (0.35 + 0.65 * clamp01(et.stockpile / 80))) / (1 + d / 400);
+      if (v > rv) {
+        rv = v;
+        raidTarget = et;
+      }
+    }
+    if (raidTarget) {
+      // at war the enemy is the prey: a raid takes over prowling and wins when it is worth more than the
+      // other reasons to roam (curiosity, searching for food); a raider already on the march keeps going
+      const onTheMarch =
+        a.action === 'explore' &&
+        Number.isFinite(a.targetX) &&
+        Number.isFinite(a.targetY) &&
+        (a.targetX - raidTarget.homeX) * (a.targetX - raidTarget.homeX) + (a.targetY - raidTarget.homeY) * (a.targetY - raidTarget.homeY) < 40 * 40;
+      const raidU =
+        prowl +
+        0.9 * rv * Math.min(1.5, aggEff) * (role === 'warrior' ? 1.3 : 1) * (0.7 + 0.1 * Math.min(3, P.allyN)) * (stockLow ? 1.3 : 1) * (0.7 + 0.6 * hunger) +
+        (onTheMarch ? 0.15 : 0);
+      if (raidU > U[I_EXPLORE]) U[I_EXPLORE] = raidU;
+      else raidTarget = null;
+    }
+  }
 
   // forage: walk to the best known food (comparative advantage via forage skill)
   if (haveFoodTarget && (wantFood || hunger > 0.05)) {
@@ -818,9 +1157,10 @@ export function think(sim: Simulation, a: Agent): void {
     U[I_EAT] = foodDrive + gatherDrive + 0.12 * clamp01(hereFood / 4) + (hunger > 0.04 ? 0.05 : 0);
   }
 
-  // rest: fatigue, night (sleep), cold, sickness, wounds
+  // rest: fatigue, night (sleep), cold, sickness, wounds — but a starving agent with food at hand eats first
   {
     const awayFromCamp = tribe && campDist > 60 ? 1 - 0.6 * soc : 1;
+    const foodAtHand = hereFood >= 1 || (haveFoodTarget && fDist < 24);
     U[I_REST] = Math.max(
       0.005,
       Math.pow(fatigue, 1.5) * 1.3 +
@@ -829,20 +1169,22 @@ export function think(sim: Simulation, a: Agent): void {
         0.08 * chill +
         sick * 0.3 +
         (hp < 0.6 ? (0.6 - hp) * 0.8 : 0) -
-        hunger * hunger * 0.5 -
+        hunger * hunger * (foodAtHand ? 1.6 : 0.5) -
         fear * 0.4,
     );
   }
 
   // flee: threats (smoothed fear) and dangerous disaster zones
   if (P.threat) {
-    U[I_FLEE] = (0.2 + 0.9 * Math.max(threatNow, fear * 0.8)) * (1.2 - 0.4 * Math.min(1, aggEff)) + (1 - hp) * 0.3;
+    // weak threats only make an agent wary; real danger (or wounds) makes it run
+    const danger = Math.max(threatNow, fear * 0.8);
+    U[I_FLEE] = (0.05 + 1.05 * danger) * (1.2 - 0.4 * Math.min(1, aggEff)) + (1 - hp) * 0.3 * Math.min(1, 2 * danger);
   }
   if (zoneDanger > 0.05) U[I_FLEE] = Math.max(U[I_FLEE], 0.3 + 0.8 * zoneDanger);
 
-  // attack: fight back, defend kin/friends, or prey on the weak / attack enemies
+  // attack: fight back, defend kin/friends, or start a fight worth having (conflict appraisal above)
   let attackTarget: Agent | null = null;
-  let attackWhy = 0; // 1 fight back, 2 defend, 3 enemy, 4 hunt
+  let attackWhy = 0; // 1 fight back, 2 defend, else rivalWhy
   {
     let best = 0;
     if (P.avenge) {
@@ -862,25 +1204,18 @@ export function think(sim: Simulation, a: Agent): void {
         attackWhy = 2;
       }
     }
-    if (P.prey && adult) {
-      // predation pays off for aggressive, strong agents — especially when plants are scarce
-      const scarce = !haveFoodTarget || fScore < 1.5;
+    if (rival) {
+      // temperament turns a worthwhile fight into an actual one: gentle agents almost never start one
+      const temper = 0.15 + 1.3 * Math.min(1.5, aggEff);
       const u =
-        1.5 *
-          Math.pow(aggEff, 1.5) *
-          (0.1 + 0.9 * hunger) *
-          clamp(P.preyScore, 0, 1.2) *
-          (0.8 + 0.4 * skCombat) *
-          (0.4 + 0.6 * hp) *
-          (scarce ? 1.3 : 1) +
-        (P.preyHostile ? 0.18 * Math.min(1.5, aggEff) : 0) +
-        (role === 'warrior' ? 0.06 : 0) -
-        0.2 * Math.min(1, altEff) -
-        0.2 * fatigue;
+        rivalScore * temper * (0.4 + 0.6 * hp) -
+        (rivalWhy === 3 ? 0 : 0.12 * Math.min(1, altEff)) -
+        0.2 * fatigue +
+        (role === 'warrior' ? 0.06 : 0);
       if (u > best) {
         best = u;
-        attackTarget = P.prey;
-        attackWhy = P.preyHostile ? 3 : 4;
+        attackTarget = rival;
+        attackWhy = rivalWhy;
       }
     }
     if (attackTarget) U[I_ATTACK] = Math.max(0, best);
@@ -918,8 +1253,8 @@ export function think(sim: Simulation, a: Agent): void {
     U[I_HOME] =
       ((night * (0.2 + 0.6 * soc) + chill * 0.12 * soc) * (1 - 0.7 * hunger) + fear * 0.3 + (hp < 0.45 ? 0.15 : 0)) * far +
       soc * 0.1 * clamp01((campDist - 250) / 400);
-    // deposit carried surplus into the stockpile
-    if (a.carried >= Math.min(6, cap * 0.3)) {
+    // deposit carried surplus into the stockpile (only while the store has room)
+    if (a.carried >= Math.min(6, cap * 0.3) && storeRoom > Math.min(a.carried, 5)) {
       const fill = clamp01(a.carried / cap);
       U[I_DEPOSIT] =
         ((0.12 + 0.6 * fill) * (0.6 + 0.4 * Math.max(Math.min(1, altEff), soc)) * (1 - 0.6 * hunger)) / (1 + campDist / 500) +
@@ -943,13 +1278,27 @@ export function think(sim: Simulation, a: Agent): void {
   }
   if (cur >= 0 && U[cur] > 0) U[cur] += 0.06;
 
+  // argmax; a choice whose target cannot be walked to in a straight line (across a river, behind a
+  // wall) is dropped in favour of the next best instead of pinning the agent against the obstacle
   let best = I_WANDER;
-  let bu = 0;
-  for (let k = 0; k < N_ACTIONS; k++) {
-    if (U[k] > bu) {
-      bu = U[k];
-      best = k;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    let pick = -1;
+    let bu = 0;
+    for (let k = 0; k < N_ACTIONS; k++) {
+      if (U[k] > bu) {
+        bu = U[k];
+        pick = k;
+      }
     }
+    if (pick < 0) break; // nothing left worth doing: wander
+    if (targetReachable(sim, a, pick, tribe, attackTarget, raidTarget)) {
+      best = pick;
+      break;
+    }
+    if (pick === I_EXPLORE && raidTarget) {
+      raidTarget = null;
+      U[I_EXPLORE] = exploreBase;
+    } else U[pick] = 0;
   }
 
   // ================================================================ commit
@@ -969,7 +1318,7 @@ export function think(sim: Simulation, a: Agent): void {
       a.targetX = fX;
       a.targetY = fY;
       const terr = terrainName(sim, fX, fY);
-      if (gatherDrive > foodDrive && tribe) thought = `Gathering food for the ${tribe.name} stockpile at a ${terr} patch`;
+      if (gatherDrive > foodDrive && tribe) thought = `Gathering food for ${theName(tribe)} stockpile at a ${terr} patch`;
       else
         thought = `${hl} (${pct(hunger)}%) — ${hunger >= 0.7 ? 'racing to' : 'heading to'} ${fFromMemory ? 'remembered ' : ''}${terr} patch${
           fDist > 60 ? ` ${Math.round(fDist)} away` : ''
@@ -1017,8 +1366,25 @@ export function think(sim: Simulation, a: Agent): void {
           towardCamp = true;
         }
       }
-      a.targetX = sim.clampX(a.x + (ex / el) * 80);
-      a.targetY = sim.clampY(a.y + (ey / el) * 80);
+      // run for open ground: rotate the escape heading (0, ±30°, ±60°, ±90°) until the line to the escape
+      // point is clear, so cornered agents slip along a shore or wall instead of pressing into it
+      const ux = ex / el;
+      const uy = ey / el;
+      let fx = sim.clampX(a.x + ux * FLEE_DIST);
+      let fy = sim.clampY(a.y + uy * FLEE_DIST);
+      for (let k = 0; k < FLEE_COS.length; k++) {
+        const c = FLEE_COS[k];
+        const sn = FLEE_SIN[k];
+        const cx = sim.clampX(a.x + (ux * c - uy * sn) * FLEE_DIST);
+        const cy = sim.clampY(a.y + (ux * sn + uy * c) * FLEE_DIST);
+        if (clearPath(sim, a.x, a.y, cx, cy)) {
+          fx = cx;
+          fy = cy;
+          break;
+        }
+      }
+      a.targetX = fx;
+      a.targetY = fy;
       if (P.threat) {
         a.targetId = P.threat.id;
         const ratio = combatPower(P.threat) / P.myPow;
@@ -1034,10 +1400,16 @@ export function think(sim: Simulation, a: Agent): void {
       const t = attackTarget as Agent;
       a.targetId = t.id;
       const tt = liveTribe(sim, t);
+      const of = tt && tt !== tribe ? ` of ${theName(tt)}` : '';
       if (attackWhy === 1) thought = `Fighting back against ${t.name}`;
       else if (attackWhy === 2) thought = `Defending ${defendChild ? 'my child ' : ''}${defended ? defended.name : 'a friend'} from ${t.name}`;
-      else if (attackWhy === 3) thought = `Attacking enemy ${t.name}${tt ? ` of the ${tt.name}` : ''}`;
-      else thought = `${hl} and aggressive — hunting ${t.name}${t.carried > 1 ? ' for their food' : ''}`;
+      else if (attackWhy === 3)
+        thought =
+          tt && tribe && (tribe.relations[tt.id] ?? 0) < SOCIAL_TUNING.warHostile ? `At war — attacking ${t.name}${of}` : `Settling a score with ${t.name}`;
+      else if (attackWhy === 5) thought = `Driving ${t.name}${of} off our land`;
+      else if (attackWhy === 6) thought = `${hl} — fighting ${t.name}${of} for a scarce food patch`;
+      else if (attackWhy === 7) thought = `Joining the fight against ${t.name}${of}`;
+      else thought = t.carried > 1 ? `${hl} and aggressive — robbing ${t.name}${of} of their food` : `${hl} and aggressive — hunting ${t.name}${of}`;
       break;
     }
     case I_SHARE: {
@@ -1084,24 +1456,30 @@ export function think(sim: Simulation, a: Agent): void {
             ? 'Night is falling — heading back to camp'
             : chill > 0.5
               ? 'Cold — heading to the shelter of camp'
-              : `Returning to the ${tb.name} camp`;
+              : `Returning to ${theName(tb)} camp`;
       break;
     }
     case I_DEPOSIT: {
       const tb = tribe as Tribe;
       a.targetX = tb.homeX;
       a.targetY = tb.homeY;
-      thought = `Carrying ${Math.round(a.carried)} food — bringing it to the ${tb.name} stockpile`;
+      thought = `Carrying ${Math.round(a.carried)} food — bringing it to ${theName(tb)} stockpile`;
       break;
     }
     case I_WITHDRAW: {
       const tb = tribe as Tribe;
       a.targetX = tb.homeX;
       a.targetY = tb.homeY;
-      thought = `${hl} (${pct(hunger)}%) — taking food from the ${tb.name} stockpile (${Math.round(tb.stockpile)})`;
+      thought = `${hl} (${pct(hunger)}%) — taking food from ${theName(tb)} stockpile (${Math.round(tb.stockpile)})`;
       break;
     }
     case I_EXPLORE: {
+      if (raidTarget) {
+        a.targetX = raidTarget.homeX;
+        a.targetY = raidTarget.homeY;
+        thought = `At war — raiding the camp of ${theName(raidTarget)}${P.allyN > 1 ? ` with ${P.allyN} others` : ''}`;
+        break;
+      }
       if (
         prevAction === 'explore' &&
         Number.isFinite(prevTX) &&
@@ -1180,7 +1558,10 @@ export function think(sim: Simulation, a: Agent): void {
   near.length = 0;
   aggressors.length = 0;
   kids.length = 0;
-  P.threat = P.avenge = P.prey = P.mate = P.needy = P.friend = null;
+  cands.length = 0;
+  engagedN = 0;
+  tallyLen = 0;
+  P.threat = P.avenge = P.mate = P.needy = P.friend = null;
 }
 
 function relKinLabel(a: Agent, b: Agent): string {
@@ -1392,8 +1773,8 @@ function actAttack(sim: Simulation, a: Agent): void {
     return;
   }
   const tr = a.traits;
-  if (a.health < tr.maxHealth * 0.25 || a.actionTicks > 400) {
-    rethink(a); // hurt or exhausted chase: give up
+  if (a.health < tr.maxHealth * 0.35 || a.actionTicks > 400) {
+    rethink(a); // badly hurt or a long fruitless chase: break off
     return;
   }
   const dx = t.x - a.x;
@@ -1405,10 +1786,13 @@ function actAttack(sim: Simulation, a: Agent): void {
   }
   const reach = 3 * tr.size * growthFactor(a) + 3 * t.traits.size * growthFactor(t) + 2;
   if (d > reach) {
-    moveToward(sim, a, t.x, t.y, 1, reach * 0.8);
+    moveToward(sim, a, t.x, t.y, 1, reach * 0.5);
     return;
   }
-  halt(a);
+  // in reach: keep closing in on a target that backs off (a faster pursuer stays in reach until its next
+  // blow; halting here let any fleeing target slip out before the strike window came round)
+  if (d > reach * 0.6) moveToward(sim, a, t.x, t.y, 1, reach * 0.5);
+  else halt(a);
   if (d > 1e-6) a.heading = Math.atan2(dy, dx);
   if ((sim.state.tick + a.id) % ATTACK_INTERVAL === 0) {
     attack(sim, a, t);
@@ -1515,8 +1899,11 @@ function actCamp(sim: Simulation, a: Agent): void {
   halt(a);
   if (kind === 'deposit') {
     const got = a.carried > 0 ? depositFood(sim, a) : 0;
-    if (!(got > 0) && a.carried > 0.5 && d > 4 && a.actionTicks < 900) {
-      moveToward(sim, a, tribe.homeX, tribe.homeY, 0.5, 3); // edge closer to the stockpile
+    // edge closer only while the store has room; at a full store waiting achieves nothing (rethink:
+    // the deposit utility is zero until there is room again)
+    const room = stockpileCapacity(tribe) - tribe.stockpile;
+    if (!(got > 0) && a.carried > 0.5 && room > 0.5 && d > 4 && a.actionTicks < 900) {
+      moveToward(sim, a, tribe.homeX, tribe.homeY, 0.5, 3);
       return;
     }
     a.decisionCooldown = 0;
@@ -1554,9 +1941,27 @@ function actExplore(sim: Simulation, a: Agent): void {
     return;
   }
   if (moveToward(sim, a, tx, ty, 0.75, 10) || a.actionTicks > 900) {
+    plunder(sim, a);
     a.targetX = NaN;
     a.targetY = NaN;
     a.decisionCooldown = 0;
+  }
+}
+
+/** A raider that reached the camp of a tribe its own tribe is at war with grabs from its stockpile. */
+function plunder(sim: Simulation, a: Agent): void {
+  const own = liveTribe(sim, a);
+  if (!own) return;
+  for (const key in own.relations) {
+    if (!(own.relations[key] < SOCIAL_TUNING.warHostile)) continue;
+    const et = sim.getTribe(Number(key));
+    if (!et || et === own || et.extinctTick !== -1) continue;
+    const dx = et.homeX - a.x;
+    const dy = et.homeY - a.y;
+    if (dx * dx + dy * dy > SOCIAL_TUNING.campRadius * SOCIAL_TUNING.campRadius) continue;
+    const got = raidStockpile(sim, a, et);
+    if (got > 0) a.thought = `Raided ${theName(et)} camp — carrying off ${Math.round(got)} food`;
+    return;
   }
 }
 

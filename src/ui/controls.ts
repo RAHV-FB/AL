@@ -95,12 +95,19 @@ export function buildLeftSidebar(app: App): LeftSidebar {
     (k) => {
       app.settings.disaster = k;
       refreshHelp();
+      refreshDisasterOpts();
+      app.refreshToolHud(); // a meteor's impact radius is capped
     },
     'grid2 disaster-pick',
   );
   const intensity = slider({ label: 'Intensity', min: 0.1, max: 1, step: 0.05, value: app.settings.intensity, help: 'How severe the disaster is (0.1 = mild, 1 = catastrophic).', onInput: (v) => (app.settings.intensity = v) });
   const duration = slider({ label: 'Duration', min: 0.25, max: 12, step: 0.25, value: app.settings.durationDays, help: 'How long the disaster lasts, in in-game days.', fmt: (v) => `${v} day${v === 1 ? '' : 's'}`, onInput: (v) => (app.settings.durationDays = v) });
   opts.disaster = h('div', null, h('div', { class: 'sub-title' }, 'Disaster type'), disasterPick.el, intensity.el, duration.el);
+  // meteors strike instantly (the simulation ignores their duration): never show a slider that does nothing
+  const refreshDisasterOpts = () => {
+    duration.el.style.display = app.settings.disaster === 'meteor' ? 'none' : '';
+  };
+  refreshDisasterOpts();
 
   const optWrap = h('div', { class: 'tool-opts' });
   for (const t of TOOLS) {

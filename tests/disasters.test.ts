@@ -3,7 +3,7 @@ import { Simulation } from '../src/sim/simulation';
 import { createAgent } from '../src/sim/lifecycle';
 import { randomGenes } from '../src/sim/genetics';
 import { tileCapacity } from '../src/sim/ecology';
-import { DISASTER_INFO, DISASTER_TUNING, activeDisasterAt, startDisaster, updateDisasters } from '../src/sim/disasters';
+import { DISASTER_INFO, DISASTER_TUNING, activeDisasterAt, startDisaster, temperatureAt, updateDisasters } from '../src/sim/disasters';
 import { DISASTER_KINDS, TERRAIN, type Agent, type Disaster, type ScenarioDef, type SimConfig } from '../src/sim/types';
 
 const SCENARIO: ScenarioDef = {
@@ -121,21 +121,25 @@ describe('disasters: climate effects', () => {
     expect(sim.state.events.some((e) => e.severity === 'good')).toBe(true);
   });
 
-  it('cold snaps lower temperature (combining) and halve regrowth while active', () => {
+  it('cold snaps lower temperature (global everywhere, local only in their area) and halve regrowth while active', () => {
     const sim = makeSim();
     const w = sim.state.world;
     startDisaster(sim, 'coldsnap', 0, 0, 0, 1, 600);
     expect(sim.state.env.tempOffset).toBeCloseTo(-20, 5);
     startDisaster(sim, 'coldsnap', 800, 500, 200, 0.5, 600);
-    const off = sim.state.env.tempOffset;
-    expect(off).toBeLessThanOrEqual(-20 - 12 * 0.5);
-    expect(off).toBeGreaterThanOrEqual(-20 - 20 * 0.5);
+    // a local snap never lowers the global offset (it used to: −20 − 8 here) …
+    expect(sim.state.env.tempOffset).toBeCloseTo(-20, 5);
+    // … but chills its own area on top of the global snap: 0.5 × (12 + 8·200/400) = 8 °C
+    const T0 = sim.state.env.temperature;
+    expect(temperatureAt(sim, 800, 500)).toBeCloseTo(T0 - 8, 5);
+    expect(temperatureAt(sim, 100, 100)).toBeCloseTo(T0, 5);
     at(sim, 300);
-    expect(sim.state.env.tempOffset).toBeCloseTo(off, 5);
+    expect(sim.state.env.tempOffset).toBeCloseTo(-20, 5);
     expect(w.climateMod[idx(sim, 800, 500)]).toBeCloseTo(0.25, 5);
     expect(w.climateMod[idx(sim, 100, 100)]).toBeCloseTo(0.5, 5);
     at(sim, 600);
     expect(sim.state.env.tempOffset).toBe(0);
+    expect(temperatureAt(sim, 800, 500)).toBe(sim.state.env.temperature);
     expect(w.climateMod[idx(sim, 800, 500)]).toBe(1);
   });
 });

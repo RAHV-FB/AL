@@ -24,16 +24,24 @@ export const DAY_START = 0.3;
 /** Mean temperature (°C-ish) through each season: spring, summer, autumn, winter. */
 export const SEASON_TEMPERATURE: readonly number[] = [14, 26, 12, -3];
 /** Plant-growth multiplier through each season: spring, summer, autumn, winter. */
-export const SEASON_GROWTH: readonly number[] = [1.3, 1.0, 0.8, 0.35];
+export const SEASON_GROWTH: readonly number[] = [1.2, 1.0, 0.8, 0.6];
 /** Year-round mean of the seasonal growth curve. */
-export const MEAN_SEASON_GROWTH = (1.3 + 1.0 + 0.8 + 0.35) / 4;
+export const MEAN_SEASON_GROWTH = (1.2 + 1.0 + 0.8 + 0.6) / 4;
 /** Half-width (in seasons) of the smooth blend centred on each season boundary. */
 const SEASON_BLEND = 0.25;
 /** Daily temperature swing (± °C) when the day/night cycle is on; coldest ≈ 03:30, warmest ≈ 15:30. */
 export const DAILY_TEMP_SWING = 4;
 
 /** Logistic regrowth rate r per tick. Grass (maxFood 10) at half capacity: r·5·0.5 ≈ 0.008 food/tick at seasonGrowth 1. */
-export const REGROWTH_RATE = 0.0055;
+export const REGROWTH_RATE = 0.0034;
+/**
+ * Root reserve: grazing only removes the edible above-ground part of a plant, so a grazed tile
+ * keeps regrowing as if ROOT_RESERVE × capacity were still standing (roots, stems, seed bank).
+ * This is the grazing refuge that keeps a heavily grazed landscape productive (≈ 4·ROOT_RESERVE
+ * of the logistic maximum sustainable yield instead of seed rain alone), so foragers can no
+ * longer graze the land into a near-barren state that collapses their own food supply.
+ */
+export const ROOT_RESERVE = 0.3;
 /** Seed rain on bare soil: food/tick per unit fertility (× growth modifiers × (1 − food/cap)). */
 export const SEED_RAIN = 0.0012;
 /** Seed rain is multiplied by (1 + SEED_SPREAD·n), n = 0..1 richness of the 4 neighbours. */
@@ -277,7 +285,7 @@ export function updateResources(sim: Simulation): void {
         let nr = nb / nbrFull;
         if (!(nr > 0)) nr = 0;
         else if (nr > 1) nr = 1;
-        f += dt * mod * (REGROWTH_RATE * f + SEED_RAIN * fe * (1 + SEED_SPREAD * nr)) * (1 - f / cap);
+        f += dt * mod * (REGROWTH_RATE * (f + ROOT_RESERVE * cap) + SEED_RAIN * fe * (1 + SEED_SPREAD * nr)) * (1 - f / cap);
         if (f > cap) f = cap;
       } else if (f > cap) {
         f = cap + (f - cap) * OVERFILL_KEEP;
@@ -344,6 +352,52 @@ export function consumeFood(sim: Simulation, x: number, y: number, amount: numbe
   }
   f[i] = have - amount; // stored as float32
   return have - f[i];
+}
+
+/**
+ * Capacity-weighted fraction of standing plant food around (x, y): Σ food / Σ capacity over the
+ * food-bearing passable tiles of the (2·radiusTiles+1)² window centred on the tile under (x, y),
+ * sampled every `stride` tiles (stride 2 reads a quarter of the tiles of a wide window). In [0, 1.5]
+ * (overfilled tiles can exceed 1); 0 when the window holds no plant capacity at all (open water,
+ * walls, outside the map). A cheap "how lush is this home range" measure (genetics uses it to gate
+ * breeding on local food abundance). Deterministic and allocation-free.
+ */
+export function localFoodFraction(sim: Simulation, x: number, y: number, radiusTiles: number, stride = 1): number {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return 0;
+  const w = sim.state.world;
+  const W = w.width;
+  const H = w.height;
+  const ts = w.tileSize;
+  const food = w.food;
+  const fert = w.fertility;
+  const terr = w.terrain;
+  const fc = num(sim.state.config.foodCapacity, 0, 1000, 1);
+  const r = radiusTiles > 0 ? Math.min(32, Math.floor(radiusTiles)) : 0;
+  const st = stride >= 1 ? Math.min(8, Math.floor(stride)) : 1;
+  const cx = Math.floor(x / ts);
+  const cy = Math.floor(y / ts);
+  let have = 0;
+  let cap = 0;
+  for (let oy = -r; oy <= r; oy += st) {
+    const ty = cy + oy;
+    if (ty < 0 || ty >= H) continue;
+    const row = ty * W;
+    for (let ox = -r; ox <= r; ox += st) {
+      const tx = cx + ox;
+      if (tx < 0 || tx >= W) continue;
+      const i = row + tx;
+      const t = terr[i];
+      if (!PASSABLE[t]) continue;
+      const c = MAX_FOOD[t] * fert[i] * fc;
+      if (!(c > 0)) continue;
+      cap += c;
+      const f = food[i];
+      if (f > 0) have += f;
+    }
+  }
+  if (!(cap > 0)) return 0;
+  const q = have / cap;
+  return q < MAX_OVERFILL ? q : MAX_OVERFILL;
 }
 
 export interface FoodSpot { x: number; y: number; food: number; }
@@ -469,10 +523,13 @@ export function averageFertility(sim: Simulation): number {
   return count ? sum / count : 0;
 }
 
+/** Peak of the per-tile regrowth curve REGROWTH_RATE·(f + ROOT_RESERVE·cap)·(1 − f/cap), in units of REGROWTH_RATE·cap. */
+export const MSY_FACTOR = ROOT_RESERVE < 1 ? ((1 + ROOT_RESERVE) * (1 + ROOT_RESERVE)) / 4 : ROOT_RESERVE;
+
 /**
  * Rough number of agents the land could feed indefinitely under current conditions:
- * Σ_tiles logistic maximum sustainable yield (REGROWTH_RATE·mods·cap/4, i.e. harvesting each
- * tile at half capacity; seed rain ignored) ÷ AGENT_FOOD_PER_TICK (0.09 food/tick/agent).
+ * Σ_tiles maximum sustainable yield (REGROWTH_RATE·MSY_FACTOR·mods·cap, i.e. harvesting each tile
+ * at the peak of its regrowth curve; seed rain ignored) ÷ AGENT_FOOD_PER_TICK (0.09 food/tick/agent).
  * Uses current fertility, climateMod and seasonGrowth (or the year-round mean seasonal growth
  * when `annualAverage`). An upper bound — real foragers don't graze optimally. Rounded.
  */
@@ -496,6 +553,6 @@ export function estimateCarryingCapacity(sim: Simulation, annualAverage = false)
   }
   const season = annualAverage ? (cfg.seasons ? MEAN_SEASON_GROWTH : 1) : num(s.env.seasonGrowth, 0, 100, 1);
   const yieldPerTick =
-    (REGROWTH_RATE * num(cfg.foodRegen, 0, 1000, 1) * season * num(cfg.foodCapacity, 0, 1000, 1) * sum) / 4;
+    REGROWTH_RATE * MSY_FACTOR * num(cfg.foodRegen, 0, 1000, 1) * season * num(cfg.foodCapacity, 0, 1000, 1) * sum;
   return Math.round(yieldPerTick / AGENT_FOOD_PER_TICK);
 }

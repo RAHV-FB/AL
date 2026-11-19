@@ -36,26 +36,25 @@
 import { Simulation } from './simulation';
 import { Rng } from './rng';
 import { DEFAULT_CONFIG, PARAM_SPECS } from './config';
-import { LIMITS, SAVE_VERSION } from './constants';
+import { LIMITS, SAVE_VERSION, TERRAIN_INFO } from './constants';
+import { findPassableInWorld } from './world';
 import { expressTraits } from './genetics';
 import { initEnvironment } from './ecology';
 import { createStatsState } from './stats';
+import { normalizeIntervention } from './interventions';
 import {
   ACTIONS,
   DEATH_CAUSES,
   DISASTER_KINDS,
   GENE_COUNT,
-  GENES,
   HIST_BINS,
   NONE,
   TERRAIN,
   TERRAIN_COUNT,
   type ActionKind,
   type DeathCause,
-  type DisasterKind,
   type EnvState,
   type EventCategory,
-  type GenomeTemplate,
   type Intervention,
   type Role,
   type SimConfig,
@@ -467,6 +466,7 @@ interface Refs {
   tick: number;
   W: number; // world size in world units
   H: number;
+  world: WorldState;
   nextAgentId: number;
   nextTribeId: number;
   /** Tribes present in state.tribes (agents may only belong to these). */
@@ -534,14 +534,15 @@ function roleRecord(r: Repairs, field: string, v: unknown): Record<Role, number>
   return out;
 }
 
-/** Keep only ActionKind keys with numeric values (in place, preserving order). */
+/** Keep only ActionKind keys with numeric (non-NaN) values (in place, preserving order). */
 function actionRecord(r: Repairs, field: string, v: unknown): Partial<Record<ActionKind, number>> {
   if (!isObj(v)) {
     if (v !== undefined) r.fix(field);
     return {};
   }
   for (const k of Object.keys(v)) {
-    if (!ACTION_SET.has(k) || typeof v[k] !== 'number') {
+    const x = v[k];
+    if (!ACTION_SET.has(k) || typeof x !== 'number' || x !== x) {
       delete v[k];
       r.fix(field);
     }
@@ -623,20 +624,6 @@ function sanitizeConfig(raw: unknown, r: Repairs): SimConfig {
   }
   for (const key of Object.keys(raw)) if (!has(DEFAULT_CONFIG as unknown as Obj, key)) r.note(`Ignored unknown setting "config.${key}".`);
   return cfg;
-}
-
-/** setConfig patches: only known keys with valid values survive. */
-function sanitizeConfigPatch(raw: Obj, r: Repairs): Partial<SimConfig> {
-  const patch: Obj = {};
-  for (const key of Object.keys(raw)) {
-    if (!has(DEFAULT_CONFIG as unknown as Obj, key)) {
-      r.fix('intervention.setConfig (unknown key)');
-      continue;
-    }
-    const v = configValue(r, key as keyof SimConfig, raw[key]);
-    if (v !== undefined) patch[key] = v;
-  }
-  return patch as Partial<SimConfig>;
 }
 
 // ---------------------------------------------------------------- world
@@ -792,6 +779,18 @@ function sanitizeAgent(a: Obj, refs: Refs, r: Repairs): void {
   a.birthTick = num(r, 'agent.birthTick', a.birthTick, refs.tick - (a.age as number));
   a.x = coordInside(r, 'agent.x', a.x, refs.W);
   a.y = coordInside(r, 'agent.y', a.y, refs.H);
+  // a running simulation never leaves a living agent on deep water / walls between ticks (terrain painting
+  // moves or kills it); put one that a damaged file strands there back on the nearest open ground
+  const w = refs.world;
+  const ti = Math.floor((a.y as number) / w.tileSize) * w.width + Math.floor((a.x as number) / w.tileSize);
+  if (!TERRAIN_INFO[w.terrain[ti] as TerrainType]?.passable) {
+    const p = findPassableInWorld(w, a.x as number, a.y as number, Math.max(refs.W, refs.H));
+    if (p) {
+      r.fix('agent.position (impassable terrain)');
+      a.x = p.x;
+      a.y = p.y;
+    }
+  }
   a.vx = num(r, 'agent.vx', a.vx, 0, -1e4, 1e4);
   a.vy = num(r, 'agent.vy', a.vy, 0, -1e4, 1e4);
   a.heading = num(r, 'agent.heading', a.heading, 0);
@@ -884,6 +883,13 @@ function sanitizeAgent(a: Obj, refs: Refs, r: Repairs): void {
   // documented optional extension fields
   if (a.fear !== undefined) a.fear = num(r, 'agent.fear', a.fear, 0, 0, 1);
   if (a.sinceMeal !== undefined) a.sinceMeal = num(r, 'agent.sinceMeal', a.sinceMeal, 0, 0, BIG);
+  // disease.ts: health right after the last disease update (a number only while infected; absent = no healing to suppress)
+  if (a.diseaseHp !== undefined) {
+    if (!isFiniteNum(a.diseaseHp) || (a.infection as number) <= 0) {
+      r.fix('agent.diseaseHp');
+      delete a.diseaseHp;
+    } else a.diseaseHp = num(r, 'agent.diseaseHp', a.diseaseHp, 0, 0, traits.maxHealth);
+  }
 }
 
 // ---------------------------------------------------------------- tribes & lineage
@@ -965,77 +971,26 @@ function sanitizeLineage(l: Obj, refs: Refs, r: Repairs): void {
 
 // ---------------------------------------------------------------- interventions
 
-const coord = (v: unknown): number | null => (isFiniteNum(v) ? clamp(v, -MAX_COORD, MAX_COORD) : null);
-const radius = (v: unknown): number | null => (isFiniteNum(v) ? clamp(v, 0, MAX_COORD) : null);
-
-function sanitizeTemplate(v: unknown, r: Repairs): GenomeTemplate | undefined {
-  if (!isObj(v)) {
-    r.fix('intervention.template');
-    return undefined;
-  }
-  const t: GenomeTemplate = {};
-  for (const g of GENES) {
-    if (v[g] === undefined) continue;
-    if (isFiniteNum(v[g])) t[g] = clamp(v[g], 0, 1);
-    else r.fix('intervention.template');
-  }
-  if (v.spread !== undefined) {
-    if (isFiniteNum(v.spread)) t.spread = clamp(v.spread, 0, 1);
-    else r.fix('intervention.template');
-  }
-  return t;
+/** Same plain data (key order ignored)? `canon` is a canonical intervention: shallow objects, no NaN. */
+function sameData(canon: unknown, v: unknown, depth = 0): boolean {
+  if (canon === v) return true;
+  if (depth > 2 || !isObj(canon) || !isObj(v)) return false;
+  const keys = Object.keys(canon);
+  if (keys.length !== Object.keys(v).length) return false;
+  for (const k of keys) if (!has(v, k) || !sameData(canon[k], v[k], depth + 1)) return false;
+  return true;
 }
 
-/** Validate one intervention (scheduled events, intervention log). Returns null when unusable. Valid values pass unchanged. */
-function sanitizeIntervention(v: unknown, r: Repairs): Intervention | null {
-  if (!isObj(v)) return null;
-  const kind = v.kind;
-  if (kind === 'setConfig') return isObj(v.patch) ? { kind, patch: sanitizeConfigPatch(v.patch, r) } : null;
-  if (kind === 'killAgent') return isInt(v.id) ? { kind, id: v.id } : null;
-  if (kind === 'boostAgent') return isInt(v.id) ? { kind, id: v.id } : null;
-  const x = coord(v.x);
-  const y = coord(v.y);
-  const rad = radius(v.radius);
-  if (x === null || y === null || rad === null) return null;
-  switch (kind) {
-    case 'spawn': {
-      if (!isFiniteNum(v.count)) return null;
-      const out: Extract<Intervention, { kind: 'spawn' }> = { kind, x, y, count: clamp(v.count, 0, 100_000), radius: rad };
-      if (v.template !== undefined) {
-        const t = sanitizeTemplate(v.template, r);
-        if (t) out.template = t;
-      }
-      if (v.tribe !== undefined) {
-        if (v.tribe === 'new' || v.tribe === 'none' || isInt(v.tribe)) out.tribe = v.tribe;
-        else r.fix('intervention.tribe');
-      }
-      if (typeof v.tribeName === 'string') out.tribeName = v.tribeName.slice(0, 60);
-      return out;
-    }
-    case 'remove':
-      return { kind, x, y, radius: rad };
-    case 'removeFood':
-      return { kind, x, y, radius: rad };
-    case 'addFood':
-      return isFiniteNum(v.amount) ? { kind, x, y, radius: rad, amount: clamp(v.amount, -1e7, 1e7) } : null;
-    case 'fertilize':
-      return isFiniteNum(v.amount) ? { kind, x, y, radius: rad, amount: clamp(v.amount, -1e7, 1e7) } : null;
-    case 'paintTerrain':
-      return isInt(v.terrain) && v.terrain >= 0 && v.terrain < TERRAIN_COUNT ? { kind, x, y, radius: rad, terrain: v.terrain as TerrainType } : null;
-    case 'disaster':
-      if (typeof v.disaster !== 'string' || !DISASTER_SET.has(v.disaster) || !isFiniteNum(v.intensity) || !isFiniteNum(v.duration)) return null;
-      return {
-        kind,
-        disaster: v.disaster as DisasterKind,
-        x,
-        y,
-        radius: rad,
-        intensity: clamp(v.intensity, 0, 10),
-        duration: clamp(v.duration, 0, BIG),
-      };
-    default:
-      return null;
-  }
+/**
+ * Validate one intervention (scheduled events, intervention log) by reducing it to the canonical form
+ * the simulation itself records and applies (interventions.normalizeIntervention), so a canonical entry —
+ * everything a running simulation logs — passes unchanged and replays exactly. Entries that could have no
+ * effect are dropped (null); anything else that had to be changed counts as a repair.
+ */
+function sanitizeIntervention(v: unknown, refs: Refs, r: Repairs): Intervention | null {
+  const n = normalizeIntervention(v, { worldW: refs.W, worldH: refs.H });
+  if (n && !sameData(n, v)) r.fix(`intervention.${n.kind}`);
+  return n;
 }
 
 // ---------------------------------------------------------------- stats
@@ -1085,6 +1040,7 @@ function sanitizeStats(raw: unknown, r: Repairs): StatsState {
 const STATE_KEYS = new Set([
   'version', 'scenarioId', 'config', 'tick', 'rngState', 'nextAgentId', 'nextTribeId', 'nextEventId', 'nextDisasterId',
   'world', 'env', 'agents', 'tribes', 'lineage', 'events', 'disasters', 'scheduled', 'interventionLog', 'stats',
+  'interventionLogDropped',
 ]);
 
 /** Next free id: the saved counter when it is sane, but always above every id in use. */
@@ -1136,6 +1092,7 @@ function sanitizeState(raw: Obj, r: Repairs): SimState {
     tick,
     W: world.width * world.tileSize,
     H: world.height * world.tileSize,
+    world,
     nextAgentId: nextId(r, 'nextAgentId', raw.nextAgentId, maxAgentId),
     nextTribeId: nextId(r, 'nextTribeId', raw.nextTribeId, maxTribeId),
     tribeIds: new Set(tribes.map((t) => t.id as number)),
@@ -1158,8 +1115,13 @@ function sanitizeState(raw: Obj, r: Repairs): SimState {
 
   // --- logs & schedules
   let maxEventId = 0;
+  let lastEventId = -1;
   const events = list(r, 'events', raw.events, LIMITS.events, true, (e) => {
     if (!isObj(e) || !isInt(e.id) || e.id < 0 || typeof e.message !== 'string') return null;
+    // ids are handed out in increasing order: duplicates / out-of-order entries are corrupt (and would
+    // confuse "new event" detection in the event log)
+    if (e.id <= lastEventId) return null;
+    lastEventId = e.id;
     maxEventId = Math.max(maxEventId, e.id);
     e.tick = num(r, 'events', e.tick, 0, 0, MAX_TICK);
     if (typeof e.category !== 'string' || !CATEGORY_SET.has(e.category)) (r.fix('events'), (e.category = 'environment'));
@@ -1174,7 +1136,7 @@ function sanitizeState(raw: Obj, r: Repairs): SimState {
     if (!isObj(d) || !isInt(d.id) || d.id < 1 || typeof d.kind !== 'string' || !DISASTER_SET.has(d.kind) || !isFiniteNum(d.x) || !isFiniteNum(d.y)) return null;
     maxDisasterId = Math.max(maxDisasterId, d.id);
     d.radius = num(r, 'disasters', d.radius, 0, 0, MAX_COORD);
-    d.startTick = num(r, 'disasters', d.startTick, tick, -BIG, BIG);
+    d.startTick = num(r, 'disasters', d.startTick, tick, -BIG, tick); // a disaster never starts in the future
     d.duration = num(r, 'disasters', d.duration, 0, 0, BIG);
     d.intensity = num(r, 'disasters', d.intensity, 0.5, 0, 1);
     d.active = bool(r, 'disasters', d.active, true);
@@ -1182,7 +1144,7 @@ function sanitizeState(raw: Obj, r: Repairs): SimState {
   });
   const scheduled = list(r, 'scheduled', raw.scheduled, MAX_SCHEDULED, false, (e) => {
     if (!isObj(e) || !isInt(e.tick) || e.tick < 0) return null;
-    const iv = sanitizeIntervention(e.intervention, r);
+    const iv = sanitizeIntervention(e.intervention, refs, r);
     if (!iv) return null;
     const out: Obj = { tick: e.tick, intervention: iv };
     if (typeof e.note === 'string') out.note = e.note.slice(0, 300);
@@ -1194,7 +1156,7 @@ function sanitizeState(raw: Obj, r: Repairs): SimState {
   });
   const interventionLog = list(r, 'interventionLog', raw.interventionLog, LIMITS.interventionLog, true, (e) => {
     if (!isObj(e) || !isInt(e.tick) || e.tick < 0) return null;
-    const iv = sanitizeIntervention(e.intervention, r);
+    const iv = sanitizeIntervention(e.intervention, refs, r);
     return iv ? { tick: e.tick, intervention: iv } : null;
   });
 
@@ -1221,5 +1183,10 @@ function sanitizeState(raw: Obj, r: Repairs): SimState {
     interventionLog: interventionLog as unknown as SimState['interventionLog'],
     stats: sanitizeStats(raw.stats, r),
   };
+  // optional: how many log entries were dropped at the cap (replays are inexact once it is non-zero)
+  const dropped = raw.interventionLogDropped;
+  if (dropped !== undefined) state.interventionLogDropped = int(r, 'interventionLogDropped', dropped, 0, 0, Number.MAX_SAFE_INTEGER);
+  const trimmed = (Array.isArray(raw.interventionLog) ? raw.interventionLog.length : 0) - LIMITS.interventionLog;
+  if (trimmed > 0) state.interventionLogDropped = (state.interventionLogDropped ?? 0) + trimmed;
   return state;
 }

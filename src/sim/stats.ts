@@ -34,8 +34,12 @@ export const ROLES: Role[] = ['none', 'forager', 'warrior', 'caretaker', 'explor
 
 /** Population thresholds announced the first time the all-time peak crosses them. */
 export const POP_MILESTONES = [100, 250, 500, 750, 1000, 1500, 2000];
-/** Max-generation records announced when first reached. */
-export const GENERATION_MILESTONES = [5, 10, 25, 50, 100, 200, 500];
+/**
+ * Max-generation records announced the first time the all-time maximum reaches them. Multiples of
+ * 10 are not listed: genetics.reproduce already announces every 10th generation at the birth itself
+ * (naming the first child), so listing them here logged the same milestone twice.
+ */
+export const GENERATION_MILESTONES = [5, 25, 75];
 
 const CRASH_WINDOW = 10; // samples
 const CRASH_DROP = 0.4; // fraction lost
@@ -254,9 +258,12 @@ function detectEvents(sim: Simulation, prev: StatsSample[], cur: StatsSample): v
     }
   }
 
-  // Generation records.
+  // Generation records: compare against the ALL-TIME maximum (compaction keeps maxGeneration as a
+  // max), so a record is not announced again when the top lineage dies out and is later re-reached.
+  let bestGen = 0;
+  for (let i = 0; i < n; i++) if (prev[i].maxGeneration > bestGen) bestGen = prev[i].maxGeneration;
   for (const m of GENERATION_MILESTONES) {
-    if (last.maxGeneration < m && cur.maxGeneration >= m) {
+    if (bestGen < m && cur.maxGeneration >= m) {
       sim.log('record', 'good', `Generation ${m} reached — ${m} generations of descent since the founders.`);
     }
   }

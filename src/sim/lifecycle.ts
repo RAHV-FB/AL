@@ -17,6 +17,7 @@
 import type { Simulation } from './simulation';
 import { LIMITS } from './constants';
 import { basalBurn, expressTraits, sanitizeGenome } from './genetics';
+import { temperatureAt } from './disasters';
 import { NONE, type Agent, type AgentId, type DeathCause, type TribeId } from './types';
 
 export interface CreateAgentOpts {
@@ -43,7 +44,7 @@ export const VITALS = {
   /** Below this temperature (°C) bodies pay food to keep warm. */
   coldThreshold: 8,
   /** Food per degree below threshold, divided by size × metabolic heat factor. */
-  coldCost: 0.0025, // ecology winter ≈ −3 °C → +≈33 % burn for an average body, +≈65 % for the smallest
+  coldCost: 0.002, // ecology winter ≈ −3 °C → +≈30 % burn for an average body, +≈55 % for the smallest
   coldMaxDelta: 20,
   /** Within this distance (world units) of the own tribe's camp, cold stress is halved (shelter). */
   shelterRadius: 40,
@@ -202,7 +203,8 @@ export function updateVitals(sim: Simulation, a: Agent): void {
   if (!Number.isFinite(v2) || resting || a.action === 'eat') v2 = 0;
   let burn = basalBurn(t) * (resting ? VITALS.restBurn : 1) + VITALS.moveCost * v2 * t.size;
   burn *= bodyScale;
-  const temp = env.temperature;
+  // Local temperature: global season/weather plus any local cold snap around the agent.
+  const temp = temperatureAt(sim, a.x, a.y);
   if (temp < VITALS.coldThreshold) {
     // Small bodies lose heat faster (surface/volume); high metabolism generates more heat.
     let cold = (VITALS.coldCost * Math.min(VITALS.coldMaxDelta, VITALS.coldThreshold - temp)) / (t.size * (0.6 + 0.4 * t.metabolism));

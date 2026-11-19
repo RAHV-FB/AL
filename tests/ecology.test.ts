@@ -4,7 +4,9 @@ import { DEFAULT_CONFIG } from '../src/sim/config';
 import { TERRAIN_INFO } from '../src/sim/constants';
 import {
   AGENT_FOOD_PER_TICK,
+  MSY_FACTOR,
   REGROWTH_RATE,
+  ROOT_RESERVE,
   FERTILITY_MAX,
   FERTILITY_MIN,
   MAX_OVERFILL,
@@ -161,7 +163,7 @@ describe('ecology: environment clock', () => {
     expect(maxDT).toBeLessThan(0.1);
     expect(maxDL).toBeLessThan(0.03);
     for (let s = 0; s < 4; s++) expect(tempSum[s] / tempN[s]).toBeCloseTo(SEASON_TEMPERATURE[s], 0);
-    expect(SEASON_GROWTH).toEqual([1.3, 1.0, 0.8, 0.35]);
+    expect(SEASON_GROWTH).toEqual([1.2, 1.0, 0.8, 0.6]); // rebalanced by the eco audit (winter was 0.35)
   });
 
   it('honours dayNight/seasons toggles and tempOffset', () => {
@@ -231,7 +233,11 @@ describe('ecology: resources', () => {
     advance(sim, 400);
     expect(food[lone]).toBeGreaterThan(0.3);
     expect(food[blockCentre]).toBeGreaterThan(0.05);
-    expect(food[lone]).toBeGreaterThan(2 * food[blockCentre]);
+    // Seed spread from lush neighbours still speeds regrowth up, but grazed land no longer depends on it:
+    // the root reserve (ROOT_RESERVE) regrows the middle of a bare block too. (This used to require
+    // lone > 2 × blockCentre — bare ground regrowing from seed rain alone was the overgrazing-collapse trap.)
+    expect(food[lone]).toBeGreaterThan(food[blockCentre]);
+    expect(food[blockCentre]).toBeGreaterThan(0.3 * tileCapacity(sim, blockCentre));
     expect(food[drought]).toBe(0);
   });
 
@@ -473,9 +479,10 @@ describe('ecology: robustness & aggregates', () => {
     w.fertility.fill(0.5);
     for (let y = 0; y < 30; y++) for (let x = 0; x < 10; x++) w.fertility[y * 40 + x] = 0; // ocean tiles excluded
     expect(averageFertility(sim)).toBeCloseTo(0.5, 6);
-    // 900 grass tiles × MSY (REGROWTH_RATE × 10 × 0.5 / 4) / 0.09 per agent
+    // 900 grass tiles × MSY (REGROWTH_RATE × MSY_FACTOR × cap 10 × 0.5) / 0.09 per agent
     const k = estimateCarryingCapacity(sim);
-    expect(k).toBe(Math.round((900 * REGROWTH_RATE * 10 * 0.5) / 4 / AGENT_FOOD_PER_TICK));
+    expect(MSY_FACTOR).toBeCloseTo(((1 + ROOT_RESERVE) * (1 + ROOT_RESERVE)) / 4, 12);
+    expect(k).toBe(Math.round((900 * REGROWTH_RATE * MSY_FACTOR * 10 * 0.5) / AGENT_FOOD_PER_TICK));
     sim.state.config.foodRegen = 2;
     expect(estimateCarryingCapacity(sim)).toBeCloseTo(2 * k, -1);
 
@@ -485,7 +492,8 @@ describe('ecology: robustness & aggregates', () => {
     const summer = estimateCarryingCapacity(seasonal);
     seasonal.state.tick = 3.5 * 3 * 600; // mid-winter
     updateEnvironment(seasonal);
-    expect(estimateCarryingCapacity(seasonal)).toBeLessThan(summer * 0.45);
+    expect(estimateCarryingCapacity(seasonal)).toBeLessThan(summer * (SEASON_GROWTH[3] + 0.05));
+    expect(estimateCarryingCapacity(seasonal)).toBeGreaterThan(summer * (SEASON_GROWTH[3] - 0.05));
     expect(estimateCarryingCapacity(seasonal, true)).toBeGreaterThan(summer * 0.7);
   });
 

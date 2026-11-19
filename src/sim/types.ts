@@ -461,6 +461,11 @@ export interface SimState {
   scheduled: ScheduledEvent[];
   interventionLog: InterventionRecord[];
   stats: StatsState;
+  /**
+   * Oldest interventionLog entries dropped because the log reached LIMITS.interventionLog (absent = none).
+   * Once non-zero, "restart & replay" can no longer reproduce the run exactly.
+   */
+  interventionLogDropped?: number;
 }
 
 // ---------------------------------------------------------------- scenarios
