@@ -294,7 +294,8 @@ describe('README matches the code', () => {
     expect(ci).toContain('npm test');
     expect(ci).toContain('npm run build');
     const pages = read('.github/workflows/pages.yml');
-    expect(pages).toContain("branches: [main, 'claude/artificial-life-simulator-8iuk86']");
+    expect(pages).toMatch(/^\s+branches: \[main\]$/m); // github-pages deploys from the default branch only
+    expect(README).toContain('on every push to `main`');
     expect(pages).not.toMatch(/npm (test|run test)\b/);
     expect(README).toContain('It does not run the tests');
     const url = 'https://rahv-fb.github.io/AL/';

@@ -5,8 +5,8 @@ name: Deploy to GitHub Pages
 
 on:
   push:
-    # The repository's default branch is the feature branch until a `main` exists.
-    branches: [main, 'claude/artificial-life-simulator-8iuk86']
+    # The github-pages environment deploys from the default branch only.
+    branches: [main]
   workflow_dispatch:
 
 permissions:

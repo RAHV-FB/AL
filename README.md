@@ -278,10 +278,8 @@ AL_LONGRUN_TICKS=5000 npx vitest run tests/longrun.test.ts --silent=false  # qui
 **CI and deployment:**
 
 - `.github/workflows/ci.yml` runs the typecheck, the full test suite and the build on every push and pull request, then uploads `dist/index.html` as a build artifact.
-- `.github/workflows/pages.yml` typechecks, builds and deploys `dist/` to GitHub Pages on pushes to `main` and to the `claude/artificial-life-simulator-8iuk86` branch, or when started manually. It does not run the tests.
-- **Deployment status:** every Pages run so far has built successfully but failed in the `deploy` job, which never got a runner. To fix it, open the repository settings:
-  1. Set Pages → Source to **GitHub Actions**.
-  2. Under Environments → `github-pages`, allow the branch you deploy from.
+- `.github/workflows/pages.yml` typechecks, builds and deploys `dist/` to GitHub Pages on every push to `main` (or when started manually). It does not run the tests; CI does.
+- **Deployment notes:** the `github-pages` environment only deploys from the default branch, so publish by pushing to `main`. If a deploy fails in its `deploy` job, check Settings → Pages → Source = **GitHub Actions** and Settings → Environments → `github-pages` → deployment branches.
 
 ## Limitations
 
