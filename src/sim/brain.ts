@@ -1389,24 +1389,39 @@ export function think(sim: Simulation, a: Agent): void {
   }
   const exploreBase = U[I_EXPLORE];
 
-  // raid: a tribe at war sends its bold, fit members against the enemy camp's stockpile
+  // raid: a tribe at war sends its bold, fit members against the enemy camp's stockpile. A raid is worth less the
+  // farther the raiders must walk (by the route they would take, across a ford if need be), so members out by
+  // the river set out more readily than those at home. Once on the march (a raid trek) a raider keeps going: in
+  // daylight the raid holds through detours, and at night it sleeps where it is instead of turning home.
   let raidTarget: Tribe | null = null;
-  if (tribe && adult && aggEff > 0.45 && hunger < 0.8 && fatigue < 0.55 && hp > 0.6 && daylight > 0.3 && a.carried < cap * 0.5) {
+  if (
+    tribe &&
+    adult &&
+    aggEff > 0.45 &&
+    daylight > 0.3 &&
+    a.carried < cap * 0.5 &&
+    (raidTrek ? hunger < 0.85 && fatigue < 0.7 : hunger < 0.8 && fatigue < 0.55 && hp > 0.6)
+  ) {
     let rv = 0;
+    let best = 0;
     for (const key in tribe.relations) {
       const rel = tribe.relations[key];
       if (!(rel < SOCIAL_TUNING.warHostile)) continue;
       const et = sim.getTribe(Number(key));
       if (!et || et === tribe || et.extinctTick !== -1) continue;
-      const dx = et.homeX - a.x;
-      const dy = et.homeY - a.y;
-      const d = Math.sqrt(dx * dx + dy * dy);
-      if (!(d < RAID_RANGE)) continue;
       // nothing to plunder (raidStockpile takes > 0.5): a raider sent to an empty store re-chose the raid
       // every tick on arrival and stood rooted in the enemy camp
       if (!(et.stockpile > 0.5)) continue;
+      const dx = et.homeX - a.x;
+      const dy = et.homeY - a.y;
+      if (!(dx * dx + dy * dy < RAID_RANGE * RAID_RANGE)) continue; // the walk is never shorter than the line
+      const d = walkDistance(sim, et, a.x, a.y);
+      if (!(d < RAID_RANGE)) continue;
       const v = (-rel * (0.35 + 0.65 * clamp01(et.stockpile / 80))) / (1 + d / 400);
-      if (v > rv) {
+      // a raider on the march only turns to another enemy camp that is clearly worth more
+      const score = et === raidTrek ? 1.25 * v : v;
+      if (score > best) {
+        best = score;
         rv = v;
         raidTarget = et;
       }
@@ -1415,14 +1430,15 @@ export function think(sim: Simulation, a: Agent): void {
       // at war the enemy is the prey: a raid takes over prowling and wins when it is worth more than the
       // other reasons to roam (curiosity, searching for food); a raider already on the march keeps going
       const onTheMarch =
-        a.action === 'explore' &&
-        Number.isFinite(a.targetX) &&
-        Number.isFinite(a.targetY) &&
-        (a.targetX - raidTarget.homeX) * (a.targetX - raidTarget.homeX) + (a.targetY - raidTarget.homeY) * (a.targetY - raidTarget.homeY) < 40 * 40;
+        raidTarget === raidTrek ||
+        (a.action === 'explore' &&
+          Number.isFinite(a.targetX) &&
+          Number.isFinite(a.targetY) &&
+          (a.targetX - raidTarget.homeX) * (a.targetX - raidTarget.homeX) + (a.targetY - raidTarget.homeY) * (a.targetY - raidTarget.homeY) < 40 * 40);
       const raidU =
         prowl +
         0.9 * rv * Math.min(1.5, aggEff) * (role === 'warrior' ? 1.3 : 1) * (0.7 + 0.1 * Math.min(3, P.allyN)) * (stockLow ? 1.3 : 1) * (0.7 + 0.6 * hunger) +
-        (onTheMarch ? 0.15 : 0);
+        (onTheMarch ? RAID_COMMIT : 0);
       if (raidU > U[I_EXPLORE]) U[I_EXPLORE] = raidU;
       else raidTarget = null;
     }
@@ -1440,7 +1456,8 @@ export function think(sim: Simulation, a: Agent): void {
 
   // rest: fatigue, night (sleep), cold, sickness, wounds — but a starving agent with food at hand eats first
   {
-    const awayFromCamp = tribe && campDist > 60 ? 1 - 0.6 * soc : 1;
+    // away from camp a sociable agent would rather walk home for the night; a raider on the march sleeps where it is
+    const awayFromCamp = tribe && campDist > 60 && !raidTrek ? 1 - 0.6 * soc : 1;
     const foodAtHand = hereFood >= 1 || (haveFoodTarget && fDist < 24);
     U[I_REST] = Math.max(
       0.005,
@@ -1531,9 +1548,11 @@ export function think(sim: Simulation, a: Agent): void {
   if (tribe) {
     // go home: night (if sociable), cold, fear, wounds, homesickness
     const far = clamp01((campDist - 35) / 150);
-    U[I_HOME] =
-      ((night * (0.2 + 0.6 * soc) + chill * 0.12 * soc) * (1 - 0.7 * hunger) + fear * 0.3 + (hp < 0.45 ? 0.15 : 0)) * far +
-      soc * 0.1 * clamp01((campDist - 250) / 400);
+    // (a raider on the march does not turn back: it gives up the raid first when hurt, loaded or the war is over)
+    U[I_HOME] = raidTrek
+      ? 0
+      : ((night * (0.2 + 0.6 * soc) + chill * 0.12 * soc) * (1 - 0.7 * hunger) + fear * 0.3 + (hp < 0.45 ? 0.15 : 0)) * far +
+        soc * 0.1 * clamp01((campDist - 250) / 400);
     // deposit carried surplus into the stockpile (only while the store has room)
     if (a.carried >= Math.min(6, cap * 0.3) && storeRoom > Math.min(a.carried, 5)) {
       const fill = clamp01(a.carried / cap);
@@ -1618,12 +1637,17 @@ export function think(sim: Simulation, a: Agent): void {
       break;
     }
     case I_REST: {
-      if (a.energy < 0.15) thought = `Exhausted (energy ${pct(a.energy)}%) — resting`;
-      else if (sick > 0) thought = 'Feeling sick — resting to recover';
-      else if (hp < 0.5) thought = `Wounded (${pct(hp)}% health) — resting`;
-      else if (night > 0.5) thought = tribe && campDist < 60 ? 'Night — sleeping at camp' : 'Night — sleeping';
-      else if (chill > 0.5) thought = 'Cold — huddling to conserve energy';
-      else thought = `Tired (energy ${pct(a.energy)}%) — resting`;
+      if (a.energy < 0.15) thought = `Exhausted (energy ${pct(a.energy)}%), resting`;
+      else if (sick > 0) thought = 'Feeling sick, resting to recover';
+      else if (hp < 0.5) thought = `Wounded (${pct(hp)}% health), resting`;
+      else if (night > 0.5)
+        thought = raidTrek
+          ? `Night, sleeping on the way to raid ${theName(raidTrek)}`
+          : tribe && campDist < 60
+            ? 'Night, sleeping at camp'
+            : 'Night, sleeping';
+      else if (chill > 0.5) thought = 'Cold, huddling to save energy';
+      else thought = `Tired (energy ${pct(a.energy)}%), resting`;
       break;
     }
     case I_FLEE: {
@@ -1755,10 +1779,16 @@ export function think(sim: Simulation, a: Agent): void {
       break;
     }
     case I_EXPLORE: {
-      if (raidTarget) {
-        a.targetX = raidTarget.homeX;
-        a.targetY = raidTarget.homeY;
-        thought = `At war — raiding the camp of ${theName(raidTarget)}${P.allyN > 1 ? ` with ${P.allyN} others` : ''}`;
+      // a raid; a raider already on the march that would rather roam (prowling, searching for food) keeps heading
+      // for the enemy camp too
+      const raid = raidTarget ?? raidTrek;
+      if (raid) {
+        a.targetX = raid.homeX;
+        a.targetY = raid.homeY;
+        // setting out: commit to the march (a trek), across fords and through the night
+        if (raidTrek !== raid) a.trek = { x: raid.homeX, y: raid.homeY, until: tick + RAID_TREK_TICKS, kind: 'raid', tribe: raid.id };
+        const by = !clearPath(sim, a.x, a.y, raid.homeX, raid.homeY) ? ', the long way round by a ford or pass' : '';
+        thought = `At war, raiding the camp of ${theName(raid)}${P.allyN > 1 ? ` with ${P.allyN} others` : ''}${by}`;
         break;
       }
       if (trek) {
@@ -1781,7 +1811,7 @@ export function think(sim: Simulation, a: Agent): void {
         break;
       }
       // a migrant commits to the destination it picked — if it really looks like greener land
-      if (!trek && migrateDrive > 0.3 && lushness(sim, exX, exY) > 0.35) a.trek = { x: exX, y: exY, until: tick + TREK_TICKS };
+      if (!trek && migrateDrive > 0.3 && lushness(sim, exX, exY) > 0.35) a.trek = { x: exX, y: exY, until: tick + TREK_TICKS, kind: 'migrate', tribe: NONE };
       a.targetX = exX;
       a.targetY = exY;
       const dir = compass(exX - a.x, exY - a.y);
