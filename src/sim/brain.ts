@@ -708,7 +708,7 @@ function perceive(sim: Simulation, a: Agent, b: Agent, pw: number): void {
   }
 
   // potential mate (mutual compatibility)
-  if (P.matingReady && P.mateChecks < MAX_MATE_CHECKS && bAdult && kin === 0 && !attackingMe && !grudge && b.reproCooldown <= 0) {
+  if (P.matingReady && P.mateChecks < MAX_MATE_CHECKS && bAdult && kin === 0 && !attackingMe && !grudge && b.reproCooldown <= 0 && !onRaid(b)) {
     P.mateChecks++;
     if (canMate(sim, a, b) && canMate(sim, b, a)) {
       const sc =
@@ -1118,8 +1118,9 @@ export function think(sim: Simulation, a: Agent): void {
   const fit = !(a.health < tr.maxHealth * FIGHT_MIN_HP);
   P.fit = fit;
   P.surplus = a.carried + Math.max(0, a.food - maxFood * 0.55);
+  // (no courting while away on a raid: children born on the march were left behind there, far from camp)
   P.matingReady =
-    adult && a.reproCooldown <= 0 && hunger < 0.6 && a.energy > 0.28 && hp > 0.35 && fertEff > 0.02 && sim.canSpawn();
+    adult && a.reproCooldown <= 0 && hunger < 0.6 && a.energy > 0.28 && hp > 0.35 && fertEff > 0.02 && !onRaid(a) && sim.canSpawn();
   let r = percR;
   let n = sim.spatial.query(a.x, a.y, r, near, a).length;
   if (n > MAX_NEIGHBOURS) {
