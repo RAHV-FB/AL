@@ -190,3 +190,5 @@ All numbers below are from runs on the final tree. Five parallel audits (core, b
 No preset goes extinct within 12 days. In 20-day runs, measured by the ecology auditor, the seasonal swing is −6% to −28% instead of the earlier −82% to −94% winter crashes, and `fittest` survives on seeds 42, 1, 7 and 99.
 
 **Emergent conflict** (behaviour audit, seed 42, 12 days, integrated tree): fights/day — eden 0, collapse 0, plague-island 0 (gentle genomes), predators ≈22, fittest ≈104, two-civs ≈181, evolab ≈196; living tribes ≈5–15 per 1000 agents (was ≈40 tiny splinters).
+
+**GitHub Pages** — after pushing the final code to `main`, the "Deploy to GitHub Pages" run #12 (44440590726) **succeeded** (build and deploy jobs green). The earlier failures were the `github-pages` environment rejecting deploys from the feature branch. Loading <https://rahv-fb.github.io/AL/> in headless Chromium returned HTTP 200; the app booted into Garden of Eden and was simulating (tick 120, 224 agents after ~4 s) with no console or page errors.
