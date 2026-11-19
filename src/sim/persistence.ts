@@ -44,7 +44,7 @@ import { createStatsState } from './stats';
 import { normalizeIntervention } from './interventions';
 import { NAV } from './pathfinding';
 import { ROUTE } from './steering';
-import { TREK_TICKS } from './brain';
+import { RAID_TREK_TICKS, TREK_TICKS } from './brain';
 import {
   ACTIONS,
   DEATH_CAUSES,
@@ -139,7 +139,7 @@ class Repairs {
     if (out.length > MAX_REPAIR_MESSAGES) {
       const extra = out.length - MAX_REPAIR_MESSAGES;
       out.length = MAX_REPAIR_MESSAGES;
-      out.push(`…and ${extra} more`);
+      out.push(`and ${extra} more`);
     }
     return out;
   }
@@ -406,7 +406,7 @@ export function deserializeState(json: string, options: LoadOptions = {}): SimSt
     root = JSON.parse(text, reviver);
   } catch (e) {
     if (e instanceof SyntaxError) {
-      throw new Error(`Cannot load: the file is not valid JSON — it may be truncated or not a save file (${e.message}).`);
+      throw new Error(`Cannot load: the file is not valid JSON. It may be truncated, or not a save file (${e.message}).`);
     }
     throw new Error(`Cannot load: ${errMsg(e)}.`);
   }
@@ -614,7 +614,7 @@ function configValue(r: Repairs, key: keyof SimConfig, v: unknown): number | boo
 function sanitizeConfig(raw: unknown, r: Repairs): SimConfig {
   const cfg: SimConfig = { ...DEFAULT_CONFIG };
   if (!isObj(raw)) {
-    r.note('Configuration was missing — default settings used.');
+    r.note('The settings were missing, so the defaults were used.');
     return cfg;
   }
   const out = cfg as unknown as Obj;
@@ -637,7 +637,7 @@ function worldLayer(raw: Obj, key: string, kind: string, n: number, w: number, h
   const Ctor = TYPED_CTORS[kind];
   if (Array.isArray(v)) {
     // tolerate plain number arrays (hand-edited saves / external tools); values are range-checked later
-    if (v.length !== n) throw new Error(`Cannot load: the world "${key}" layer has ${v.length} tiles but the ${w}×${h} map needs ${n} — the save is corrupted.`);
+    if (v.length !== n) throw new Error(`Cannot load: the world "${key}" layer has ${v.length} tiles but the ${w}×${h} map needs ${n}, so the save is corrupted.`);
     const arr = new Ctor(n);
     for (let i = 0; i < n; i++) arr[i] = typeof v[i] === 'number' ? (v[i] as number) : NaN;
     return arr;
@@ -647,7 +647,7 @@ function worldLayer(raw: Obj, key: string, kind: string, n: number, w: number, h
   const tag = typedTag(v);
   if (tag !== kind) throw new Error(`Cannot load: the world "${key}" layer has the wrong data type (${tag}; expected ${kind}).`);
   const len = (v as TypedArray).length;
-  if (len !== n) throw new Error(`Cannot load: the world "${key}" layer has ${len} tiles but the ${w}×${h} map needs ${n} — the save is corrupted.`);
+  if (len !== n) throw new Error(`Cannot load: the world "${key}" layer has ${len} tiles but the ${w}×${h} map needs ${n}, so the save is corrupted.`);
   return v as TypedArray;
 }
 
@@ -711,7 +711,7 @@ function sanitizeWorld(raw: unknown, r: Repairs): WorldState {
 function sanitizeEnv(raw: unknown, config: SimConfig, r: Repairs): EnvState {
   const def = initEnvironment(config);
   if (!isObj(raw)) {
-    r.note('Environment (clock/season) was missing — reset to the start of spring.');
+    r.note('The clock and season were missing and have been reset to the start of spring.');
     return def;
   }
   raw.timeOfDay = num(r, 'env.timeOfDay', raw.timeOfDay, def.timeOfDay, 0, 1);
@@ -731,7 +731,7 @@ function sanitizeEnv(raw: unknown, config: SimConfig, r: Repairs): EnvState {
 /** Pass 1: keep agents with a usable identity (unique id, alive, genes, finite position). */
 function collectAgents(raw: unknown, r: Repairs): Obj[] {
   if (!Array.isArray(raw)) {
-    r.note(raw === undefined ? 'The save has no agent list — loaded with no agents.' : 'The agent list was unreadable — loaded with no agents.');
+    r.note(raw === undefined ? 'The save has no agent list, so it loaded with no agents.' : 'The agent list was unreadable, so it loaded with no agents.');
     return [];
   }
   let src: unknown[] = raw;
@@ -988,21 +988,28 @@ function sanitizeAgent(a: Obj, refs: Refs, r: Repairs): void {
       a.route = undefined; // steering simply plans again
     }
   }
-  // brain.ts: a migrant's trek destination
+  // brain.ts: a committed trek, a migration or a raid. Saves made before raids were treks hold migrations without
+  // kind / tribe. Rebuilt with all five keys in createAgent's order, so every trek object has one shape.
   if (a.trek !== undefined) {
     const tk = a.trek;
+    const kind = isObj(tk) ? (tk.kind === undefined ? 'migrate' : tk.kind) : undefined;
+    const raid = kind === 'raid';
     const ok =
       isObj(tk) &&
+      (kind === 'migrate' || raid) &&
       isFiniteNum(tk.x) && tk.x >= 0 && tk.x <= refs.W &&
       isFiniteNum(tk.y) && tk.y >= 0 && tk.y <= refs.H &&
       isInt(tk.until) &&
       tk.until >= 0 &&
-      tk.until <= refs.tick + TREK_TICKS &&
-      Object.keys(tk).every((k) => k === 'x' || k === 'y' || k === 'until');
+      tk.until <= refs.tick + (raid ? RAID_TREK_TICKS : TREK_TICKS) &&
+      // a raid names the enemy tribe (an allocated id: one that has since died out is dropped by the brain);
+      // a migration names none
+      (raid ? isInt(tk.tribe) && tk.tribe >= 1 && tk.tribe < refs.nextTribeId : tk.tribe === undefined || tk.tribe === NONE) &&
+      Object.keys(tk).every((k) => k === 'x' || k === 'y' || k === 'until' || k === 'kind' || k === 'tribe');
     if (!ok) {
       r.fix('agent.trek');
       a.trek = undefined;
-    }
+    } else a.trek = { x: tk.x, y: tk.y, until: tk.until, kind, tribe: raid ? tk.tribe : NONE };
   }
 }
 
@@ -1132,7 +1139,7 @@ function sanitizeSample(e: unknown, r: Repairs): Obj | null {
 function sanitizeStats(raw: unknown, r: Repairs): StatsState {
   const def = createStatsState();
   if (!isObj(raw)) {
-    r.note('Statistics history was missing — charts restart from now.');
+    r.note('The statistics history was missing, so the charts start again from now.');
     return def;
   }
   // fill any missing top-level field (including module extensions) from the defaults
@@ -1190,7 +1197,7 @@ function sanitizeState(raw: Obj, r: Repairs): SimState {
     rngState = rs.map((v: number) => v >>> 0);
   } else {
     rngState = new Rng((config.seed ^ tick) >>> 0, 7).getState();
-    r.note('Random-number generator state was missing or corrupt — re-seeded (the run continues, but no longer matches the original).');
+    r.note('The random-number generator state was missing or corrupt and has been re-seeded. The run continues but no longer matches the original.');
   }
 
   // --- pass 1: identities, then id counters (references are validated against them)
@@ -1321,6 +1328,18 @@ function sanitizeState(raw: Obj, r: Repairs): SimState {
       const keys = (field: string, v: unknown): number[] =>
         list(r, `diplomacy.${field}`, v, 20000, true, (k) => (isInt(k) && k >= 0 ? k : null)) as number[];
       state.diplomacy = { wars: keys('wars', raw.diplomacy.wars), alliances: keys('alliances', raw.diplomacy.alliances), feuds: keys('feuds', raw.diplomacy.feuds) };
+      // old rivalries (absent = none): pair keys of two different, allocated tribe ids, each pair once
+      if (raw.diplomacy.rivals !== undefined) {
+        const seen = new Set<number>();
+        state.diplomacy.rivals = list(r, 'diplomacy.rivals', raw.diplomacy.rivals, 20000, true, (k) => {
+          if (!isInt(k) || k < 0 || seen.has(k)) return null;
+          const lo = Math.floor(k / 1048576);
+          const hi = k - lo * 1048576;
+          if (!(lo >= 1 && lo < hi && hi < refs.nextTribeId)) return null;
+          seen.add(k);
+          return k;
+        }) as number[];
+      }
     } else r.fix('diplomacy');
   }
   // optional: epidemic log bookkeeping; absent → disease.ts starts fresh and adopts a running epidemic

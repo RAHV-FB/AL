@@ -384,7 +384,7 @@ export function reproduce(sim: Simulation, a: Agent, b: Agent): Agent | null {
     const mate = p === a ? b : a;
     addHistory(sim, p, `Had a child, ${child.name}, with ${mate.name}`);
     if (p.offspring % 10 === 0) {
-      sim.log('record', 'good', `${p.name} has become a prolific parent: ${p.offspring} children.`, {
+      sim.log('record', 'good', `${p.name} has had ${p.offspring} children.`, {
         x: p.x,
         y: p.y,
         agentId: p.id,
@@ -401,7 +401,7 @@ export function reproduce(sim: Simulation, a: Agent, b: Agent): Agent | null {
   addHistory(sim, child, `Born to ${a.name} and ${b.name} (generation ${generation})`);
 
   if (isMilestone) {
-    sim.log('evolution', 'good', `Generation ${generation} reached: ${child.name}, child of ${a.name} and ${b.name}, is the first of their generation.`, {
+    sim.log('evolution', 'good', `Generation ${generation} reached with the birth of ${child.name}, child of ${a.name} and ${b.name}.`, {
       x: child.x,
       y: child.y,
       agentId: child.id,

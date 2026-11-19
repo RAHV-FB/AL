@@ -148,7 +148,7 @@ describe('agent interventions', () => {
     expect(groupB.every((g) => g.alive)).toBe(true);
     expect(sim.state.agents.length).toBe(20);
     expect(sim.state.stats.counters.deathsByCause.removed).toBe(20);
-    expect(lastEvent(sim).message).toBe('Removed 20 agents');
+    expect(lastEvent(sim).message).toBe('Removed 20 agents.');
   });
 
   it('killAgent removes one agent; boostAgent restores vitals; missing ids are ignored', () => {

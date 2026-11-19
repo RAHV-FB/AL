@@ -1,4 +1,4 @@
-// OWNER: Rendering agent.
+// OWNER: map ground engineer (terrainLayer.ts, camera.ts, minimap.ts, overlays.ts).
 /**
  * 2D camera: world units → CSS pixels. `x,y` is the world point at the screen centre,
  * `zoom` is CSS pixels per world unit.
@@ -19,7 +19,8 @@ export class Camera {
   /** Screen pixels per world unit. */
   zoom = 1;
   minZoom = 0.2;
-  maxZoom = 12;
+  /** Closest zoom: 24 CSS px per world unit (192 px per 8-unit tile). */
+  maxZoom = 24;
   /** Viewport size in CSS pixels. */
   viewW = 1;
   viewH = 1;

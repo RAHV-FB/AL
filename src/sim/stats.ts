@@ -90,7 +90,7 @@ export function updateStats(sim: Simulation): void {
     if (prevPeak > 0) {
       for (const m of POP_MILESTONES) {
         if (prevPeak < m && pop >= m) {
-          sim.log('population', 'good', `Population milestone: ${m} living agents — a new all-time high.`);
+          sim.log('population', 'good', `Population reached ${m} for the first time.`);
         }
       }
     }
@@ -226,7 +226,7 @@ function detectEvents(sim: Simulation, prev: StatsSample[], cur: StatsSample): v
   // Extinction.
   if (cur.population === 0) {
     if (last.population > 0) {
-      sim.log('population', 'major', 'Extinction: the last living agent has died. Spawn new life to begin again.');
+      sim.log('population', 'major', 'Extinction: the last agent has died. Add new agents to start again.');
     }
     return;
   }
@@ -253,8 +253,8 @@ function detectEvents(sim: Simulation, prev: StatsSample[], cur: StatsSample): v
       let top: DeathCause | null = null;
       for (const k of DEATH_CAUSES) if (causes[k] > 0 && (top === null || causes[k] > causes[top])) top = k;
       const pct = Math.round((1 - cur.population / crashMax) * 100);
-      const why = top ? ` Most deaths: ${CAUSE_LABEL[top]}.` : '';
-      sim.log('population', pct >= 70 ? 'major' : 'bad', `Population crash: ${crashMax} → ${cur.population} (−${pct}%).${why}`);
+      const why = top ? ` Most deaths were from ${CAUSE_LABEL[top]}.` : '';
+      sim.log('population', pct >= 70 ? 'major' : 'bad', `Population crashed from ${crashMax} to ${cur.population} (down ${pct}%).${why}`);
     }
   }
 
@@ -264,7 +264,7 @@ function detectEvents(sim: Simulation, prev: StatsSample[], cur: StatsSample): v
   for (let i = 0; i < n; i++) if (prev[i].maxGeneration > bestGen) bestGen = prev[i].maxGeneration;
   for (const m of GENERATION_MILESTONES) {
     if (bestGen < m && cur.maxGeneration >= m) {
-      sim.log('record', 'good', `Generation ${m} reached — ${m} generations of descent since the founders.`);
+      sim.log('record', 'good', `Generation ${m} reached.`);
     }
   }
 
@@ -291,17 +291,19 @@ function detectEvents(sim: Simulation, prev: StatsSample[], cur: StatsSample): v
     const to = cur.geneMeans[g];
     const pct = Math.round((Math.abs(d) / Math.max(0.05, from)) * 100);
     const days = (cur.tick - old.tick) / dayLength;
+    // the number as printed picks "day" or "days" (1.2 days prints as "1 day", never "1 days" or "1.0 days")
+    const span = days < 0.95 ? days.toFixed(1) : String(Math.round(days));
     const gene = GENES[g];
     const why =
       gene === 'hue'
-        ? 'neutral drift of lineage colours'
+        ? ' This is neutral drift in lineage colours.'
         : cur.population < SMALL_POP
-          ? 'genetic drift in a small population'
-          : 'selection at work';
+          ? ' The population is small, so this is likely genetic drift.'
+          : '';
     sim.log(
       'evolution',
       'info',
-      `Average ${gene} has ${d > 0 ? 'risen' : 'fallen'} ${pct}% in ${days < 1 ? days.toFixed(1) : Math.round(days)} day${days === 1 ? '' : 's'} (${from.toFixed(2)} → ${to.toFixed(2)}) — ${why}.`,
+      `Average ${gene} is ${d > 0 ? 'up' : 'down'} ${pct}% in ${span} day${span === '1' ? '' : 's'}, from ${from.toFixed(2)} to ${to.toFixed(2)}.${why}`,
     );
   }
 }
@@ -312,7 +314,7 @@ const CAUSE_LABEL: Record<DeathCause, string> = {
   combat: 'combat',
   disease: 'disease',
   disaster: 'disasters',
-  removed: 'divine intervention',
+  removed: 'removal by the experimenter',
 };
 
 // ------------------------------------------------------------------ compaction

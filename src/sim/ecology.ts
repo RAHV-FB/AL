@@ -179,10 +179,10 @@ function computeClock(env: EnvState, config: SimConfig, tick: number): void {
 }
 
 const SEASON_EVENTS: { severity: 'info' | 'good' | 'bad'; text: string }[] = [
-  { severity: 'good', text: 'Spring has arrived — plants burst back into growth.' },
-  { severity: 'info', text: 'Summer has arrived — long warm days and steady plant growth.' },
-  { severity: 'info', text: 'Autumn has arrived — plant growth is slowing.' },
-  { severity: 'bad', text: 'Winter has come — plant growth slows to a crawl.' },
+  { severity: 'good', text: 'Spring: plants grow fastest.' },
+  { severity: 'info', text: 'Summer: warm weather and steady plant growth.' },
+  { severity: 'info', text: 'Autumn: plant growth slows down.' },
+  { severity: 'bad', text: 'Winter: plants grow slowly until spring.' },
 ];
 
 // ------------------------------------------------------------------ environment
@@ -215,7 +215,7 @@ export function updateEnvironment(sim: Simulation): void {
   const prevYear = env.year;
   computeClock(env, sim.state.config, sim.state.tick);
   if (env.year > prevYear) {
-    sim.log('environment', 'info', `Year ${env.year + 1} begins — the seasons have come full circle.`);
+    sim.log('environment', 'info', `Year ${env.year + 1} begins.`);
   }
   if (env.season !== prevSeason) {
     const ev = SEASON_EVENTS[env.season];

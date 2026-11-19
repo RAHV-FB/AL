@@ -1,4 +1,4 @@
-// OWNER: UI/UX agent. Sandbox tool definitions, tool → intervention mapping and
+// OWNER: UI shell. Sandbox tool definitions, tool to intervention mapping and
 // throttled drag-painting. Every world change goes through sim.enqueue().
 import { TERRAIN_INFO } from '../sim/constants';
 import { DISASTER_INFO } from '../sim/disasters';
@@ -26,15 +26,15 @@ export interface ToolDef {
 }
 
 export const TOOLS: ToolDef[] = [
-  { id: 'inspect', key: '1', name: 'Inspect', icon: 'inspect', mode: 'select', brush: false, airbrush: false, color: '', how: 'Click an agent to select it; drag to pan; double-click an agent to follow it with the camera.', what: 'The Inspector shows its needs, current decision and the utility of every option, genes, family, relationships and life story.' },
-  { id: 'spawn', key: '2', name: 'Spawn agents', icon: 'spawn', mode: 'click', brush: true, airbrush: false, color: 'rgba(46,230,208,0.95)', how: 'Click the map to drop a group inside the brush circle. Design their genome and tribe below.', what: 'Creates new adult agents with the chosen genetics.' },
-  { id: 'remove', key: '3', name: 'Remove agents', icon: 'remove', mode: 'paint', brush: true, airbrush: true, color: 'rgba(255,93,108,0.95)', how: 'Click or drag over agents.', what: 'Removes every agent inside the brush circle (counted as "removed" deaths).' },
-  { id: 'addFood', key: '4', name: 'Add food', icon: 'food', mode: 'paint', brush: true, airbrush: true, color: 'rgba(124,230,110,0.95)', how: 'Click or drag; hold the button still to keep adding.', what: 'Adds food to every tile under the brush.' },
-  { id: 'removeFood', key: '5', name: 'Remove food', icon: 'nofood', mode: 'paint', brush: true, airbrush: true, color: 'rgba(245,177,76,0.95)', how: 'Click or drag to create a famine zone. Plants regrow over time.', what: 'Strips all standing food from the tiles under the brush.' },
-  { id: 'fertilize', key: '6', name: 'Fertilize', icon: 'sprout', mode: 'paint', brush: true, airbrush: true, color: 'rgba(190,240,90,0.95)', how: 'Click or drag; hold still to keep enriching. Repairs overgrazed land.', what: 'Raises soil fertility so tiles hold more food and regrow faster.' },
-  { id: 'terrain', key: '7', name: 'Paint terrain', icon: 'terrain', mode: 'paint', brush: true, airbrush: false, color: 'rgba(210,220,236,0.95)', how: 'Click or drag to paint. Walls and deep water split populations — try it and watch them drift apart.', what: 'Reshapes the land under the brush.' },
-  { id: 'disaster', key: '8', name: 'Disaster', icon: 'bolt', mode: 'click', brush: true, airbrush: false, color: 'rgba(228,91,214,0.95)', how: 'Click to unleash it centred on the cursor, covering the brush circle.', what: 'Starts a disaster with the chosen intensity and duration.' },
-  { id: 'bless', key: '9', name: 'Bless / Smite', icon: 'heart', mode: 'click', brush: false, airbrush: false, color: '', how: 'Click an agent to bless it; Shift-click to smite it. Drag to pan.', what: 'Bless fully heals, feeds and rests one agent; smite kills it instantly.' },
+  { id: 'inspect', key: '1', name: 'Inspect', icon: 'inspect', mode: 'select', brush: false, airbrush: false, color: '', how: 'Click an agent to see what it is doing and why. Drag to move the map; double-click an agent to follow it.', what: 'The Agent tab shows its needs, the options it weighed, its genes, family, friends and life story.' },
+  { id: 'spawn', key: '2', name: 'Add agents', icon: 'spawn', mode: 'click', brush: true, airbrush: false, color: 'rgba(143,181,115,0.95)', how: 'Click the map to place a group inside the circle.', what: 'Adds adult agents with the genes and tribe you choose here.' },
+  { id: 'remove', key: '3', name: 'Remove agents', icon: 'remove', mode: 'paint', brush: true, airbrush: true, color: 'rgba(207,91,69,0.95)', how: 'Click or drag over agents to remove them.', what: 'Removes every agent inside the circle. They count as removed in the death statistics.' },
+  { id: 'addFood', key: '4', name: 'Add food', icon: 'food', mode: 'paint', brush: true, airbrush: true, color: 'rgba(170,200,120,0.95)', how: 'Click or drag. Hold the button still to keep adding.', what: 'Adds food to every tile under the circle.' },
+  { id: 'removeFood', key: '5', name: 'Remove food', icon: 'nofood', mode: 'paint', brush: true, airbrush: true, color: 'rgba(214,166,72,0.95)', how: 'Click or drag to strip the land bare. Plants grow back over time.', what: 'Removes all standing food from the tiles under the circle.' },
+  { id: 'fertilize', key: '6', name: 'Fertilize', icon: 'sprout', mode: 'paint', brush: true, airbrush: true, color: 'rgba(190,196,110,0.95)', how: 'Click or drag. Hold the button still to keep enriching the soil.', what: 'Makes the soil richer, so tiles hold more food and regrow faster. Repairs overgrazed land.' },
+  { id: 'terrain', key: '7', name: 'Paint terrain', icon: 'terrain', mode: 'paint', brush: true, airbrush: false, color: 'rgba(232,227,216,0.95)', how: 'Click or drag to paint. A wall or deep water splits a population in two.', what: 'Changes the land under the circle to the chosen terrain.' },
+  { id: 'disaster', key: '8', name: 'Disaster', icon: 'bolt', mode: 'click', brush: true, airbrush: false, color: 'rgba(207,91,69,0.95)', how: 'Click the map to start it inside the circle, or start it on the whole map.', what: 'Starts a disaster with the chosen strength and length.' },
+  { id: 'bless', key: '9', name: 'Bless or smite', icon: 'hand', mode: 'click', brush: false, airbrush: false, color: '', how: 'Click an agent to heal and feed it. Shift-click an agent to kill it.', what: 'Blessing fully heals, feeds and rests one agent. Smiting kills it at once.' },
 ];
 
 export const toolById = (id: ToolId): ToolDef => TOOLS.find((t) => t.id === id) ?? TOOLS[0];
@@ -72,7 +72,7 @@ export interface ToolSettings {
   terrain: TerrainType;
   disaster: DisasterKind;
   intensity: number;
-  /** Disaster duration in in-game days (× config.dayLength ticks). */
+  /** Disaster duration in in-game days (times config.dayLength ticks). */
   durationDays: number;
 }
 
@@ -109,22 +109,30 @@ export function toolHelp(tool: ToolDef, s: ToolSettings): { title: string; lines
   const lines: string[] = [tool.how];
   const sim = simHelpFor(tool.id);
   lines.push(sim.length ? sim.join(' ') : tool.what);
+  const extra = choiceHelp(tool, s);
+  if (extra) lines.push(extra);
+  return { title: tool.name, lines };
+}
+
+/** One line about the current terrain or disaster choice (empty for other tools). */
+export function choiceHelp(tool: ToolDef, s: ToolSettings): string {
   if (tool.id === 'terrain') {
     const info = TERRAIN_INFO[s.terrain];
-    lines.push(`${info.name}: ${info.description}${info.passable ? ` Movement speed ×${info.moveCost}.` : ''}`);
-  } else if (tool.id === 'disaster') {
-    const d = DISASTER_INFO[s.disaster];
-    lines.push(`${d.icon} ${d.label}: ${d.help}`);
-  } else if (tool.id === 'remove') {
-    lines.push('Removed agents count as "removed" deaths in the statistics.');
+    const speed = info.passable ? ` Walking speed ${Math.round(info.moveCost * 100)}%.` : '';
+    return `${info.name}: ${info.description}${speed}`;
   }
-  return { title: tool.name, lines };
+  if (tool.id === 'disaster') {
+    const d = DISASTER_INFO[s.disaster];
+    return `${d.label}: ${d.help}`;
+  }
+  if (tool.id === 'remove') return 'Removed agents count as removed in the death statistics.';
+  return '';
 }
 
 /** Largest impact radius the Disaster tool requests for a meteor (world units). */
 export const METEOR_MAX_RADIUS = 120;
 
-/** Radius the tool really affects — the brush preview and HUD must show this, not the raw slider value. */
+/** Radius the tool really affects: the brush preview must show this, not the raw slider value. */
 export function effectiveRadius(tool: ToolId, s: ToolSettings): number {
   return tool === 'disaster' && s.disaster === 'meteor' ? Math.min(s.radius, METEOR_MAX_RADIUS) : s.radius;
 }

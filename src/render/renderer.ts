@@ -1,21 +1,24 @@
-// OWNER: Rendering agent.
+// OWNER: map agents engineer (renderer.ts, agents.ts, effects.ts, colors.ts).
 /**
  * World renderer (Canvas 2D). Frame order:
- *   ground (terrain · vegetation · hillshade) → season tint → night tint (multiply)
- *   → data overlay → disasters → camps → selection extras (vision, trail, relations)
- *   → agents (batched, LOD) → brush → screen pass (labels, glyphs, rings, vignettes,
- *   legend, minimap).
+ *   ground (terrain layer) → winter frost → night (flat darkening) → data overlay → disasters
+ *   → territory edges (close zoom) → selection extras (vision, trail, route) → camps (close zoom)
+ *   → connections → agents (batched; detail at close zoom) → partner rings → camps (far zoom) → brush
+ *   → screen pass (camp labels, disaster labels, rings, agent glyphs and labels, tie markers,
+ *     whole-map disaster notes, overlay legend, minimap, connections legend).
+ * Flat colours only: no gradients, glows, shadows or additive blending.
  * The simulation is read-only here; every cache is renderer-side and rebuilt lazily.
  */
 import type { Simulation } from '../sim/simulation';
-import type { Agent, EnvState } from '../sim/types';
+import type { Agent, EnvState, Tribe } from '../sim/types';
+import { SOCIAL_TUNING } from '../sim/social';
 import { Camera } from './camera';
-import { TerrainLayer } from './terrainLayer';
+import { TerrainLayer, type GroundView } from './terrainLayer';
 import { LEGEND_WIDTH, OverlayLayer } from './overlays';
 import { DisasterFx } from './effects';
-import { AgentPainter, agentRadius, miniBars } from './agents';
+import { AgentPainter, DETAIL_ZOOM, agentRadius, type AgentColorMode } from './agents';
 import { Minimap } from './minimap';
-import { hueColor } from './colors';
+import { PAL, TIE, flatPanel, tribeColor, tribeShade } from './colors';
 
 export type OverlayKind = 'none' | 'food' | 'fertility' | 'density' | 'territory' | 'disease' | 'climate';
 
@@ -24,17 +27,25 @@ export interface ViewOptions {
   selectedId: number; // -1 none
   hoverId: number; // -1 none
   showVision: boolean; // draw selected agent's perception radius
-  showTrails: boolean; // motion trails for selected/followed agent
-  showRelations: boolean; // lines from selected agent to friends/enemies/kin
-  showCamps: boolean; // tribe camp markers
-  showLabels: boolean; // names at high zoom
+  showTrails: boolean; // trail and planned route of the selected agent
+  /** Lines from the selected agent to its family, friends and enemies (default true; showConnections false hides them too). */
+  showRelations?: boolean;
+  /**
+   * Connections between agents (default true when undefined): at close zoom, lines between visible agents
+   * with strong ties (mother and child, friends, enemies); the selected agent's ties at every zoom.
+   */
+  showConnections?: boolean;
+  showCamps: boolean; // tribe camp markers (and territory edges at close zoom)
+  showLabels: boolean; // names at close zoom
+  /** Colour agents by tribe (default) or every agent by its hue gene, which shows lineages. */
+  colorBy?: AgentColorMode;
   /** Brush preview circle (world coords & radius) for the active tool, or null. */
   brush: { x: number; y: number; radius: number; color: string } | null;
   /** Minimap in the bottom-left corner (default true). */
   showMinimap?: boolean;
   /** Overlay legend in the bottom-right corner (default true). */
   showLegend?: boolean;
-  /** Screen areas (CSS px) covered by UI panels; minimap & legend stay clear of them. */
+  /** Screen areas (CSS px) covered by UI panels; minimap & legends stay clear of them. */
   insets?: { top: number; right: number; bottom: number; left: number };
 }
 
@@ -45,17 +56,41 @@ export interface RenderStats {
   drawMs: number;
   /** Agents drawn last frame (after culling). */
   agentsDrawn: number;
+  /** Connection lines drawn last frame. */
+  connections: number;
+  /** Agent labels written last frame. */
+  labels: number;
 }
 
 const TAU = Math.PI * 2;
 const TRAIL_N = 240;
 const NO_INSETS = { top: 0, right: 0, bottom: 0, left: 0 };
+const FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+/** Lines between agents per frame at most (the selected agent's ties come on top). */
+const MAX_LINES = 600;
+/** Personal affinity from which two agents count as friends / enemies (the simulation's own thresholds). */
+const FRIEND = SOCIAL_TUNING.friend;
+const ENEMY = SOCIAL_TUNING.grudge;
+/** Stronger thresholds for the network of lines between other agents, which keep it readable in a crowd. */
+const STRONG_FRIEND = 0.5;
+const STRONG_ENEMY = -0.5;
+/** Lines between other agents longer than this (world units) are left out. */
+const MAX_LINE = 160;
+/** Legend row for the territory edges drawn at close zoom. */
+const EDGE_LABEL = 'Territory edge';
+
+/** Kinds of ties between agents (index into TIE_COLOR). */
+const FAMILY = 0;
+const FRIENDS = 1;
+const ENEMIES = 2;
+type TieKind = typeof FAMILY | typeof FRIENDS | typeof ENEMIES;
+const TIE_COLOR = [TIE.family, TIE.friend, TIE.enemy];
 
 export class Renderer {
   readonly canvas: HTMLCanvasElement;
   readonly ctx: CanvasRenderingContext2D;
   readonly camera = new Camera();
-  readonly stats: RenderStats = { fps: 0, drawMs: 0, agentsDrawn: 0 };
+  readonly stats: RenderStats = { fps: 0, drawMs: 0, agentsDrawn: 0, connections: 0, labels: 0 };
   /** Effective device pixel ratio (capped at 2). */
   dpr = 1;
 
@@ -68,37 +103,40 @@ export class Renderer {
   private lastTime = -1;
   private lastSim: Simulation | null = null;
   private bounds = { x0: 0, y0: 0, x1: 0, y1: 0 };
+  private viewRect = { x0: 0, y0: 0, x1: 0, y1: 0 };
+  private ground: GroundView = { x0: 0, y0: 0, x1: 0, y1: 0, zoom: 1 };
   private tmp = { x: 0, y: 0 };
   private dash = [0, 0];
   private noDash: number[] = [];
-  private bgPattern: CanvasPattern | null = null;
   private ro: ResizeObserver | null = null;
   // selected-agent trail ring buffer
   private trail = new Float32Array(TRAIL_N * 2);
   private trailHead = 0;
   private trailLen = 0;
   private trailId = -1;
+  // the selected agent's ties (filled while drawing its lines; used for rings and edge markers)
+  private tieAgents: Agent[] = [];
+  private tieKinds: number[] = [];
+  private tieSeen = new Set<number>();
+  // territory edges per tribe (reused segment lists)
+  private edgeSegs = new Map<number, number[]>();
+  private campOrder: Tribe[] = [];
   // camera snapshot for screen-space helpers
   private camX = 0;
   private camY = 0;
   private camZ = 1;
   private readonly toSX = (x: number) => (x - this.camX) * this.camZ + this.camera.viewW / 2;
   private readonly toSY = (y: number) => (y - this.camY) * this.camZ + this.camera.viewH / 2;
+  /** Keeps agent labels clear of a label box (CSS px) written by another layer. */
+  private readonly reserveLabel = (x0: number, y0: number, x1: number, y1: number) => {
+    this.painter.reserve(x0, y0, x1, y1);
+  };
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     const ctx = canvas.getContext('2d', { alpha: false });
     if (!ctx) throw new Error('Canvas 2D not supported');
     this.ctx = ctx;
-    const pc = document.createElement('canvas');
-    pc.width = 28;
-    pc.height = 28;
-    const p = pc.getContext('2d');
-    if (p) {
-      p.fillStyle = 'rgba(120,150,220,0.13)';
-      p.fillRect(0, 0, 1.5, 1.5);
-      this.bgPattern = ctx.createPattern(pc, 'repeat');
-    }
     if (typeof ResizeObserver !== 'undefined') {
       this.ro = new ResizeObserver(() => this.resize());
       this.ro.observe(canvas);
@@ -144,6 +182,9 @@ export class Renderer {
   /** Overlay legend placement in CSS px from the last frame (visible=false when not drawn). */
   readonly legendRect = { x: 0, y: 0, w: 0, h: 0, visible: false };
 
+  /** Connections legend placement in CSS px from the last frame (visible while connection lines are drawn). */
+  readonly connectionsLegendRect = { x: 0, y: 0, w: 0, h: 0, visible: false };
+
   /** Draw one frame. `time` is a monotonically increasing ms clock for animation only. */
   render(sim: Simulation, view: ViewOptions, time: number): void {
     const t0 = performance.now();
@@ -185,69 +226,73 @@ export class Renderer {
     this.overlays.update(sim, view.overlay, this.frame);
     this.fx.sync(sim, time);
 
-    // ---- background
+    // ---- background: flat, no pattern
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
-    ctx.fillStyle = '#05080f';
+    ctx.fillStyle = PAL.bg;
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    if (this.bgPattern) {
-      ctx.fillStyle = this.bgPattern;
-      ctx.fillRect(0, 0, vw, vh);
-    }
 
     // ---- world space
     const ox = vw / 2 - cam.x * z;
     const oy = vh / 2 - cam.y * z;
     ctx.setTransform(dpr * z, 0, 0, dpr * z, dpr * ox, dpr * oy);
     const b = cam.visibleBounds(10, this.bounds);
+    const vr = cam.visibleBounds(0, this.viewRect);
     const px = 1 / z;
 
-    // soft halo around the world edge (cheap stacked strokes, no shadowBlur)
-    ctx.strokeStyle = 'rgba(70,110,200,0.07)';
-    for (let k = 1; k <= 3; k++) {
-      ctx.lineWidth = k * 7 * px;
-      ctx.strokeRect(0, 0, WW, WH);
-    }
-
-    this.terrain.draw(ctx, WW, WH);
-    this.drawSeason(ctx, env, WW, WH);
+    const g = this.ground;
+    g.x0 = vr.x0;
+    g.y0 = vr.y0;
+    g.x1 = vr.x1;
+    g.y1 = vr.y1;
+    g.zoom = z;
+    this.terrain.draw(ctx, WW, WH, g);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    this.drawFrost(ctx, env, WW, WH);
     const night = this.drawNight(ctx, env, sim, WW, WH);
-
-    ctx.strokeStyle = 'rgba(130,165,255,0.35)';
+    ctx.strokeStyle = PAL.border2;
     ctx.lineWidth = px;
     ctx.strokeRect(0, 0, WW, WH);
 
     this.overlays.draw(ctx, sim, view.overlay, z);
-    this.fx.drawWorld(ctx, time, z, b.x0, b.y0, b.x1, b.y1);
-    if (view.showCamps) this.drawCampsWorld(ctx, sim, z, time, false);
+    ctx.globalAlpha = 1;
+    this.fx.drawWorld(ctx, time, z, b.x0, b.y0, b.x1, b.y1, WW, WH);
+    const edges = view.showCamps && z >= DETAIL_ZOOM && view.overlay !== 'territory' && this.drawTerritoryEdges(ctx, sim, z);
 
     const sel = view.selectedId >= 0 ? sim.getAgent(view.selectedId) : undefined;
     this.updateTrail(sel);
-    if (sel) this.drawSelectionWorld(ctx, sel, view, z, time);
+    if (sel) this.drawSelectionWorld(ctx, sel, view, z);
 
-    this.painter.collect(sim, z, b.x0, b.y0, b.x1, b.y1);
-    this.painter.draw(ctx, sim, z, night, view.overlay === 'disease', time);
+    this.painter.collect(sim, z, b.x0, b.y0, b.x1, b.y1, 10, view.colorBy ?? 'tribe');
+    // camps: on the ground under the agents up close, on top of the crowd from afar so they stay visible
+    const campsUnder = z >= DETAIL_ZOOM;
+    if (view.showCamps && campsUnder) this.drawCamps(ctx, sim, z);
+    const lines = this.drawConnections(ctx, sim, view, sel, z);
+    this.painter.draw(ctx, sim, z, view.overlay === 'disease');
     this.stats.agentsDrawn = this.painter.visN;
-    // over the agent bodies: drawn under them, the lines vanished in a crowd (e.g. a camp at night)
-    if (sel && view.showRelations) this.drawRelations(ctx, sim, sel, z);
-    if (view.showCamps) this.drawCampsWorld(ctx, sim, z, time, true);
-
-    if (view.brush) this.drawBrush(ctx, view.brush, z, time);
+    this.stats.connections = lines;
+    if (sel && this.tieAgents.length) this.drawPartnerRings(ctx, z);
+    if (view.showCamps && !campsUnder) this.drawCamps(ctx, sim, z);
+    if (view.brush) this.drawBrush(ctx, view.brush, z);
 
     // ---- screen space (CSS px)
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.globalAlpha = 1;
-    if (view.showCamps) this.drawCampLabels(ctx, sim, z, vw, vh);
-    this.painter.drawScreen(ctx, sim, z, cam.x, cam.y, vw, vh, time, view.showLabels, sel ? sel.id : -1);
-    this.fx.drawLabels(ctx, time, this.toSX, this.toSY, z, vw, vh);
-    const hov = view.hoverId >= 0 && view.hoverId !== view.selectedId ? sim.getAgent(view.hoverId) : undefined;
-    if (hov) this.drawAgentFocus(ctx, sim, hov, false, time);
-    if (sel) this.drawAgentFocus(ctx, sim, sel, true, time);
-    this.fx.drawScreen(ctx, time, vw, vh, this.toSX, this.toSY);
-
     const ins = view.insets ?? NO_INSETS;
+    this.painter.beginLabels();
+    this.painter.drawSelectedName(ctx, sim, z, cam.x, cam.y, vw, vh, view.showLabels, sel ? sel.id : -1);
+    if (view.showCamps) this.drawCampLabels(ctx, sim, z, vw, vh);
+    this.fx.drawLabels(ctx, time, this.toSX, this.toSY, z, vw, vh, vr, WW, WH, ins.top, this.reserveLabel);
+    const hov = view.hoverId >= 0 && view.hoverId !== view.selectedId ? sim.getAgent(view.hoverId) : undefined;
+    if (hov) this.drawRing(ctx, hov, false);
+    if (sel) this.drawRing(ctx, sel, true);
+    this.painter.drawScreen(ctx, sim, z, cam.x, cam.y, vw, vh, view.showLabels, sel ? sel.id : -1, night);
+    this.stats.labels = this.painter.labelsDrawn;
+    if (sel && this.tieAgents.length) this.drawTieMarkers(ctx, sel, vw, vh, ins);
+    this.fx.drawScreen(ctx, time, vw, vh, ins);
+
     const lr = this.legendRect;
     lr.visible = false;
     if (view.showLegend !== false && view.overlay !== 'none') {
@@ -265,6 +310,7 @@ export class Renderer {
       this.minimap.update(sim, this.terrain, this.fx, this.frame, time, mw, mh, dpr);
       this.minimap.draw(ctx, cam, sim, ins.left + 14, vh - ins.bottom - 14 - mh, mw, mh);
     } else this.minimap.rect.visible = false;
+    this.drawConnectionsLegend(ctx, lines > 0, edges, ins, vh);
 
     const ms = performance.now() - t0;
     this.stats.drawMs = this.stats.drawMs > 0 ? this.stats.drawMs * 0.9 + ms * 0.1 : ms;
@@ -294,158 +340,494 @@ export class Renderer {
 
   // ------------------------------------------------------------ lighting
 
-  private seasonWeights(env: EnvState | undefined): [number, number, number, number] {
-    const w: [number, number, number, number] = [0, 0, 0, 0];
-    const s = env ? env.season & 3 : 0;
-    const p = env ? Math.max(0, Math.min(1, env.seasonProgress || 0)) : 0;
-    let blend = (p - 0.7) / 0.3;
-    blend = blend < 0 ? 0 : blend > 1 ? 1 : blend * blend * (3 - 2 * blend);
-    w[s] = 1 - blend;
-    w[(s + 1) & 3] += blend;
-    return w;
-  }
-
-  private drawSeason(ctx: CanvasRenderingContext2D, env: EnvState | undefined, WW: number, WH: number): void {
+  /** Light frost in winter and during strong cold (flat, very faint). */
+  private drawFrost(ctx: CanvasRenderingContext2D, env: EnvState | undefined, WW: number, WH: number): void {
     if (!env) return;
-    const w = this.seasonWeights(env);
-    const frost = w[3] * 0.14 + (env.tempOffset < -2 ? Math.min(0.14, -env.tempOffset * 0.012) : 0);
-    if (frost > 0.005) {
-      ctx.globalAlpha = frost;
-      ctx.fillStyle = '#d4e6ff';
-      ctx.fillRect(0, 0, WW, WH);
-    }
-    if (w[2] > 0.01) {
-      ctx.globalAlpha = w[2] * 0.08;
-      ctx.fillStyle = '#ff9a3c';
-      ctx.fillRect(0, 0, WW, WH);
-    }
-    if (w[1] > 0.01) {
-      ctx.globalAlpha = w[1] * 0.035;
-      ctx.fillStyle = '#ffe6a0';
-      ctx.fillRect(0, 0, WW, WH);
-    }
+    const s = env.season & 3;
+    const p = Math.max(0, Math.min(1, env.seasonProgress || 0));
+    let w = 0;
+    if (s === 3) w = p > 0.7 ? 1 - (p - 0.7) / 0.3 : 1;
+    else if (s === 2 && p > 0.7) w = (p - 0.7) / 0.3;
+    const cold = env.tempOffset < -2 ? Math.min(0.06, -env.tempOffset * 0.005) : 0;
+    const a = w * 0.05 + cold;
+    if (a < 0.004) return;
+    ctx.globalAlpha = a;
+    ctx.fillStyle = PAL.text;
+    ctx.fillRect(0, 0, WW, WH);
     ctx.globalAlpha = 1;
   }
 
-  /** Multiply night/twilight tint over the world. Returns night amount 0..1. */
+  /** Flat darkening of the world at night (no tint, vignette or gradient). Returns the night amount 0..1. */
   private drawNight(ctx: CanvasRenderingContext2D, env: EnvState | undefined, sim: Simulation, WW: number, WH: number): number {
     if (!env || sim.state.config?.dayNight === false) return 0;
     const day = Number.isFinite(env.daylight) ? Math.max(0, Math.min(1, env.daylight)) : 1;
     let n = 1 - day;
     n = n * n * (3 - 2 * n);
-    const tw = Math.max(0, 1 - Math.abs(day - 0.5) / 0.32);
-    if (n < 0.01 && tw < 0.01) return 0;
-    const r = Math.round(255 - n * 178);
-    const g = Math.round(255 - n * 152 - tw * 26);
-    const bl = Math.round(255 - n * 84 - tw * 72);
-    ctx.globalCompositeOperation = 'multiply';
-    ctx.fillStyle = `rgb(${r},${g},${bl})`;
+    if (n < 0.01) return 0;
+    ctx.fillStyle = `rgba(10,11,14,${(n * 0.52).toFixed(3)})`;
     ctx.fillRect(0, 0, WW, WH);
-    ctx.globalCompositeOperation = 'source-over';
     return n;
   }
 
-  // ------------------------------------------------------------ camps
+  // ------------------------------------------------------------ camps and territory
 
-  /** Camp ground ring (`marker` false, drawn under agents) or hexagon marker + stockpile gauge (`marker` true, over agents). */
-  private drawCampsWorld(ctx: CanvasRenderingContext2D, sim: Simulation, z: number, time: number, marker: boolean): void {
+  /** Half-size of a camp marker in world units (about 7 px on screen, growing with the land up close). */
+  private campSize(z: number): number {
+    return Math.max(7 / z, 4.5);
+  }
+
+  /** A small hut in the tribe colour at each camp (world space). */
+  private drawCamps(ctx: CanvasRenderingContext2D, sim: Simulation, z: number): void {
     const b = this.bounds;
     const px = 1 / z;
+    const s = this.campSize(z);
+    ctx.lineJoin = 'round';
+    ctx.setLineDash(this.noDash);
     for (const t of sim.state.tribes) {
       if (t.extinctTick !== -1) continue;
       const x = t.homeX;
       const y = t.homeY;
-      if (!Number.isFinite(x) || !Number.isFinite(y) || x < b.x0 - 40 || x > b.x1 + 40 || y < b.y0 - 40 || y > b.y1 + 40) continue;
-      const hue = t.hue;
-      if (!marker) {
-        const R = 16;
-        ctx.fillStyle = hueColor(hue, 0.7, 0.5, 0.13);
-        ctx.beginPath();
-        ctx.arc(x, y, R, 0, TAU);
-        ctx.fill();
-        ctx.strokeStyle = hueColor(hue, 0.85, 0.66, 0.7);
-        ctx.lineWidth = 1.2 * px;
-        this.dash[0] = 4 * px;
-        this.dash[1] = 3 * px;
-        ctx.setLineDash(this.dash);
-        ctx.lineDashOffset = -time * 0.004 * px;
-        ctx.stroke();
-        ctx.setLineDash(this.noDash);
-        ctx.lineDashOffset = 0;
-        continue;
-      }
-      // hexagon marker (min ~9px on screen)
-      const s = Math.max(4.5, 9 * px);
+      if (!Number.isFinite(x) || !Number.isFinite(y) || x < b.x0 - s || x > b.x1 + s || y < b.y0 - s || y > b.y1 + s) continue;
       ctx.beginPath();
-      for (let i = 0; i < 6; i++) {
-        const a = (i / 6) * TAU - Math.PI / 2;
-        const hx = x + Math.cos(a) * s;
-        const hy = y + Math.sin(a) * s;
-        if (i === 0) ctx.moveTo(hx, hy);
-        else ctx.lineTo(hx, hy);
-      }
+      ctx.moveTo(x - s * 0.8, y + s * 0.72);
+      ctx.lineTo(x - s * 0.8, y - s * 0.12);
+      ctx.lineTo(x, y - s * 0.88);
+      ctx.lineTo(x + s * 0.8, y - s * 0.12);
+      ctx.lineTo(x + s * 0.8, y + s * 0.72);
       ctx.closePath();
-      ctx.fillStyle = hueColor(hue, 0.75, 0.42, 0.95);
+      ctx.fillStyle = tribeColor(t.hue);
       ctx.fill();
-      ctx.strokeStyle = 'rgba(5,8,16,0.9)';
-      ctx.lineWidth = 1.6 * px;
+      ctx.strokeStyle = tribeShade(t.hue);
+      ctx.lineWidth = Math.max(1.5 * px, s * 0.13);
       ctx.stroke();
-      ctx.strokeStyle = hueColor(hue, 0.9, 0.72, 1);
-      ctx.lineWidth = 0.9 * px;
-      ctx.stroke();
-      // campfire
-      const fl = 0.85 + 0.15 * Math.sin(time * 0.012 + t.id * 1.7);
-      ctx.fillStyle = 'rgba(255,214,120,0.95)';
-      ctx.beginPath();
-      ctx.arc(x, y, s * 0.32 * fl, 0, TAU);
-      ctx.fill();
-      // stockpile gauge (log scale, full at ~1000)
-      const stock = Math.max(0, t.stockpile || 0);
-      const frac = Math.min(1, Math.log10(1 + stock) / 3);
-      ctx.lineCap = 'round';
-      ctx.strokeStyle = 'rgba(5,8,16,0.6)';
-      ctx.lineWidth = 2.6 * px;
-      ctx.beginPath();
-      ctx.arc(x, y, s * 1.5, 0, TAU);
-      ctx.stroke();
-      if (frac > 0.005) {
-        ctx.strokeStyle = '#f2c94c';
-        ctx.lineWidth = 1.8 * px;
-        ctx.beginPath();
-        ctx.arc(x, y, s * 1.5, -Math.PI / 2, -Math.PI / 2 + frac * TAU);
-        ctx.stroke();
-      }
-      ctx.lineCap = 'butt';
+      ctx.fillStyle = tribeShade(t.hue);
+      ctx.fillRect(x - s * 0.2, y + s * 0.18, s * 0.4, s * 0.54);
     }
   }
 
+  /** Tribe name and stored food under each camp (screen space); bigger tribes first, overlapping labels skipped. */
   private drawCampLabels(ctx: CanvasRenderingContext2D, sim: Simulation, z: number, vw: number, vh: number): void {
     if (z < 0.33) return;
+    const s = this.campSize(z) * z;
+    const order = this.campOrder;
+    order.length = 0;
+    for (const t of sim.state.tribes) if (t.extinctTick === -1 && Number.isFinite(t.homeX) && Number.isFinite(t.homeY)) order.push(t);
+    order.sort((a, b) => (b.members || 0) - (a.members || 0) || a.id - b.id);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    const px = 1 / z;
-    for (const t of sim.state.tribes) {
-      if (t.extinctTick !== -1) continue;
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = PAL.ink;
+    const second = z >= 0.9;
+    for (const t of order) {
       const sx = this.toSX(t.homeX);
-      const s = Math.max(4.5, 9 * px) * 1.5 * z;
-      const sy = this.toSY(t.homeY) + s + 4;
-      if (sx < -100 || sx > vw + 100 || sy < -30 || sy > vh + 30) continue;
-      ctx.font = '700 11px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
-      ctx.fillStyle = 'rgba(4,7,14,0.8)';
-      ctx.fillText(t.name, sx + 1, sy + 1);
-      ctx.fillStyle = hueColor(t.hue, 0.9, 0.74);
+      const sy = this.toSY(t.homeY) + s * 0.72 + 5;
+      if (sx < -120 || sx > vw + 120 || sy < -40 || sy > vh + 20) continue;
+      ctx.font = `600 12px ${FONT}`;
+      const w = ctx.measureText(t.name).width;
+      const stock = Math.round(Math.max(0, t.stockpile || 0));
+      const line = stock > 0 ? `${stock.toLocaleString('en-US')} food stored` : 'No food stored';
+      const half = Math.max(w, second ? line.length * 5.8 : 0) / 2 + 3;
+      if (!this.painter.reserve(sx - half, sy - 2, sx + half, sy + (second ? 29 : 16))) continue;
+      ctx.lineWidth = 3.2;
+      ctx.strokeText(t.name, sx, sy);
+      ctx.fillStyle = PAL.text;
       ctx.fillText(t.name, sx, sy);
-      if (z >= 1.1) {
-        ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
-        const line = `▣ ${Math.round(t.stockpile || 0)}  ☺ ${t.members || 0}`;
-        ctx.fillStyle = 'rgba(4,7,14,0.8)';
-        ctx.fillText(line, sx + 1, sy + 15);
-        ctx.fillStyle = 'rgba(214,224,242,0.85)';
-        ctx.fillText(line, sx, sy + 14);
+      if (second) {
+        ctx.font = `400 11px ${FONT}`;
+        ctx.lineWidth = 3;
+        ctx.strokeText(line, sx, sy + 15);
+        ctx.fillStyle = '#cbc4b4';
+        ctx.fillText(line, sx, sy + 15);
       }
     }
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
+  }
+
+  /**
+   * Territory edges of the visible tiles (close zoom, without the territory overlay): a thin line in each
+   * tribe's colour on its own side of the border. Returns true when any edge was drawn.
+   */
+  private drawTerritoryEdges(ctx: CanvasRenderingContext2D, sim: Simulation, z: number): boolean {
+    const world = sim.state.world;
+    const W = world.width;
+    const H = world.height;
+    const ter = world.territory;
+    if (!ter || ter.length !== W * H) return false;
+    const ts = world.tileSize;
+    const vr = this.viewRect;
+    const tx0 = Math.max(0, Math.floor(vr.x0 / ts) - 1);
+    const ty0 = Math.max(0, Math.floor(vr.y0 / ts) - 1);
+    const tx1 = Math.min(W - 1, Math.floor(vr.x1 / ts) + 1);
+    const ty1 = Math.min(H - 1, Math.floor(vr.y1 / ts) + 1);
+    if (tx1 < tx0 || ty1 < ty0) return false;
+    const segs = this.edgeSegs;
+    for (const v of segs.values()) v.length = 0;
+    const off = 1.6 / z;
+    const push = (id: number, x0: number, y0: number, x1: number, y1: number) => {
+      let v = segs.get(id);
+      if (!v) {
+        v = [];
+        segs.set(id, v);
+      }
+      v.push(x0, y0, x1, y1);
+    };
+    let any = false;
+    for (let ty = ty0; ty <= ty1; ty++) {
+      const row = ty * W;
+      for (let tx = tx0; tx <= tx1; tx++) {
+        const id = ter[row + tx];
+        if (tx + 1 < W) {
+          const r = ter[row + tx + 1];
+          if (r !== id) {
+            const ex = (tx + 1) * ts;
+            if (id >= 0) push(id, ex - off, ty * ts, ex - off, (ty + 1) * ts);
+            if (r >= 0) push(r, ex + off, ty * ts, ex + off, (ty + 1) * ts);
+            any = true;
+          }
+        }
+        if (ty + 1 < H) {
+          const d = ter[row + W + tx];
+          if (d !== id) {
+            const ey = (ty + 1) * ts;
+            if (id >= 0) push(id, tx * ts, ey - off, (tx + 1) * ts, ey - off);
+            if (d >= 0) push(d, tx * ts, ey + off, (tx + 1) * ts, ey + off);
+            any = true;
+          }
+        }
+      }
+    }
+    if (!any) return false;
+    // solid and faint, so they never read as the dashed enemy lines
+    ctx.lineCap = 'butt';
+    ctx.lineWidth = 1 / z;
+    ctx.setLineDash(this.noDash);
+    ctx.globalAlpha = 0.55;
+    let drawn = false;
+    for (const [id, v] of segs) {
+      if (!v.length) continue;
+      const tr = sim.getTribe(id);
+      if (!tr || tr.extinctTick !== -1) continue;
+      ctx.strokeStyle = tribeColor(tr.hue);
+      ctx.beginPath();
+      for (let i = 0; i < v.length; i += 4) {
+        ctx.moveTo(v[i], v[i + 1]);
+        ctx.lineTo(v[i + 2], v[i + 3]);
+      }
+      ctx.stroke();
+      drawn = true;
+    }
+    ctx.globalAlpha = 1;
+    ctx.setLineDash(this.noDash);
+    return drawn;
+  }
+
+  // ------------------------------------------------------------ connections
+
+  /**
+   * Lines between agents with strong ties (world space, under the bodies). At close zoom: every mother and
+   * child, close friends and bitter enemies among the visible agents (nearby pairs only, capped). At every
+   * zoom: all of the selected agent's ties, drawn wider; the others are dimmed while an agent is selected.
+   * Returns the number of lines drawn.
+   */
+  private drawConnections(ctx: CanvasRenderingContext2D, sim: Simulation, view: ViewOptions, sel: Agent | undefined, z: number): number {
+    this.tieAgents.length = 0;
+    this.tieKinds.length = 0;
+    if (view.showConnections === false) return 0;
+    const px = 1 / z;
+    let count = 0;
+    ctx.lineCap = 'round';
+    ctx.setLineDash(this.noDash);
+    if (z >= DETAIL_ZOOM) {
+      const b = this.bounds;
+      const agents = sim.state.agents;
+      const vis = this.painter.vis;
+      const n = this.painter.visN;
+      const fam = new Path2D();
+      const fr = new Path2D();
+      const en = new Path2D();
+      let nf = 0;
+      let nr = 0;
+      let ne = 0;
+      const L2 = MAX_LINE * MAX_LINE;
+      for (let k = 0; k < n && count < MAX_LINES; k++) {
+        const a = agents[vis[k]];
+        const mid = a.parents ? a.parents[0] : -1;
+        if (mid >= 0) {
+          const m = sim.getAgent(mid);
+          if (m && m.x >= b.x0 && m.x <= b.x1 && m.y >= b.y0 && m.y <= b.y1 && (m.x - a.x) ** 2 + (m.y - a.y) ** 2 <= L2) {
+            fam.moveTo(a.x, a.y);
+            fam.lineTo(m.x, m.y);
+            nf++;
+            count++;
+          }
+        }
+        const rels = a.relationships;
+        if (!rels) continue;
+        for (let i = 0; i < rels.length; i++) {
+          const r = rels[i];
+          const aff = r.affinity;
+          const enemy = aff <= STRONG_ENEMY;
+          if (!enemy && !(r.kin === 0 && aff >= STRONG_FRIEND)) continue;
+          const o = sim.getAgent(r.id);
+          if (!o || o.x < b.x0 || o.x > b.x1 || o.y < b.y0 || o.y > b.y1) continue;
+          if ((o.x - a.x) ** 2 + (o.y - a.y) ** 2 > L2) continue;
+          // a pair both sides list is drawn once, from the lower id
+          if (a.id > o.id && strongTie(o, a.id)) continue;
+          if (enemy) {
+            en.moveTo(a.x, a.y);
+            en.lineTo(o.x, o.y);
+            ne++;
+          } else {
+            fr.moveTo(a.x, a.y);
+            fr.lineTo(o.x, o.y);
+            nr++;
+          }
+          count++;
+        }
+      }
+      const dim = sel ? 0.3 : 1;
+      if (nf) {
+        ctx.globalAlpha = 0.8 * dim;
+        ctx.strokeStyle = TIE.family;
+        ctx.lineWidth = 1.3 * px;
+        ctx.stroke(fam);
+      }
+      if (nr) {
+        ctx.globalAlpha = 0.8 * dim;
+        ctx.strokeStyle = TIE.friend;
+        ctx.lineWidth = 1 * px;
+        ctx.stroke(fr);
+      }
+      if (ne) {
+        ctx.globalAlpha = 0.9 * dim;
+        ctx.strokeStyle = TIE.enemy;
+        ctx.lineWidth = 1.3 * px;
+        ctx.lineCap = 'butt';
+        this.dash[0] = 4 * px;
+        this.dash[1] = 3 * px;
+        ctx.setLineDash(this.dash);
+        ctx.stroke(en);
+        ctx.setLineDash(this.noDash);
+        ctx.lineCap = 'round';
+      }
+      ctx.globalAlpha = 1;
+    }
+    if (sel && view.showRelations !== false) count += this.drawSelectedTies(ctx, sim, sel, z);
+    return count;
+  }
+
+  /** The selected agent's family, friends and enemies: wide lines, flat lower alpha toward agents off screen. */
+  private drawSelectedTies(ctx: CanvasRenderingContext2D, sim: Simulation, a: Agent, z: number): number {
+    const ta = this.tieAgents;
+    const tk = this.tieKinds;
+    const seen = this.tieSeen;
+    seen.clear();
+    seen.add(a.id);
+    const add = (id: number, kind: TieKind) => {
+      if (id < 0 || seen.has(id)) return;
+      const o = sim.getAgent(id);
+      if (!o) return;
+      seen.add(id);
+      ta.push(o);
+      tk.push(kind);
+    };
+    // personal grudges first (an enemy sibling is shown as an enemy), then family, then friends
+    const rels = a.relationships ?? [];
+    for (const r of rels) if (r.affinity <= ENEMY) add(r.id, ENEMIES);
+    if (a.parents) {
+      add(a.parents[0], FAMILY);
+      add(a.parents[1], FAMILY);
+    }
+    if (a.children) for (const c of a.children) add(c, FAMILY);
+    for (const r of rels) if (r.kin > 0) add(r.id, FAMILY);
+    for (const r of rels) if (r.kin === 0 && r.affinity >= FRIEND) add(r.id, FRIENDS);
+    if (!ta.length) return 0;
+    const px = 1 / z;
+    const vr = this.viewRect;
+    for (let pass = 0; pass < 2; pass++) {
+      // pass 0: ties to agents off screen (flat, lower alpha); pass 1: ties on screen
+      for (let kind = 0; kind < 3; kind++) {
+        ctx.beginPath();
+        let any = false;
+        for (let i = 0; i < ta.length; i++) {
+          if (tk[i] !== kind) continue;
+          const o = ta[i];
+          const on = o.x >= vr.x0 && o.x <= vr.x1 && o.y >= vr.y0 && o.y <= vr.y1;
+          if ((pass === 1) !== on) continue;
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(o.x, o.y);
+          any = true;
+        }
+        if (!any) continue;
+        ctx.globalAlpha = pass === 0 ? 0.5 : 1;
+        ctx.strokeStyle = TIE_COLOR[kind];
+        ctx.lineWidth = (kind === FRIENDS ? 1.6 : 2) * px;
+        if (kind === ENEMIES) {
+          ctx.lineCap = 'butt';
+          this.dash[0] = 5 * px;
+          this.dash[1] = 3.5 * px;
+          ctx.setLineDash(this.dash);
+        }
+        ctx.stroke();
+        if (kind === ENEMIES) {
+          ctx.setLineDash(this.noDash);
+          ctx.lineCap = 'round';
+        }
+      }
+    }
+    ctx.globalAlpha = 1;
+    return ta.length;
+  }
+
+  /** Rings around the selected agent's partners that are on screen (world space, over the bodies). */
+  private drawPartnerRings(ctx: CanvasRenderingContext2D, z: number): void {
+    const px = 1 / z;
+    const ta = this.tieAgents;
+    const tk = this.tieKinds;
+    const vr = this.viewRect;
+    ctx.setLineDash(this.noDash);
+    for (let kind = 0; kind < 3; kind++) {
+      ctx.beginPath();
+      let any = false;
+      for (let i = 0; i < ta.length; i++) {
+        if (tk[i] !== kind) continue;
+        const o = ta[i];
+        if (o.x < vr.x0 || o.x > vr.x1 || o.y < vr.y0 || o.y > vr.y1) continue;
+        const r = Math.max(agentRadius(o), 1.6 * px) * 1.1 + 3 * px;
+        ctx.moveTo(o.x + r, o.y);
+        ctx.arc(o.x, o.y, r, 0, TAU);
+        any = true;
+      }
+      if (!any) continue;
+      ctx.strokeStyle = PAL.ink;
+      ctx.lineWidth = 3.2 * px;
+      ctx.stroke();
+      ctx.strokeStyle = TIE_COLOR[kind];
+      ctx.lineWidth = 1.6 * px;
+      ctx.stroke();
+    }
+  }
+
+  /** Small dots at the edge of the map area where a tie of the selected agent leaves the view (screen space). */
+  private drawTieMarkers(ctx: CanvasRenderingContext2D, a: Agent, vw: number, vh: number, ins: { top: number; right: number; bottom: number; left: number }): void {
+    const ax = this.toSX(a.x);
+    const ay = this.toSY(a.y);
+    const m = 8;
+    const L = ins.left + m;
+    const T = ins.top + m;
+    const R = vw - ins.right - m;
+    const B = vh - ins.bottom - m;
+    if (ax < L || ay < T || ax > R || ay > B) return;
+    const ta = this.tieAgents;
+    const tk = this.tieKinds;
+    for (let i = 0; i < ta.length; i++) {
+      const o = ta[i];
+      const ox = this.toSX(o.x);
+      const oy = this.toSY(o.y);
+      if (ox >= L && oy >= T && ox <= R && oy <= B) continue;
+      // clip the segment a→o to the inset map area
+      const dx = ox - ax;
+      const dy = oy - ay;
+      let t = 1;
+      if (dx > 0) t = Math.min(t, (R - ax) / dx);
+      else if (dx < 0) t = Math.min(t, (L - ax) / dx);
+      if (dy > 0) t = Math.min(t, (B - ay) / dy);
+      else if (dy < 0) t = Math.min(t, (T - ay) / dy);
+      const ex = ax + dx * t;
+      const ey = ay + dy * t;
+      ctx.beginPath();
+      ctx.arc(ex, ey, 3.5, 0, TAU);
+      ctx.fillStyle = TIE_COLOR[tk[i]];
+      ctx.fill();
+      ctx.strokeStyle = PAL.ink;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+  }
+
+  /**
+   * Legend for the lines on the map, above the minimap (screen space), while connection lines are drawn:
+   * the three connection styles, plus the territory edge when territory edges are on the map too.
+   */
+  private drawConnectionsLegend(
+    ctx: CanvasRenderingContext2D,
+    lines: boolean,
+    edges: boolean,
+    ins: { top: number; right: number; bottom: number; left: number },
+    vh: number,
+  ): void {
+    const r = this.connectionsLegendRect;
+    r.visible = false;
+    if (!lines) return;
+    const pad = 8;
+    const row = 17;
+    const title = 14;
+    const rows = 3 + (edges ? 1 : 0);
+    const gap = edges ? 5 : 0;
+    ctx.font = `400 11px ${FONT}`;
+    let tw = ctx.measureText('Enemies').width;
+    if (edges) tw = Math.max(tw, ctx.measureText(EDGE_LABEL).width);
+    const w = Math.max(112, Math.ceil(pad + 30 + tw + pad + 2));
+    const h = pad * 2 + title + row * rows + gap;
+    const mm = this.minimap.rect;
+    const bottom = mm.visible ? mm.y - 4 - 8 : vh - ins.bottom - 14;
+    const x = ins.left + 14 - (mm.visible ? 4 : 0);
+    const y = bottom - h;
+    if (y < ins.top + 8) return;
+    flatPanel(ctx, x, y, w, h);
+    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'left';
+    ctx.font = `600 11px ${FONT}`;
+    ctx.fillStyle = PAL.text;
+    ctx.fillText('Connections', x + pad, y + pad + 6);
+    const labels = ['Family', 'Friends', 'Enemies'];
+    ctx.font = `400 11px ${FONT}`;
+    for (let i = 0; i < 3; i++) {
+      const yy = y + pad + title + row * i + row / 2 + 1;
+      ctx.beginPath();
+      ctx.moveTo(x + pad, yy);
+      ctx.lineTo(x + pad + 22, yy);
+      ctx.strokeStyle = TIE_COLOR[i];
+      ctx.lineWidth = i === FRIENDS ? 1.2 : 1.8;
+      if (i === ENEMIES) {
+        ctx.lineCap = 'butt';
+        this.dash[0] = 4;
+        this.dash[1] = 3;
+        ctx.setLineDash(this.dash);
+      } else ctx.lineCap = 'round';
+      ctx.stroke();
+      ctx.setLineDash(this.noDash);
+      ctx.fillStyle = PAL.muted;
+      ctx.fillText(labels[i], x + pad + 30, yy);
+    }
+    if (edges) {
+      // a short run of tile edges, the shape territory edges have on the map
+      const yy = y + pad + title + row * 3 + gap + row / 2 + 1;
+      const x0 = Math.round(x + pad) + 0.5;
+      const y0 = Math.round(yy) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(x0, y0 + 4);
+      ctx.lineTo(x0 + 7, y0 + 4);
+      ctx.lineTo(x0 + 7, y0);
+      ctx.lineTo(x0 + 15, y0);
+      ctx.lineTo(x0 + 15, y0 - 4);
+      ctx.lineTo(x0 + 22, y0 - 4);
+      ctx.strokeStyle = PAL.muted;
+      ctx.lineWidth = 1;
+      ctx.lineCap = 'butt';
+      ctx.lineJoin = 'miter';
+      ctx.stroke();
+      ctx.font = `400 11px ${FONT}`;
+      ctx.fillStyle = PAL.muted;
+      ctx.fillText(EDGE_LABEL, x + pad + 30, yy);
+    }
+    ctx.textBaseline = 'alphabetic';
+    r.x = x;
+    r.y = y;
+    r.w = w;
+    r.h = h;
+    r.visible = true;
   }
 
   // ------------------------------------------------------------ selection
@@ -476,39 +858,41 @@ export class Renderer {
     if (this.trailLen < TRAIL_N) this.trailLen++;
   }
 
-  /** Vision radius and motion trail of the selected agent (world space, under agents). */
-  private drawSelectionWorld(ctx: CanvasRenderingContext2D, a: Agent, view: ViewOptions, z: number, time: number): void {
+  /** Vision radius, trail and planned route of the selected agent (world space, under the agents). */
+  private drawSelectionWorld(ctx: CanvasRenderingContext2D, a: Agent, view: ViewOptions, z: number): void {
     const px = 1 / z;
     if (view.showVision && a.traits && a.traits.perception > 0) {
       const R = a.traits.perception;
-      ctx.fillStyle = 'rgba(120,180,255,0.07)';
       ctx.beginPath();
       ctx.arc(a.x, a.y, R, 0, TAU);
+      ctx.globalAlpha = 0.05;
+      ctx.fillStyle = PAL.text;
       ctx.fill();
-      ctx.strokeStyle = 'rgba(160,205,255,0.6)';
-      ctx.lineWidth = 1.2 * px;
+      ctx.globalAlpha = 0.6;
+      ctx.strokeStyle = PAL.text;
+      ctx.lineWidth = px;
       this.dash[0] = 5 * px;
       this.dash[1] = 4 * px;
       ctx.setLineDash(this.dash);
-      ctx.lineDashOffset = -time * 0.006 * px;
       ctx.stroke();
       ctx.setLineDash(this.noDash);
-      ctx.lineDashOffset = 0;
+      ctx.globalAlpha = 1;
     }
     if (view.showTrails && this.trailLen > 1) {
+      // where it has been: a light line, fainter toward the older end (flat steps)
       const tr = this.trail;
       const n = this.trailLen;
       const start = (this.trailHead - n + TRAIL_N) % TRAIL_N;
-      ctx.strokeStyle = hueColor(a.traits?.hue ?? 200, 0.9, 0.72);
-      ctx.lineWidth = 2 * px;
+      ctx.strokeStyle = PAL.text;
+      ctx.lineWidth = 1.5 * px;
       ctx.lineJoin = 'round';
       ctx.lineCap = 'round';
-      const chunks = 8;
+      const chunks = 4;
       for (let c = 0; c < chunks; c++) {
         const i0 = Math.floor((c * (n - 1)) / chunks);
         const i1 = Math.floor(((c + 1) * (n - 1)) / chunks);
         if (i1 <= i0) continue;
-        ctx.globalAlpha = 0.08 + 0.8 * ((c + 1) / chunks) ** 1.5;
+        ctx.globalAlpha = 0.18 + 0.14 * c;
         ctx.beginPath();
         for (let i = i0; i <= i1; i++) {
           const k = ((start + i) % TRAIL_N) * 2;
@@ -524,170 +908,91 @@ export class Renderer {
     const rt = a.route;
     // (only while the agent is actually on the move: a route left over after arriving is not shown)
     if (view.showTrails && rt && !rt.fail && rt.pts.length >= 2 && rt.i < rt.pts.length && (a.vx !== 0 || a.vy !== 0)) {
-      ctx.strokeStyle = 'rgba(255,214,120,0.85)';
-      ctx.lineWidth = 1.6 * px;
       ctx.lineJoin = 'round';
-      ctx.lineCap = 'round';
-      this.dash[0] = 6 * px;
-      this.dash[1] = 5 * px;
-      ctx.setLineDash(this.dash);
-      ctx.lineDashOffset = -time * 0.01 * px;
+      ctx.lineCap = 'butt';
       ctx.beginPath();
       ctx.moveTo(a.x, a.y);
       for (let k = rt.i; k + 1 < rt.pts.length; k += 2) ctx.lineTo(rt.pts[k], rt.pts[k + 1]);
       ctx.lineTo(rt.gx, rt.gy);
+      ctx.strokeStyle = PAL.ink;
+      ctx.lineWidth = 3.2 * px;
+      ctx.globalAlpha = 0.45;
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = PAL.ochre;
+      ctx.lineWidth = 1.6 * px;
+      this.dash[0] = 6 * px;
+      this.dash[1] = 4 * px;
+      ctx.setLineDash(this.dash);
       ctx.stroke();
       ctx.setLineDash(this.noDash);
-      ctx.lineDashOffset = 0;
-      ctx.fillStyle = 'rgba(255,214,120,0.95)';
+      ctx.fillStyle = PAL.ochre;
+      ctx.beginPath();
       for (let k = rt.i; k + 1 < rt.pts.length - 2; k += 2) {
-        ctx.beginPath();
-        ctx.arc(rt.pts[k], rt.pts[k + 1], 2.2 * px, 0, TAU);
-        ctx.fill();
+        ctx.moveTo(rt.pts[k] + 2.4 * px, rt.pts[k + 1]);
+        ctx.arc(rt.pts[k], rt.pts[k + 1], 2.4 * px, 0, TAU);
       }
+      ctx.fill();
       ctx.beginPath(); // goal marker
-      ctx.arc(rt.gx, rt.gy, 4 * px, 0, TAU);
-      ctx.lineWidth = 1.5 * px;
+      ctx.arc(rt.gx, rt.gy, 4.5 * px, 0, TAU);
+      ctx.strokeStyle = PAL.ochre;
+      ctx.lineWidth = 1.6 * px;
       ctx.stroke();
     }
   }
 
-  /** Lines (and partner rings) from the selected agent to its kin, friends and enemies (world space, over agents). */
-  private drawRelations(ctx: CanvasRenderingContext2D, sim: Simulation, a: Agent, z: number): void {
-    if (!a.relationships || !a.relationships.length) return;
-    const px = 1 / z;
-    ctx.setLineDash(this.noDash);
-    ctx.lineCap = 'round';
-    for (const r of a.relationships) {
-      const o = sim.getAgent(r.id);
-      if (!o) continue;
-      const aff = Number.isFinite(r.affinity) ? r.affinity : 0;
-      let col: string;
-      let alpha: number;
-      if (r.kin > 0) {
-        col = '#f2c14e';
-        alpha = 0.55 + 0.35 * Math.max(0, aff);
-      } else if (aff >= 0.12) {
-        col = '#5fe08f';
-        alpha = 0.3 + 0.6 * aff;
-      } else if (aff <= -0.12) {
-        col = '#ff5a5a';
-        alpha = 0.3 + 0.6 * -aff;
-      } else continue;
-      ctx.globalAlpha = Math.min(1, alpha);
-      ctx.strokeStyle = col;
-      ctx.lineWidth = (r.kin > 0 ? 1.8 : 1.4) * px;
-      if (r.kin > 0) {
-        this.dash[0] = 4 * px;
-        this.dash[1] = 3 * px;
-        ctx.setLineDash(this.dash);
-      }
-      ctx.beginPath();
-      ctx.moveTo(a.x, a.y);
-      ctx.lineTo(o.x, o.y);
-      ctx.stroke();
-      if (r.kin > 0) ctx.setLineDash(this.noDash);
-      ctx.fillStyle = col;
-      ctx.beginPath();
-      ctx.arc(o.x, o.y, agentRadius(o) + 2.5 * px, 0, TAU);
-      ctx.lineWidth = 1.4 * px;
-      ctx.stroke();
-    }
-    ctx.globalAlpha = 1;
-  }
-
-  /** Highlight ring, name tag and vitals for the hovered/selected agent (screen space). */
-  private drawAgentFocus(ctx: CanvasRenderingContext2D, sim: Simulation, a: Agent, selected: boolean, time: number): void {
+  /** Ring around the hovered (light) or selected (ochre) agent (screen space). */
+  private drawRing(ctx: CanvasRenderingContext2D, a: Agent, selected: boolean): void {
     const sx = this.toSX(a.x);
     const sy = this.toSY(a.y);
     const vw = this.camera.viewW;
     const vh = this.camera.viewH;
-    if (sx < -60 || sy < -60 || sx > vw + 60 || sy > vh + 60) return;
-    const rs = Math.max(2, agentRadius(a) * this.camZ);
-    if (selected) {
-      const pulse = 1 + 0.12 * Math.sin(time * 0.006);
-      ctx.strokeStyle = 'rgba(255,255,255,0.95)';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(sx, sy, rs + 4 * pulse, 0, TAU);
-      ctx.stroke();
-      ctx.strokeStyle = hueColor(a.traits?.hue ?? 200, 0.9, 0.7, 0.9);
-      ctx.lineWidth = 1.5;
-      this.dash[0] = 5;
-      this.dash[1] = 4;
-      ctx.setLineDash(this.dash);
-      ctx.lineDashOffset = -time * 0.02;
-      ctx.beginPath();
-      ctx.arc(sx, sy, rs + 10, 0, TAU);
-      ctx.stroke();
-      ctx.setLineDash(this.noDash);
-      ctx.lineDashOffset = 0;
-    } else {
-      ctx.strokeStyle = 'rgba(255,255,255,0.75)';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.arc(sx, sy, rs + 3.5, 0, TAU);
-      ctx.stroke();
-    }
-    // name tag
-    const tribe = a.tribeId >= 0 ? sim.getTribe(a.tribeId) : undefined;
-    ctx.font = '600 11px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
-    const name = a.name || `#${a.id}`;
-    const sub = `${tribe ? tribe.name : 'loner'} · ${a.action}`;
-    const nw = ctx.measureText(name).width;
-    ctx.font = '10px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
-    const sw = ctx.measureText(sub).width;
-    const w = Math.max(nw, sw, 44) + 14;
-    const h = 38;
-    let x = sx - w / 2;
-    let y = sy - rs - (selected ? 16 : 12) - h;
-    if (y < 4) y = sy + rs + 16;
-    x = Math.max(4, Math.min(vw - w - 4, x));
-    ctx.fillStyle = 'rgba(7,11,22,0.85)';
+    if (sx < -40 || sy < -40 || sx > vw + 40 || sy > vh + 40) return;
+    const rs = Math.max(1.6, agentRadius(a) * this.camZ) * 1.1;
+    ctx.setLineDash(this.noDash);
     ctx.beginPath();
-    ctx.roundRect ? ctx.roundRect(x, y, w, h, 6) : ctx.rect(x, y, w, h);
-    ctx.fill();
-    ctx.strokeStyle = tribe ? hueColor(tribe.hue, 0.8, 0.6, 0.7) : 'rgba(140,170,255,0.3)';
-    ctx.lineWidth = 1;
+    ctx.arc(sx, sy, rs + (selected ? 4.5 : 3.5), 0, TAU);
+    ctx.strokeStyle = PAL.ink;
+    ctx.lineWidth = selected ? 4.4 : 3.4;
     ctx.stroke();
-    ctx.fillStyle = hueColor(a.traits?.hue ?? 200, 0.75, 0.72);
-    ctx.font = '600 11px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
-    ctx.textBaseline = 'top';
-    ctx.fillText(name, x + 7, y + 4);
-    ctx.fillStyle = 'rgba(200,212,235,0.75)';
-    ctx.font = '10px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
-    ctx.fillText(sub, x + 7, y + 17);
-    ctx.textBaseline = 'alphabetic';
-    miniBars(ctx, a, x + w / 2, y + h - 7, w - 14);
+    ctx.strokeStyle = selected ? PAL.ochre : PAL.text;
+    ctx.lineWidth = selected ? 2.2 : 1.4;
+    ctx.stroke();
   }
 
-  private drawBrush(ctx: CanvasRenderingContext2D, br: NonNullable<ViewOptions['brush']>, z: number, time: number): void {
+  private drawBrush(ctx: CanvasRenderingContext2D, br: NonNullable<ViewOptions['brush']>, z: number): void {
     if (!Number.isFinite(br.x) || !Number.isFinite(br.y)) return;
     const px = 1 / z;
     const R = Math.max(0.5, br.radius || 0);
-    ctx.fillStyle = br.color || '#ffffff';
-    ctx.strokeStyle = br.color || '#ffffff';
-    ctx.globalAlpha = 0.13;
+    ctx.setLineDash(this.noDash);
+    ctx.lineCap = 'butt';
     ctx.beginPath();
     ctx.arc(br.x, br.y, R, 0, TAU);
-    ctx.fill();
-    ctx.globalAlpha = 0.95;
-    ctx.lineWidth = 1.6 * px;
-    this.dash[0] = 6 * px;
-    this.dash[1] = 4 * px;
-    ctx.setLineDash(this.dash);
-    ctx.lineDashOffset = -time * 0.012 * px;
-    ctx.stroke();
-    ctx.setLineDash(this.noDash);
-    ctx.lineDashOffset = 0;
-    ctx.globalAlpha = 0.8;
-    ctx.beginPath();
-    const c = 5 * px;
+    const c = 4 * px;
     ctx.moveTo(br.x - c, br.y);
     ctx.lineTo(br.x + c, br.y);
     ctx.moveTo(br.x, br.y - c);
     ctx.lineTo(br.x, br.y + c);
+    ctx.globalAlpha = 0.5;
+    ctx.strokeStyle = PAL.ink;
+    ctx.lineWidth = 3 * px;
+    ctx.stroke();
+    ctx.globalAlpha = 0.95;
+    ctx.strokeStyle = PAL.text;
+    ctx.lineWidth = px;
     ctx.stroke();
     ctx.globalAlpha = 1;
   }
+}
+
+/** True when `o` counts `id` as a close friend (not kin) or a bitter enemy (the network thresholds). */
+function strongTie(o: Agent, id: number): boolean {
+  const rels = o.relationships;
+  if (!rels) return false;
+  for (let i = 0; i < rels.length; i++) {
+    const r = rels[i];
+    if (r.id !== id) continue;
+    return r.affinity <= STRONG_ENEMY || (r.kin === 0 && r.affinity >= STRONG_FRIEND);
+  }
+  return false;
 }

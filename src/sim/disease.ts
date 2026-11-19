@@ -141,19 +141,19 @@ function trackEpidemic(sim: Simulation, st: EpidemicState, infected: number): vo
   if (infected > st.peak) st.peak = infected;
   if (!st.active && infected > threshold) {
     st.active = true;
-    sim.log('disease', 'bad', `Epidemic spreading: ${infected} infected`);
+    sim.log('disease', 'bad', `Epidemic spreading: ${infected} infected.`);
   }
   if (st.active && !st.pandemic) {
     const pop = sim.state.agents.length;
     if (infected > Math.max(50, 0.25 * pop)) {
       st.pandemic = true;
       const pct = pop > 0 ? Math.round((100 * infected) / pop) : 100;
-      sim.log('disease', 'major', `Pandemic: ${infected} infected (${pct}% of the population)`);
+      sim.log('disease', 'major', `Pandemic: ${infected} infected, ${pct}% of the population.`);
     }
   }
   if (infected === 0) {
     if (st.active) {
-      sim.log('disease', 'good', `The epidemic has burned out — ${st.deaths} died (peak ${st.peak} infected)`);
+      sim.log('disease', 'good', `The epidemic is over. ${st.deaths === 0 ? 'No one' : st.deaths} died; at its peak ${st.peak} were infected.`);
     }
     st.active = false;
     st.pandemic = false;
@@ -226,7 +226,7 @@ function recover(sim: Simulation, a: Agent): void {
   a.virulence = 0;
   a.diseaseHp = undefined;
   a.immuneTicks = Math.round(DISEASE.immuneMin + sim.rng.next() * (DISEASE.immuneMax - DISEASE.immuneMin));
-  pushHistory(sim, a, 'Recovered from illness (now immune)');
+  pushHistory(sim, a, 'Recovered from illness (immune for a while)');
 }
 
 /** Transmission, progression, recovery, immunity, disease deaths. */

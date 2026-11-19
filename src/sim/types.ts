@@ -216,11 +216,17 @@ export interface Agent {
   /** Planned route around obstacles (steering.ts / pathfinding.ts); absent while steering straight. */
   route?: AgentRoute;
   /**
-   * A migrant's chosen destination (brain.ts): hungry on land grazed bare, it treks toward greener land and
-   * keeps this goal through detours (a bite of scraps, a fight, sleep) until it arrives, finds lush land,
-   * is fed, or the trek expires at tick `until`.
+   * A committed journey (brain.ts) that holds through detours (a bite to eat, a fight, a night's sleep) until it
+   * ends or expires at tick `until`. Every trek object has all five keys, in this order.
+   * - kind 'migrate' (tribe NONE): hungry on land grazed bare, the agent heads for greener land at (x,y) until it
+   *   arrives, finds lush land or is fed.
+   * - kind 'raid': the agent heads for the camp of tribe `tribe` (x,y follow the camp), crossing fords on its route
+   *   and sleeping where it stops at night. Out to an enemy camp it plunders the stockpile; once loaded, hurt, the
+   *   war over or the store empty it turns for home, and `tribe` becomes its own tribe (brain.raidLeg tells the
+   *   two legs apart). The way home ends near camp.
+   * Saves made before `kind` existed hold migrations only (kind and tribe absent).
    */
-  trek?: { x: number; y: number; until: number };
+  trek?: { x: number; y: number; until: number; kind?: 'migrate' | 'raid'; tribe?: TribeId };
   /** Health right after the last disease update (disease.ts; infection suppresses natural healing). */
   diseaseHp?: number;
 }
@@ -517,7 +523,17 @@ export interface SimState {
    * pairs whose "first blood" was already announced. Saved so a loaded run logs exactly what the original
    * would have; rebuilt from tribe relations when absent (older saves).
    */
-  diplomacy?: { wars: number[]; alliances: number[]; feuds: number[] };
+  diplomacy?: {
+    wars: number[];
+    alliances: number[];
+    feuds: number[];
+    /**
+     * Tribe pairs (pair keys) with an old rivalry (a scenario's `rivalries`, inherited by daughter tribes): their
+     * enmity cools much more slowly than other relations, and the rivalry ends with peace. Unlike the other lists
+     * this one shapes the run (social.ts), so it is part of hash(). Absent = none.
+     */
+    rivals?: number[];
+  };
   /** Epidemic log bookkeeping (disease.ts): saved so a loaded run reports the same deaths and peak. */
   epidemic?: { fresh: boolean; active: boolean; pandemic: boolean; deaths: number; peak: number };
 }
@@ -557,4 +573,10 @@ export interface ScenarioDef {
   world: WorldGenOptions;
   populations: SpawnSpec[];
   scheduled: ScheduledEvent[];
+  /**
+   * Old rivalries between founding tribes, by tribe name (Simulation.create applies them once the populations
+   * have spawned): `relation` (-1..1) is the starting attitude of the two tribes toward each other, and the
+   * enmity cools slowly (social.ts: SOCIAL_TUNING.rivalDrift). Optional.
+   */
+  rivalries?: { a: string; b: string; relation: number }[];
 }

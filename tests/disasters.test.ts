@@ -72,7 +72,7 @@ describe('disasters: climate effects', () => {
     at(sim, 600);
     expect(d.active).toBe(false);
     for (let i = 0; i < w.climateMod.length; i++) if (w.climateMod[i] !== 1) throw new Error(`climateMod[${i}] = ${w.climateMod[i]}`);
-    expect(sim.state.events.some((e) => e.message.includes('drought has broken'))).toBe(true);
+    expect(sim.state.events.some((e) => e.message.includes('The drought is over'))).toBe(true);
 
     at(sim, 650);
     expect(sim.state.disasters).toContain(d); // kept for render fade-out

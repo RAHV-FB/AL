@@ -1,16 +1,72 @@
-// OWNER: Rendering agent.
+// OWNER: map ground engineer (terrainLayer.ts, camera.ts, minimap.ts, overlays.ts).
 /**
- * Cached ground layers:
- *  - `base`  (PX px per tile): terrain colour, water depth, shoreline foam, grain. Static.
- *  - `veg`   (1 px per tile):  vegetation density/colour from food, fertility & season. Dynamic.
- *  - `shade` (PX px per tile): hillshade from elevation + canopy/rock texture. Static.
- * Static layers rebuild only when `world.terrainVersion` changes, and then only the dirty
- * rectangle of tiles that actually changed (cheap while painting terrain).
+ * Ground renderer: crisp at every zoom, with detail that appears as you zoom in.
+ *
+ * Geometry. The ground is the simulation's tile grid, drawn as flat colours. A tile corner is
+ * rounded off (radius half a tile) when the tile's horizontal, vertical and diagonal neighbours
+ * at that corner all share another terrain type, so coasts and terrain borders read as smooth
+ * shapes while every tile still shows its own terrain and food. Water meets land along a thin
+ * lighter shoreline.
+ *
+ * Detail by device pixels per tile (S):
+ *   S <= OV        overview: the whole world cached at OV px per tile (8 for normal worlds).
+ *                  Also the minimap thumbnail and the fallback while closer levels are painted.
+ *   OV < S <= 128  chunks: 512 px canvases cached at L = 16, 32, 64 or 128 px per tile (the
+ *                  smallest L >= S), drawn at 0.5x to 1x, never enlarged. Plants, tree crowns,
+ *                  stones and speckles appear from L = 16 on.
+ *   S > 128        direct: the few visible tiles are drawn as vectors every frame.
+ * Plants follow each tile's food (count and size), so grazed land looks bare.
+ *
+ * Every cached canvas remembers a key per tile (terrain, food level, dryness, corner and shore
+ * masks, elevation band). When keys change only those tiles are repainted, clipped to their
+ * squares; repaints and new chunks share a per-frame time budget. A season change repaints
+ * cached canvases gradually within the same budget.
  */
 import { TERRAIN_INFO } from '../sim/constants';
 import { TERRAIN, type EnvState, type TerrainType, type WorldState } from '../sim/types';
 
-export const PX = 4;
+/** Overview resolution in px per tile for normal world sizes (smaller for very large worlds). */
+export const PX = 8;
+
+/** Visible world rectangle and CSS px per world unit (optional 4th argument of draw). */
+export interface GroundView {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+  zoom: number;
+}
+
+const LEVELS = [16, 32, 64, 128];
+const CHUNK_PX = 512;
+const DIRECT_FROM = 128;
+/** Per-frame time for repainting cached canvases and painting new chunks (ms). */
+const BUDGET_MS = 3;
+/**
+ * Per-frame pixel budget for the same work, in 512x512 canvas equivalents. The browser rasterises
+ * canvas drawing later (when the canvas is drawn), so the time budget alone does not see that cost.
+ */
+const BUDGET_AREA = 1.25;
+const AREA_UNIT = CHUNK_PX * CHUNK_PX;
+const CACHE_LIMIT = 160 * 1024 * 1024;
+const HALF_PI = Math.PI / 2;
+const KEY_VALID = 1 << 24;
+/** Key bits that change only with terrain edits: type, elevation band, corner and shore masks. */
+const KEY_STATIC = 7 | (7 << 8) | (15 << 11) | (15 << 15);
+
+const DEEP = TERRAIN.DeepWater;
+const WATER = TERRAIN.Water;
+const SAND = TERRAIN.Sand;
+const GRASS = TERRAIN.Grass;
+const FOREST = TERRAIN.Forest;
+const DESERT = TERRAIN.Desert;
+const ROCK = TERRAIN.Rock;
+const WALL = TERRAIN.Wall;
+
+const MAX_FOOD: number[] = [];
+for (let t = 0; t < 256; t++) MAX_FOOD[t] = TERRAIN_INFO[t as TerrainType]?.maxFood ?? 0;
+const IS_WATER: boolean[] = [];
+for (let t = 0; t < 256; t++) IS_WATER[t] = t === DEEP || t === WATER;
 
 function hash3(x: number, y: number, s: number): number {
   let h = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263) ^ Math.imul(s | 0, 1442695041);
@@ -19,21 +75,192 @@ function hash3(x: number, y: number, s: number): number {
   return (h >>> 0) / 4294967296;
 }
 
-function vnoise(x: number, y: number, s: number): number {
-  const xi = Math.floor(x);
-  const yi = Math.floor(y);
-  const xf = x - xi;
-  const yf = y - yi;
-  const u = xf * xf * (3 - 2 * xf);
-  const v = yf * yf * (3 - 2 * yf);
-  const a = hash3(xi, yi, s);
-  const b = hash3(xi + 1, yi, s);
-  const c = hash3(xi, yi + 1, s);
-  const d = hash3(xi + 1, yi + 1, s);
-  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+// ------------------------------------------------------------------ palette
+
+type RGB = readonly [number, number, number];
+
+interface SeasonPal {
+  grass: RGB;
+  grassBare: RGB;
+  forest: RGB;
+  forestBare: RGB;
+  tuft: RGB;
+  tuftLight: RGB;
+  crown: RGB;
+  crownShade: RGB;
+  shrub: RGB;
 }
 
-const isWater = (t: number) => t === TERRAIN.Water || t === TERRAIN.DeepWater;
+// spring, summer, autumn, winter: muted greens, dry earth, no yellow cast
+const SEASONS: SeasonPal[] = [
+  {
+    grass: [104, 136, 76],
+    grassBare: [140, 127, 96],
+    forest: [64, 94, 60],
+    forestBare: [102, 96, 74],
+    tuft: [80, 114, 60],
+    tuftLight: [132, 158, 98],
+    crown: [74, 110, 66],
+    crownShade: [46, 70, 46],
+    shrub: [98, 120, 74],
+  },
+  {
+    grass: [110, 134, 72],
+    grassBare: [146, 130, 96],
+    forest: [62, 90, 56],
+    forestBare: [104, 96, 72],
+    tuft: [88, 114, 58],
+    tuftLight: [140, 156, 94],
+    crown: [72, 104, 60],
+    crownShade: [46, 68, 42],
+    shrub: [104, 118, 70],
+  },
+  {
+    grass: [120, 124, 86],
+    grassBare: [140, 124, 96],
+    forest: [80, 88, 62],
+    forestBare: [106, 96, 74],
+    tuft: [104, 108, 70],
+    tuftLight: [150, 148, 106],
+    crown: [122, 106, 66],
+    crownShade: [78, 68, 46],
+    shrub: [120, 112, 72],
+  },
+  {
+    grass: [116, 124, 108],
+    grassBare: [128, 122, 108],
+    forest: [62, 80, 68],
+    forestBare: [96, 94, 84],
+    tuft: [98, 108, 94],
+    tuftLight: [146, 152, 138],
+    crown: [66, 88, 74],
+    crownShade: [44, 60, 52],
+    shrub: [104, 112, 98],
+  },
+];
+
+const C_DEEP: RGB = [46, 80, 104];
+const C_WATER: RGB = [61, 102, 128];
+const C_SAND: RGB = [184, 167, 126];
+const C_DESERT: RGB = [166, 143, 104];
+const C_ROCK: RGB = [121, 116, 107];
+const C_ROCK_HIGH: RGB = [156, 151, 142];
+const C_WALL: RGB = [98, 92, 84];
+const C_DRY: RGB = [150, 133, 98];
+
+const CSS_SHORE = 'rgba(178,204,216,0.9)';
+const CSS_SAND_DARK = 'rgb(160,143,104)';
+const CSS_SAND_LIGHT = 'rgb(206,192,154)';
+const CSS_DESERT_DARK = 'rgb(140,118,84)';
+const CSS_DESERT_LIGHT = 'rgb(190,170,130)';
+const CSS_STONE = 'rgb(150,145,135)';
+const CSS_STONE_SHADE = 'rgb(88,84,78)';
+const CSS_MORTAR = 'rgb(62,58,54)';
+
+/** Ground brightness of grass/forest by food level q (0 bare .. 7 bloom). */
+const FOOD_MIX = [0, 0.3, 0.5, 0.66, 0.8, 0.92, 1, 1];
+
+function mix(a: RGB, b: RGB, t: number, out: number[]): number[] {
+  out[0] = a[0] + (b[0] - a[0]) * t;
+  out[1] = a[1] + (b[1] - a[1]) * t;
+  out[2] = a[2] + (b[2] - a[2]) * t;
+  return out;
+}
+
+function mixPal(a: SeasonPal, b: SeasonPal, t: number): SeasonPal {
+  const m = (x: RGB, y: RGB): RGB => [x[0] + (y[0] - x[0]) * t, x[1] + (y[1] - x[1]) * t, x[2] + (y[2] - x[2]) * t];
+  return {
+    grass: m(a.grass, b.grass),
+    grassBare: m(a.grassBare, b.grassBare),
+    forest: m(a.forest, b.forest),
+    forestBare: m(a.forestBare, b.forestBare),
+    tuft: m(a.tuft, b.tuft),
+    tuftLight: m(a.tuftLight, b.tuftLight),
+    crown: m(a.crown, b.crown),
+    crownShade: m(a.crownShade, b.crownShade),
+    shrub: m(a.shrub, b.shrub),
+  };
+}
+
+const css = (c: ArrayLike<number>): string => `rgb(${Math.round(c[0])},${Math.round(c[1])},${Math.round(c[2])})`;
+
+// 16 fixed permutations of the 9 plant cells (3x3) of a tile
+const PERMS: Uint8Array[] = [];
+for (let p = 0; p < 16; p++) {
+  const a = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+  for (let i = 8; i > 0; i--) {
+    const j = Math.floor(hash3(p, i, 91) * (i + 1));
+    const t = a[i];
+    a[i] = a[j];
+    a[j] = t;
+  }
+  PERMS.push(Uint8Array.from(a));
+}
+const TREE_SLOTS = [0.3, 0.3, 0.7, 0.38, 0.42, 0.72];
+// grass blades as [base dx, tip dx, tip dy] in units of the tuft height (the centre blade is drawn lighter)
+const BLADES = [-0.12, -0.58, -0.82, 0.12, 0.6, -0.76];
+const BLADES_FINE = [-0.14, -0.64, -0.66, -0.06, -0.3, -0.98, 0.06, 0.34, -0.94, 0.14, 0.68, -0.62];
+
+/** Tile detail drawn by paintDetail: terrain, ground keys (food level) and corner masks of a tile grid. */
+interface TileSrc {
+  terr: Uint8Array;
+  gkey: Uint16Array;
+  corner: Uint8Array;
+  W: number;
+  H: number;
+}
+
+// Sprite atlas: the detail of an interior tile (no rounded corners) is pre-drawn once per level and
+// season palette for every terrain from sand to rock, food level 0..7 and SPRITE_VARIANTS layouts.
+const SPRITE_VARIANTS = 4;
+const SPRITE_COLS = 8 * SPRITE_VARIANTS;
+const SPRITE_ROWS = ROCK - SAND + 1;
+const SPRITE_SRC: TileSrc = (() => {
+  const n = SPRITE_COLS * SPRITE_ROWS;
+  const terr = new Uint8Array(n);
+  const gkey = new Uint16Array(n);
+  for (let r = 0; r < SPRITE_ROWS; r++) {
+    for (let c = 0; c < SPRITE_COLS; c++) {
+      const t = SAND + r;
+      const q = (c / SPRITE_VARIANTS) | 0;
+      terr[r * SPRITE_COLS + c] = t;
+      gkey[r * SPRITE_COLS + c] = t | (q << 3);
+    }
+  }
+  return { terr, gkey, corner: new Uint8Array(n), W: SPRITE_COLS, H: SPRITE_ROWS };
+})();
+
+/**
+ * Sprites of one level, one small canvas per sprite: drawing from a canvas that was just written
+ * makes the browser copy all of it, so one large shared atlas would be copied for every new sprite.
+ */
+interface Atlas {
+  cells: (HTMLCanvasElement | undefined)[];
+  /** Palette version each sprite was drawn with (-1 = empty). Sprites are drawn when first needed. */
+  cellPal: Int32Array;
+}
+
+// ------------------------------------------------------------------ cached canvases
+
+interface Surface {
+  canvas: HTMLCanvasElement;
+  ctx: CanvasRenderingContext2D;
+  /** Pixels per tile. */
+  L: number;
+  tx0: number;
+  ty0: number;
+  tw: number;
+  th: number;
+  /** Tile keys at the last paint, (tw+2) x (th+2) with a one-tile margin; 0 = not painted. */
+  keys: Uint32Array;
+  /** Palette version painted with (-1 = never painted). */
+  pal: number;
+  /** Key version last synced against. */
+  ver: number;
+  /** Frame this surface was last drawn. */
+  used: number;
+  bytes: number;
+}
 
 function makeCanvas(w: number, h: number): HTMLCanvasElement {
   const c = document.createElement('canvas');
@@ -42,466 +269,1239 @@ function makeCanvas(w: number, h: number): HTMLCanvasElement {
   return c;
 }
 
-// season palettes: [grass, forest, shrub] RGB; index = season (spring, summer, autumn, winter)
-const SEASON_VEG: number[][][] = [
-  [[88, 160, 70], [34, 106, 54], [112, 142, 72]],
-  [[100, 150, 58], [30, 94, 44], [134, 132, 66]],
-  [[158, 140, 62], [158, 96, 38], [150, 118, 62]],
-  [[136, 146, 136], [50, 78, 70], [128, 128, 122]],
-];
-
 export class TerrainLayer {
-  readonly base: HTMLCanvasElement;
-  readonly shade: HTMLCanvasElement;
-  readonly veg: HTMLCanvasElement;
-  private baseCtx: CanvasRenderingContext2D;
-  private shadeCtx: CanvasRenderingContext2D;
-  private vegCtx: CanvasRenderingContext2D;
-  private baseImg: ImageData | null = null;
-  private shadeImg: ImageData | null = null;
-  private vegImg: ImageData | null = null;
-  private w = 0;
-  private h = 0;
-  private version = -1;
-  private lastTerrain: Uint8Array | null = null;
-  private dist = new Float32Array(0);
-  private slope = new Float32Array(0);
   private world: WorldState | null = null;
-  /** Sim tick of the last vegetation rebuild. */
+  private W = 0;
+  private H = 0;
+  private version = -1;
+  // static per tile (rebuilt when terrain changes)
+  private corner = new Uint8Array(0);
+  private shore = new Uint8Array(0);
+  private band = new Uint8Array(0);
+  // dynamic per tile
+  private keys = new Uint32Array(0);
+  private gkey = new Uint16Array(0);
+  private keysVer = 1;
+  private cap = 1;
+  // palette
+  private pal: SeasonPal = SEASONS[0];
+  private palKey = -1;
+  private palVer = 0;
+  private cssCache: (string | undefined)[] = new Array(4096);
+  private tuftCss = '';
+  private tuftLightCss = '';
+  private crownCss = '';
+  private crownShadeCss = '';
+  private shrubCss = '';
+  private rgb = [0, 0, 0];
+  // ground colours, one texel per tile
+  private ground: HTMLCanvasElement = makeCanvas(1, 1);
+  private groundCtx: CanvasRenderingContext2D = this.ground.getContext('2d')!;
+  private groundImg: ImageData | null = null;
+  // caches
+  private overview: Surface | null = null;
+  private ovL = PX;
+  private chunks = new Map<number, Surface>();
+  private atlases = new Map<number, Atlas>();
+  private list3 = new Int32Array(1024);
+  private one = new Int32Array(1);
+  private bytes = 0;
+  private pool: HTMLCanvasElement[] = [];
+  // scratch
+  private stamp = new Int32Array(0);
+  private stampVal = 1;
+  private list = new Int32Array(1024);
+  private list2 = new Int32Array(1024);
+  private cuts = new Float64Array(1024);
+  private frame = 0;
+  private deadline = 0;
+  /** Painted area this frame, in AREA_UNIT. */
+  private area = 0;
+  private ovSynced = 0;
+  private areaBudget = BUDGET_AREA;
+  /** Sim tick of the last vegetation update (-1 = never). */
   vegTick = -1;
-  private vegSeasonKey = -1;
-  /** Bumped whenever any layer's pixels change (minimap uses it). */
+  /** Bumped whenever the overview's pixels change (the minimap redraws its thumbnail). */
   revision = 0;
-  private seasonCol = [0, 0, 0, 0, 0, 0, 0, 0, 0];
-
-  constructor() {
-    this.base = makeCanvas(1, 1);
-    this.shade = makeCanvas(1, 1);
-    this.veg = makeCanvas(1, 1);
-    this.baseCtx = this.base.getContext('2d')!;
-    this.shadeCtx = this.shade.getContext('2d')!;
-    this.vegCtx = this.veg.getContext('2d')!;
-  }
+  /** Last frame's level: 0 overview, 16..128 chunks, -1 direct (for tests and tuning). */
+  lastLevel = 0;
 
   /** Forget everything (new simulation). */
   reset(): void {
-    this.version = -1;
-    this.lastTerrain = null;
     this.world = null;
+    this.version = -1;
     this.vegTick = -1;
-    this.vegSeasonKey = -1;
+    this.palKey = -1;
+    this.dropChunks();
+    this.overview = null;
   }
 
-  /** Make sure the static layers reflect `world`. Returns true when pixels were rebuilt. */
+  private dropChunks(): void {
+    for (const c of this.chunks.values()) this.release(c);
+    this.chunks.clear();
+    this.bytes = 0;
+  }
+
+  private release(s: Surface): void {
+    if (this.pool.length < 24 && s.canvas.width === CHUNK_PX && s.canvas.height === CHUNK_PX) this.pool.push(s.canvas);
+    else {
+      s.canvas.width = 1;
+      s.canvas.height = 1;
+    }
+  }
+
+  // ---------------------------------------------------------------- terrain and keys
+
+  /** Make sure the static tile data reflects `world`. Returns true when anything was rebuilt. */
   syncTerrain(world: WorldState): boolean {
     const W = world.width;
     const H = world.height;
-    const sizeChanged = W !== this.w || H !== this.h || this.world !== world || !this.lastTerrain;
-    if (!sizeChanged && world.terrainVersion === this.version) return false;
+    const fresh = world !== this.world || W !== this.W || H !== this.H;
+    if (!fresh && world.terrainVersion === this.version) return false;
     this.version = world.terrainVersion;
-    let tx0 = 0;
-    let ty0 = 0;
-    let tx1 = W;
-    let ty1 = H;
-    if (sizeChanged) {
-      this.w = W;
-      this.h = H;
+    if (fresh) {
       this.world = world;
-      this.base.width = W * PX;
-      this.base.height = H * PX;
-      this.shade.width = W * PX;
-      this.shade.height = H * PX;
-      this.veg.width = W;
-      this.veg.height = H;
-      this.baseImg = this.baseCtx.createImageData(W * PX, H * PX);
-      this.shadeImg = this.shadeCtx.createImageData(W * PX, H * PX);
-      this.vegImg = this.vegCtx.createImageData(W, H);
-      this.dist = new Float32Array(W * H);
-      this.slope = new Float32Array(W * H);
-      this.lastTerrain = new Uint8Array(world.terrain);
-      this.vegTick = -1;
-    } else {
-      // dirty rectangle of changed tiles
-      const prev = this.lastTerrain!;
-      const cur = world.terrain;
-      let minX = W;
-      let minY = H;
-      let maxX = -1;
-      let maxY = -1;
-      for (let y = 0; y < H; y++) {
-        const row = y * W;
-        for (let x = 0; x < W; x++) {
-          if (prev[row + x] !== cur[row + x]) {
-            if (x < minX) minX = x;
-            if (x > maxX) maxX = x;
-            if (y < minY) minY = y;
-            if (y > maxY) maxY = y;
-          }
-        }
-      }
-      if (maxX < 0) return false;
-      prev.set(cur);
-      const m = 12; // water depth / shading influence radius
-      tx0 = Math.max(0, minX - m);
-      ty0 = Math.max(0, minY - m);
-      tx1 = Math.min(W, maxX + m + 1);
-      ty1 = Math.min(H, maxY + m + 1);
+      this.W = W;
+      this.H = H;
+      const N = W * H;
+      this.corner = new Uint8Array(N);
+      this.shore = new Uint8Array(N);
+      this.band = new Uint8Array(N);
+      this.keys = new Uint32Array(N);
+      this.gkey = new Uint16Array(N);
+      this.stamp = new Int32Array(N);
+      this.ground = makeCanvas(W, H);
+      this.groundCtx = this.ground.getContext('2d')!;
+      this.groundImg = this.groundCtx.createImageData(W, H);
+      this.dropChunks();
+      this.ovL = Math.max(1, Math.min(PX, Math.floor(4096 / Math.max(W, H))));
+      const ov = this.ovL;
+      const c = makeCanvas(W * ov, H * ov);
+      this.overview = { canvas: c, ctx: c.getContext('2d')!, L: ov, tx0: 0, ty0: 0, tw: W, th: H, keys: new Uint32Array((W + 2) * (H + 2)), pal: -1, ver: 0, used: 0, bytes: 0 };
       this.vegTick = -1;
     }
-    this.computeFields(world);
-    this.paint(world, tx0, ty0, tx1, ty1);
-    this.revision++;
+    this.computeStatic(world);
+    this.computeKeys(world, this.cap);
+    if (fresh) {
+      if (this.palKey < 0) this.ensurePalette(undefined, true);
+      this.paintFull(this.overview!);
+    }
     return true;
   }
 
-  /** Distance-to-land (tiles) for water and hillshade per tile. */
-  private computeFields(world: WorldState): void {
-    const W = this.w;
-    const H = this.h;
+  /** Corner rounding masks, shore masks and elevation bands for every tile. */
+  private computeStatic(world: WorldState): void {
+    const W = this.W;
+    const H = this.H;
     const t = world.terrain;
     const e = world.elevation;
-    const d = this.dist;
-    const INF = 1e6;
-    for (let i = 0; i < d.length; i++) d[i] = isWater(t[i]) ? INF : 0;
-    const D = 1.4142;
-    for (let y = 0; y < H; y++) {
-      for (let x = 0; x < W; x++) {
-        const i = y * W + x;
-        let v = d[i];
-        if (v === 0) continue;
-        if (x > 0) v = Math.min(v, d[i - 1] + 1);
-        if (y > 0) {
-          v = Math.min(v, d[i - W] + 1);
-          if (x > 0) v = Math.min(v, d[i - W - 1] + D);
-          if (x < W - 1) v = Math.min(v, d[i - W + 1] + D);
-        }
-        d[i] = v;
-      }
-    }
-    for (let y = H - 1; y >= 0; y--) {
-      for (let x = W - 1; x >= 0; x--) {
-        const i = y * W + x;
-        let v = d[i];
-        if (v === 0) continue;
-        if (x < W - 1) v = Math.min(v, d[i + 1] + 1);
-        if (y < H - 1) {
-          v = Math.min(v, d[i + W] + 1);
-          if (x < W - 1) v = Math.min(v, d[i + W + 1] + D);
-          if (x > 0) v = Math.min(v, d[i + W - 1] + D);
-        }
-        d[i] = v;
-      }
-    }
-    for (let i = 0; i < d.length; i++) if (d[i] >= INF) d[i] = 30;
-    const s = this.slope;
+    const corner = this.corner;
+    const shore = this.shore;
+    const band = this.band;
     for (let y = 0; y < H; y++) {
       for (let x = 0; x < W; x++) {
         const i = y * W + x;
         const tt = t[i];
-        if (isWater(tt)) {
-          s[i] = 0;
-          continue;
+        const n = y > 0 ? t[i - W] : tt;
+        const s = y < H - 1 ? t[i + W] : tt;
+        const w = x > 0 ? t[i - 1] : tt;
+        const ea = x < W - 1 ? t[i + 1] : tt;
+        // shore: edges where water meets anything else (N, E, S, W)
+        const wt = IS_WATER[tt];
+        let sm = 0;
+        if (IS_WATER[n] !== wt) sm |= 1;
+        if (IS_WATER[ea] !== wt) sm |= 2;
+        if (IS_WATER[s] !== wt) sm |= 4;
+        if (IS_WATER[w] !== wt) sm |= 8;
+        shore[i] = sm;
+        // convex corners: TL bit0, TR bit1, BL bit2, BR bit3 (walls stay square)
+        let cm = 0;
+        if (tt !== WALL && x > 0 && x < W - 1 && y > 0 && y < H - 1) {
+          if (w === n && w !== tt && w !== WALL && t[i - W - 1] === w) cm |= 1;
+          if (ea === n && ea !== tt && ea !== WALL && t[i - W + 1] === ea) cm |= 2;
+          if (w === s && w !== tt && w !== WALL && t[i + W - 1] === w) cm |= 4;
+          if (ea === s && ea !== tt && ea !== WALL && t[i + W + 1] === ea) cm |= 8;
         }
-        const ex = (e[y * W + Math.min(W - 1, x + 1)] - e[y * W + Math.max(0, x - 1)]) * 0.5;
-        const ey = (e[Math.min(H - 1, y + 1) * W + x] - e[Math.max(0, y - 1) * W + x]) * 0.5;
-        const k = tt === TERRAIN.Rock ? 34 : tt === TERRAIN.Wall ? 0 : 16;
-        let v = (ex + ey) * k;
-        // elevation step at shoreline
-        v = v > 1 ? 1 : v < -1 ? -1 : v;
-        s[i] = v;
+        corner[i] = cm;
+        let ev = e[i];
+        if (!(ev >= 0)) ev = 0;
+        else if (ev > 1) ev = 1;
+        band[i] = tt === ROCK ? Math.min(7, Math.floor(Math.max(0, ev - 0.45) * 16)) : Math.min(7, Math.floor(ev * 8));
       }
     }
   }
 
-  private paint(world: WorldState, tx0: number, ty0: number, tx1: number, ty1: number): void {
-    const W = this.w;
-    const H = this.h;
-    const PW = W * PX;
-    const terr = world.terrain;
-    const elev = world.elevation;
-    const dist = this.dist;
-    const slope = this.slope;
-    const bd = this.baseImg!.data;
-    const sd = this.shadeImg!.data;
-    const px0 = tx0 * PX;
-    const py0 = ty0 * PX;
-    const px1 = tx1 * PX;
-    const py1 = ty1 * PX;
-    const inv = 1 / PX;
-    for (let py = py0; py < py1; py++) {
-      const v = (py + 0.5) * inv - 0.5;
-      let y0 = Math.floor(v);
-      const fy = v - y0;
-      let y1 = y0 + 1;
-      if (y0 < 0) y0 = 0;
-      if (y1 > H - 1) y1 = H - 1;
-      const tyPlain = Math.min(H - 1, Math.floor((py + 0.5) * inv));
-      for (let px = px0; px < px1; px++) {
-        const u = (px + 0.5) * inv - 0.5;
-        let x0 = Math.floor(u);
-        const fx = u - x0;
-        let x1 = x0 + 1;
-        if (x0 < 0) x0 = 0;
-        if (x1 > W - 1) x1 = W - 1;
-        const i00 = y0 * W + x0;
-        const i10 = y0 * W + x1;
-        const i01 = y1 * W + x0;
-        const i11 = y1 * W + x1;
-        const w00 = (1 - fx) * (1 - fy);
-        const w10 = fx * (1 - fy);
-        const w01 = (1 - fx) * fy;
-        const w11 = fx * fy;
-        const e = elev[i00] * w00 + elev[i10] * w10 + elev[i01] * w01 + elev[i11] * w11;
-        const dd = dist[i00] * w00 + dist[i10] * w10 + dist[i01] * w01 + dist[i11] * w11;
-        let sh = slope[i00] * w00 + slope[i10] * w10 + slope[i01] * w01 + slope[i11] * w11;
-
-        // organic (domain-warped) terrain lookup; walls stay crisp
-        const txPlain = Math.min(W - 1, Math.floor((px + 0.5) * inv));
-        let t = terr[tyPlain * W + txPlain] as TerrainType;
-        if (t !== TERRAIN.Wall) {
-          const wx = (vnoise(px * 0.21, py * 0.21, 11) - 0.5) * 0.9 + (hash3(px, py, 5) - 0.5) * 0.25;
-          const wy = (vnoise(px * 0.21, py * 0.21, 23) - 0.5) * 0.9 + (hash3(px, py, 7) - 0.5) * 0.25;
-          let tx = Math.floor((px + 0.5) * inv + wx);
-          let ty = Math.floor((py + 0.5) * inv + wy);
-          tx = tx < 0 ? 0 : tx >= W ? W - 1 : tx;
-          ty = ty < 0 ? 0 : ty >= H ? H - 1 : ty;
-          const tw = terr[ty * W + tx] as TerrainType;
-          if (tw !== TERRAIN.Wall) t = tw;
-        }
-        const n = hash3(px, py, 3) - 0.5;
-        const info = TERRAIN_INFO[t] ?? TERRAIN_INFO[TERRAIN.Grass];
-        let r = info.color[0];
-        let g = info.color[1];
-        let b = info.color[2];
-        let lum = 0; // shade-layer luminance delta (-1..1)
-
-        if (t === TERRAIN.Water || t === TERRAIN.DeepWater) {
-          // depth ramp: shallow → water → deep → abyss
-          const dep = dd + (t === TERRAIN.DeepWater ? 1.2 : 0) + (0.5 - e) * 2;
-          if (dep < 1.2) {
-            const k = Math.max(0, dep) / 1.2;
-            r = 64 + (36 - 64) * k;
-            g = 124 + (86 - 124) * k;
-            b = 150 + (124 - 150) * k;
-          } else if (dep < 4) {
-            const k = (dep - 1.2) / 2.8;
-            r = 36 + (18 - 36) * k;
-            g = 86 + (44 - 86) * k;
-            b = 124 + (78 - 124) * k;
-          } else {
-            const k = Math.min(1, (dep - 4) / 7);
-            r = 18 + (8 - 18) * k;
-            g = 44 + (24 - 44) * k;
-            b = 78 + (50 - 78) * k;
-          }
-          if (dd < 0.75) {
-            const f = ((0.75 - dd) / 0.75) * 0.55;
-            r += (170 - r) * f;
-            g += (205 - g) * f;
-            b += (210 - b) * f;
-          }
-          const wave = vnoise(px * 0.18, py * 0.6, 31);
-          lum = (wave - 0.5) * 0.14;
-          r += n * 4;
-          g += n * 5;
-          b += n * 6;
-          sh = 0;
-        } else {
-          const bright = 0.86 + 0.3 * (e - 0.5);
-          r *= bright;
-          g *= bright;
-          b *= bright;
-          switch (t) {
-            case TERRAIN.Sand: {
-              r += n * 12;
-              g += n * 11;
-              b += n * 8;
-              lum = (hash3(px, py, 9) - 0.5) * 0.14;
-              break;
-            }
-            case TERRAIN.Grass: {
-              r += n * 8;
-              g += n * 12;
-              b += n * 6;
-              lum = (hash3(px, py, 13) - 0.5) * 0.16 + (vnoise(px * 0.35, py * 0.35, 41) - 0.5) * 0.2;
-              break;
-            }
-            case TERRAIN.Forest: {
-              r += n * 6;
-              g += n * 10;
-              b += n * 6;
-              const c = vnoise(px * 0.7, py * 0.7, 17);
-              lum = (c - 0.5) * 0.95 + (hash3(px, py, 19) - 0.5) * 0.2;
-              break;
-            }
-            case TERRAIN.Desert: {
-              const dune = Math.sin(px * 0.55 + py * 0.22 + vnoise(px * 0.08, py * 0.08, 29) * 7);
-              r += dune * 7 + n * 10;
-              g += dune * 6 + n * 9;
-              b += dune * 4 + n * 7;
-              lum = dune * 0.08 + (hash3(px, py, 21) - 0.5) * 0.1;
-              break;
-            }
-            case TERRAIN.Rock: {
-              const crag = vnoise(px * 0.45, py * 0.45, 37);
-              r += n * 16 + (crag - 0.5) * 20;
-              g += n * 16 + (crag - 0.5) * 20;
-              b += n * 16 + (crag - 0.5) * 22;
-              lum = (crag - 0.5) * 0.6 + (hash3(px, py, 27) - 0.5) * 0.24;
-              if (e > 0.74) {
-                // snowy peaks
-                const f = Math.min(0.85, (e - 0.74) * 3.2);
-                r += (208 - r) * f;
-                g += (214 - g) * f;
-                b += (224 - b) * f;
-              }
-              break;
-            }
-            case TERRAIN.Wall: {
-              const lx = px % PX;
-              const ly = py % PX;
-              const edge = lx === 0 || ly === 0 || lx === PX - 1 || ly === PX - 1;
-              if (edge) {
-                r *= 0.7;
-                g *= 0.7;
-                b *= 0.75;
-              }
-              lum = lx === 1 || ly === 1 ? 0.35 : edge ? -0.45 : 0.05;
-              break;
-            }
-            default:
-              r += n * 8;
-              g += n * 8;
-              b += n * 8;
-          }
-        }
-        const o = (py * PW + px) * 4;
-        bd[o] = r;
-        bd[o + 1] = g;
-        bd[o + 2] = b;
-        bd[o + 3] = 255;
-        let L = sh + lum;
-        if (L > 1) L = 1;
-        else if (L < -1) L = -1;
-        if (L >= 0) {
-          sd[o] = 255;
-          sd[o + 1] = 250;
-          sd[o + 2] = 232;
-          sd[o + 3] = L * 70;
-        } else {
-          sd[o] = 0;
-          sd[o + 1] = 6;
-          sd[o + 2] = 22;
-          sd[o + 3] = -L * 150;
-        }
-      }
-    }
-    this.baseCtx.putImageData(this.baseImg!, 0, 0, px0, py0, px1 - px0, py1 - py0);
-    this.shadeCtx.putImageData(this.shadeImg!, 0, 0, px0, py0, px1 - px0, py1 - py0);
-  }
-
-  /** Recompute the vegetation layer (1 px/tile). Cheap (~25k tiles); call every few frames. */
-  updateVegetation(world: WorldState, env: EnvState | undefined, foodCapacity: number, tick: number): void {
-    if (!this.vegImg || world !== this.world) return;
-    // season blend (cross-fade over the last 30% of each season)
-    const season = env ? env.season | 0 : 0;
-    const prog = env ? Math.max(0, Math.min(1, env.seasonProgress || 0)) : 0;
-    let blend = (prog - 0.7) / 0.3;
-    blend = blend < 0 ? 0 : blend > 1 ? 1 : blend * blend * (3 - 2 * blend);
-    const seasonKey = season * 100 + Math.round(blend * 40);
-    if (tick === this.vegTick && seasonKey === this.vegSeasonKey) return;
-    this.vegTick = tick;
-    this.vegSeasonKey = seasonKey;
-    const sa = SEASON_VEG[season & 3];
-    const sb = SEASON_VEG[(season + 1) & 3];
-    const sc = this.seasonCol;
-    for (let k = 0; k < 3; k++) for (let c = 0; c < 3; c++) sc[k * 3 + c] = sa[k][c] + (sb[k][c] - sa[k][c]) * blend;
-
-    const N = world.width * world.height;
+  /** Tile keys from terrain, food and fertility. Updates the ground texels of changed tiles. */
+  private computeKeys(world: WorldState, cap: number): boolean {
+    const W = this.W;
+    const N = W * this.H;
     const terr = world.terrain;
     const food = world.food;
     const fert = world.fertility;
-    const d = this.vegImg.data;
-    const cap = foodCapacity > 0 ? foodCapacity : 1;
-    const maxFoodOf = MAX_FOOD;
+    const keys = this.keys;
+    const gkey = this.gkey;
+    const corner = this.corner;
+    const shore = this.shore;
+    const band = this.band;
+    const img = this.groundImg!.data;
+    const rgb = this.rgb;
+    let minX = W;
+    let minY = this.H;
+    let maxX = -1;
+    let maxY = -1;
+    let changed = false;
     for (let i = 0; i < N; i++) {
       const t = terr[i];
-      const o = i * 4;
-      const mf = maxFoodOf[t] * cap;
-      let r = mf > 0 ? food[i] / mf : 0;
-      if (!(r > 0)) r = 0;
-      else if (r > 1.5) r = 1.5;
-      let fe = fert[i];
-      if (!(fe >= 0)) fe = 0;
-      else if (fe > 1) fe = 1;
-      let R = 0;
-      let Gc = 0;
-      let B = 0;
-      let A = 0;
-      if (t === TERRAIN.Grass || t === TERRAIN.Forest) {
-        const forest = t === TERRAIN.Forest;
-        const lr = forest ? sc[3] : sc[0];
-        const lg = forest ? sc[4] : sc[1];
-        const lb = forest ? sc[5] : sc[2];
-        const br = forest ? 82 : 122;
-        const bgc = forest ? 68 : 100;
-        const bb = forest ? 46 : 64;
-        const k = r >= 1 ? 1 : Math.pow(r, 0.75);
-        R = br + (lr - br) * k;
-        Gc = bgc + (lg - bgc) * k;
-        B = bb + (lb - bb) * k;
-        if (r > 1) {
-          // overflowing (bloom): brighter, more saturated
-          const x = (r - 1) * 1.2;
-          R += (R * 0.9 - R) * x;
-          Gc += (Math.min(255, Gc * 1.3) - Gc) * x;
-          B += (B * 0.85 - B) * x;
+      let q = 0;
+      let dry = 0;
+      if (t >= SAND && t <= ROCK) {
+        const mf = MAX_FOOD[t] * cap;
+        const r = mf > 0 ? food[i] / mf : 0;
+        if (r >= 0.06) {
+          q = 1 + ((r * 5) | 0);
+          if (q > 7) q = 7;
         }
-        const dry = (1 - fe) * (1 - fe);
-        R += (160 - R) * dry * 0.8;
-        Gc += (138 - Gc) * dry * 0.8;
-        B += (86 - B) * dry * 0.8;
-        A = forest ? 205 : 190;
-      } else if (t === TERRAIN.Sand || t === TERRAIN.Desert || t === TERRAIN.Rock) {
-        R = sc[6];
-        Gc = sc[7];
-        B = sc[8];
-        A = Math.min(1, r) * 150 * Math.min(1, fe * 1.4 + 0.1);
-      } else if (t === TERRAIN.Water) {
-        R = 52;
-        Gc = 128;
-        B = 98;
-        A = Math.min(1, r) * 80;
+        if (t === GRASS || t === FOREST) {
+          const fe = fert[i];
+          dry = fe >= 0.8 ? 0 : fe >= 0.55 ? 1 : fe >= 0.3 ? 2 : 3;
+        }
       }
-      d[o] = R;
-      d[o + 1] = Gc;
-      d[o + 2] = B;
-      d[o + 3] = A;
+      const g = t | (q << 3) | (dry << 6) | (band[i] << 8);
+      const k = (KEY_VALID | g | (corner[i] << 11) | (shore[i] << 15)) >>> 0;
+      if (k === keys[i]) continue;
+      keys[i] = k;
+      changed = true;
+      if (gkey[i] === g && img[i * 4 + 3] === 255) continue;
+      gkey[i] = g;
+      this.groundRGB(g, rgb);
+      const o = i * 4;
+      img[o] = rgb[0];
+      img[o + 1] = rgb[1];
+      img[o + 2] = rgb[2];
+      img[o + 3] = 255;
+      const x = i % W;
+      const y = (i - x) / W;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
     }
-    this.vegCtx.putImageData(this.vegImg, 0, 0);
-    this.revision++;
+    if (maxX >= 0) this.groundCtx.putImageData(this.groundImg!, 0, 0, minX, minY, maxX - minX + 1, maxY - minY + 1);
+    if (changed) this.keysVer++;
+    return changed;
   }
 
-  /** Draw all ground layers into the world rectangle (ctx must be in world space). */
-  draw(ctx: CanvasRenderingContext2D, worldW: number, worldH: number): void {
-    if (!this.baseImg) return;
+  /** Ground colour of a ground key (terrain | food level << 3 | dryness << 6 | band << 8). */
+  private groundRGB(g: number, out: number[]): number[] {
+    const t = g & 7;
+    const q = (g >> 3) & 7;
+    const dry = (g >> 6) & 3;
+    const b = (g >> 8) & 7;
+    const p = this.pal;
+    switch (t) {
+      case DEEP:
+        out[0] = C_DEEP[0];
+        out[1] = C_DEEP[1];
+        out[2] = C_DEEP[2];
+        return out;
+      case WATER:
+        out[0] = C_WATER[0];
+        out[1] = C_WATER[1];
+        out[2] = C_WATER[2];
+        return out;
+      case GRASS:
+        mix(p.grassBare, p.grass, FOOD_MIX[q], out);
+        break;
+      case FOREST:
+        mix(p.forestBare, p.forest, FOOD_MIX[q], out);
+        break;
+      case SAND:
+        mix(C_SAND, C_SAND, 0, out);
+        return out;
+      case DESERT:
+        mix(C_DESERT, C_DESERT, 0, out);
+        return out;
+      case ROCK:
+        mix(C_ROCK, C_ROCK_HIGH, b / 7, out);
+        return out;
+      default:
+        mix(C_WALL, C_WALL, 0, out);
+        return out;
+    }
+    if (dry > 0) {
+      const k = dry * 0.16;
+      out[0] += (C_DRY[0] - out[0]) * k;
+      out[1] += (C_DRY[1] - out[1]) * k;
+      out[2] += (C_DRY[2] - out[2]) * k;
+    }
+    const br = 0.965 + b * 0.01;
+    out[0] *= br;
+    out[1] *= br;
+    out[2] *= br;
+    return out;
+  }
+
+  private groundCss(g: number): string {
+    let s = this.cssCache[g];
+    if (s === undefined) {
+      s = css(this.groundRGB(g, this.rgb));
+      this.cssCache[g] = s;
+    }
+    return s;
+  }
+
+  /** Season palette (quantised blend over the last 30% of each season). Returns true when it changed. */
+  private ensurePalette(env: EnvState | undefined, force = false): boolean {
+    const season = env ? env.season & 3 : 0;
+    const prog = env ? Math.max(0, Math.min(1, env.seasonProgress || 0)) : 0;
+    let blend = (prog - 0.7) / 0.3;
+    blend = blend < 0 ? 0 : blend > 1 ? 1 : blend * blend * (3 - 2 * blend);
+    const step = Math.round(blend * 2);
+    const key = season * 8 + step;
+    if (!force && key === this.palKey) return false;
+    this.palKey = key;
+    this.palVer++;
+    this.pal = step === 0 ? SEASONS[season] : mixPal(SEASONS[season], SEASONS[(season + 1) & 3], step / 2);
+    this.cssCache.fill(undefined);
+    const p = this.pal;
+    this.tuftCss = css(p.tuft);
+    this.tuftLightCss = css(p.tuftLight);
+    this.crownCss = css(p.crown);
+    this.crownShadeCss = css(p.crownShade);
+    this.shrubCss = css(p.shrub);
+    // every ground texel changes colour
+    if (this.groundImg) {
+      const img = this.groundImg.data;
+      const gkey = this.gkey;
+      const rgb = this.rgb;
+      for (let i = 0; i < gkey.length; i++) {
+        this.groundRGB(gkey[i], rgb);
+        const o = i * 4;
+        img[o] = rgb[0];
+        img[o + 1] = rgb[1];
+        img[o + 2] = rgb[2];
+        img[o + 3] = 255;
+      }
+      this.groundCtx.putImageData(this.groundImg, 0, 0);
+    }
+    return true;
+  }
+
+  /** Refresh food levels and the season palette. Cheap when nothing changed; call every few frames. */
+  updateVegetation(world: WorldState, env: EnvState | undefined, foodCapacity: number, tick: number): void {
+    if (world !== this.world || !this.groundImg) return;
+    const cap = foodCapacity > 0 && Number.isFinite(foodCapacity) ? foodCapacity : 1;
+    const palChanged = this.ensurePalette(env);
+    if (tick === this.vegTick && cap === this.cap && !palChanged) return;
+    this.vegTick = tick;
+    this.cap = cap;
+    this.computeKeys(world, cap);
+  }
+
+  // ---------------------------------------------------------------- painting
+
+  /** Repaint a whole surface. */
+  private budgetLeft(): boolean {
+    return this.area < this.areaBudget && performance.now() < this.deadline;
+  }
+
+  private paintFull(s: Surface): void {
+    const ctx = s.ctx;
+    const L = s.L;
+    this.area += (s.tw * s.th * L * L) / AREA_UNIT;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(this.ground, s.tx0, s.ty0, s.tw, s.th, 0, 0, s.tw * L, s.th * L);
+    ctx.setTransform(L, 0, 0, L, -s.tx0 * L, -s.ty0 * L);
+    const W = this.W;
+    const H = this.H;
+    const n = s.tw * s.th;
+    const list = this.scratch(n);
+    let k = 0;
+    for (let y = s.ty0; y < s.ty0 + s.th; y++) for (let x = s.tx0; x < s.tx0 + s.tw; x++) list[k++] = y * W + x;
+    // shore lines of the one-tile margin reach into this surface
+    const mx0 = Math.max(0, s.tx0 - 1);
+    const my0 = Math.max(0, s.ty0 - 1);
+    const mx1 = Math.min(W, s.tx0 + s.tw + 1);
+    const my1 = Math.min(H, s.ty0 + s.th + 1);
+    const sl = this.scratch2((mx1 - mx0) * (my1 - my0));
+    let sn = 0;
+    const shore = this.shore;
+    const corner = this.corner;
+    for (let y = my0; y < my1; y++) {
+      for (let x = mx0; x < mx1; x++) {
+        const i = y * W + x;
+        if (shore[i] || corner[i]) sl[sn++] = i;
+      }
+    }
+    this.paintShapes(ctx, list, k, L, sl, sn);
+    // remember keys (with margin)
+    const keys = this.keys;
+    const mw = s.tw + 2;
+    for (let yy = -1; yy <= s.th; yy++) {
+      const y = s.ty0 + yy;
+      for (let xx = -1; xx <= s.tw; xx++) {
+        const x = s.tx0 + xx;
+        s.keys[(yy + 1) * mw + xx + 1] = x >= 0 && y >= 0 && x < W && y < H ? keys[y * W + x] : 0;
+      }
+    }
+    s.pal = this.palVer;
+    s.ver = this.keysVer;
+    if (s === this.overview) this.revision++;
+  }
+
+  /**
+   * Repaint the tiles of `s` whose keys changed (and tiles whose rounded corners take a changed
+   * neighbour's colour). Returns false when it gave up because of the time budget.
+   */
+  private syncSurface(s: Surface, force: boolean): boolean {
+    if (s.pal !== this.palVer) {
+      if (!force && s.pal >= 0 && !this.budgetLeft()) return false;
+      this.paintFull(s);
+      return true;
+    }
+    if (s.ver === this.keysVer) return true;
+    if (!force && !this.budgetLeft()) return false;
+    const W = this.W;
+    const H = this.H;
+    const keys = this.keys;
+    const corner = this.corner;
+    const sk = s.keys;
+    const mw = s.tw + 2;
+    const x0 = s.tx0;
+    const y0 = s.ty0;
+    const x1 = x0 + s.tw;
+    const y1 = y0 + s.th;
+    const stamp = this.stamp;
+    const sv = ++this.stampVal;
+    let list = this.scratch(64);
+    let n = 0;
+    // at most `cap` changed tiles per call; the rest are found again on the next call
+    const cap = s === this.overview ? (force ? 2400 : 600) : 1 << 30;
+    let changed = 0;
+    let incomplete = false;
+    const add = (i: number, x: number, y: number) => {
+      if (x < x0 || x >= x1 || y < y0 || y >= y1 || stamp[i] === sv) return;
+      stamp[i] = sv;
+      if (n >= list.length) list = this.growScratch(n * 2);
+      list[n++] = i;
+    };
+    for (let yy = -1; yy <= s.th && !incomplete; yy++) {
+      const y = y0 + yy;
+      if (y < 0 || y >= H) continue;
+      const row = y * W;
+      const srow = (yy + 1) * mw + 1;
+      for (let xx = -1; xx <= s.tw; xx++) {
+        const x = x0 + xx;
+        if (x < 0 || x >= W) continue;
+        const i = row + x;
+        const k = keys[i];
+        const was = sk[srow + xx];
+        if (was === k) continue;
+        if (changed >= cap) {
+          incomplete = true;
+          break;
+        }
+        changed++;
+        sk[srow + xx] = k;
+        add(i, x, y);
+        if ((was ^ k) & KEY_STATIC) {
+          // a terrain edit: neighbours' shore lines and wall outlines depend on this tile too
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              const nx = x + dx;
+              const ny = y + dy;
+              if ((dx || dy) && nx >= 0 && ny >= 0 && nx < W && ny < H) add(ny * W + nx, nx, ny);
+            }
+          }
+        } else {
+          // food or dryness: neighbours whose rounded corners are filled with this tile's colour
+          if (x > 0 && corner[i - 1] & 10) add(i - 1, x - 1, y);
+          if (x < W - 1 && corner[i + 1] & 5) add(i + 1, x + 1, y);
+        }
+      }
+    }
+    if (!incomplete) s.ver = this.keysVer;
+    if (n === 0) return true;
+    if (n > s.tw * s.th * 0.35) {
+      this.paintFull(s);
+      return true;
+    }
+    this.paintDirty(s, list, n);
+    if (s === this.overview) this.revision++;
+    return true;
+  }
+
+  private paintDirty(s: Surface, list: Int32Array, n: number): void {
+    const ctx = s.ctx;
+    const L = s.L;
+    this.area += (n * L * L) / AREA_UNIT;
+    const W = this.W;
+    const H = this.H;
+    ctx.save();
+    ctx.setTransform(L, 0, 0, L, -s.tx0 * L, -s.ty0 * L);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.beginPath();
+    for (let k = 0; k < n; k++) {
+      const i = list[k];
+      const x = i % W;
+      ctx.rect(x, (i - x) / W, 1, 1);
+    }
+    ctx.clip();
+    const gkey = this.gkey;
+    let last = -1;
+    for (let k = 0; k < n; k++) {
+      const i = list[k];
+      const g = gkey[i];
+      if (g !== last) {
+        ctx.fillStyle = this.groundCss(g);
+        last = g;
+      }
+      const x = i % W;
+      ctx.fillRect(x, (i - x) / W, 1, 1);
+    }
+    // shore lines of the dirty tiles and their neighbours
+    const stamp = this.stamp;
+    const sv = ++this.stampVal;
+    const shore = this.shore;
+    const corner = this.corner;
+    let sl = this.scratch2(n * 9);
+    let sn = 0;
+    for (let k = 0; k < n; k++) {
+      const i = list[k];
+      const x = i % W;
+      const y = (i - x) / W;
+      for (let dy = -1; dy <= 1; dy++) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= H) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = x + dx;
+          if (xx < 0 || xx >= W) continue;
+          const j = yy * W + xx;
+          if (stamp[j] === sv || !(shore[j] || corner[j])) continue;
+          stamp[j] = sv;
+          if (sn >= sl.length) sl = this.growScratch2(sn * 2);
+          sl[sn++] = j;
+        }
+      }
+    }
+    this.paintShapes(ctx, list, n, L, sl, sn);
+    ctx.restore();
+  }
+
+  /**
+   * Rounded corners, shore lines and detail of the tiles in list[0..n) (shore lines of sl[0..sn)).
+   * ctx's transform maps one unit to one tile; `S` is device px per tile (level of detail, line widths).
+   */
+  private paintShapes(ctx: CanvasRenderingContext2D, list: Int32Array, n: number, S: number, sl: Int32Array, sn: number): void {
+    const W = this.W;
+    const terr = this.world!.terrain;
+    const corner = this.corner;
+    const gkey = this.gkey;
+    // ---- detail of interior tiles from the sprite atlas (cached levels); the rest is drawn as vectors below
+    let vlist = list;
+    let vn = n;
+    if (S >= 12 && S <= DIRECT_FROM && S === Math.round(S)) {
+      const atlas = this.atlas(S);
+      const cellPal = atlas.cellPal;
+      const pv = this.palVer;
+      if (this.list3.length < n) this.list3 = new Int32Array(Math.max(n, this.list3.length * 2));
+      vlist = this.list3;
+      vn = 0;
+      for (let k = 0; k < n; k++) {
+        const i = list[k];
+        const t = terr[i];
+        if (t < SAND || t > ROCK || corner[i]) {
+          vlist[vn++] = i;
+          continue;
+        }
+        const q = (gkey[i] >> 3) & 7;
+        if (t === GRASS && q === 0) continue;
+        const x = i % W;
+        const y = (i - x) / W;
+        const v = (hash3(x, y, 5) * SPRITE_VARIANTS) | 0;
+        const col = q * SPRITE_VARIANTS + v;
+        const row = t - SAND;
+        const cell = row * SPRITE_COLS + col;
+        if (cellPal[cell] !== pv) this.paintSprite(atlas, S, cell);
+        ctx.drawImage(atlas.cells[cell]!, x, y, 1, 1);
+      }
+    }
+    // ---- rounded corners, batched by fill colour
+    let nc = 0;
+    let cuts = this.cuts;
+    for (let k = 0; k < n; k++) {
+      const i = list[k];
+      const m = corner[i];
+      if (!m) continue;
+      for (let q = 0; q < 4; q++) {
+        if (!((m >> q) & 1)) continue;
+        const h = q & 1 ? i + 1 : i - 1;
+        if (nc >= cuts.length) {
+          const c2 = new Float64Array(cuts.length * 2);
+          c2.set(cuts);
+          cuts = this.cuts = c2;
+        }
+        cuts[nc++] = gkey[h] * 67108864 + i * 4 + q;
+      }
+    }
+    if (nc > 0) {
+      const sub = cuts.subarray(0, nc);
+      sub.sort();
+      let cur = -1;
+      for (let k = 0; k < nc; k++) {
+        const v = sub[k];
+        const g = Math.floor(v / 67108864);
+        const rest = v - g * 67108864;
+        const i = Math.floor(rest / 4);
+        const q = rest - i * 4;
+        if (g !== cur) {
+          if (cur >= 0) ctx.fill();
+          ctx.fillStyle = this.groundCss(g);
+          ctx.beginPath();
+          cur = g;
+        }
+        const x = i % W;
+        const y = (i - x) / W;
+        const sx = q & 1;
+        const sy = q >> 1;
+        const px = x + sx;
+        const py = y + sy;
+        const cx = x + 0.5;
+        const cy = y + 0.5;
+        ctx.moveTo(px, py);
+        ctx.lineTo(px, cy);
+        ctx.arc(cx, cy, 0.5, sx ? 0 : Math.PI, sy ? HALF_PI : -HALF_PI, sx !== sy);
+        ctx.closePath();
+      }
+      ctx.fill();
+    }
+    // ---- shore lines
+    if (sn > 0 && S >= 4) {
+      const shore = this.shore;
+      ctx.beginPath();
+      let any = false;
+      for (let k = 0; k < sn; k++) {
+        const i = sl[k];
+        const t = terr[i];
+        const x = i % W;
+        const y = (i - x) / W;
+        const m = corner[i];
+        const wt = IS_WATER[t];
+        if (wt) {
+          const sm = shore[i];
+          if (sm) {
+            // straight parts of the edges facing land; a corner that is rounded on either side is left to its arc
+            if (sm & 1) {
+              const j = i - W;
+              const a = m & 1 || corner[j] & 4 ? 0.5 : 0;
+              const b = m & 2 || corner[j] & 8 ? 0.5 : 0;
+              if (a + b < 1) {
+                ctx.moveTo(x + a, y);
+                ctx.lineTo(x + 1 - b, y);
+                any = true;
+              }
+            }
+            if (sm & 4) {
+              const j = i + W;
+              const a = m & 4 || corner[j] & 1 ? 0.5 : 0;
+              const b = m & 8 || corner[j] & 2 ? 0.5 : 0;
+              if (a + b < 1) {
+                ctx.moveTo(x + a, y + 1);
+                ctx.lineTo(x + 1 - b, y + 1);
+                any = true;
+              }
+            }
+            if (sm & 8) {
+              const j = i - 1;
+              const a = m & 1 || corner[j] & 2 ? 0.5 : 0;
+              const b = m & 4 || corner[j] & 8 ? 0.5 : 0;
+              if (a + b < 1) {
+                ctx.moveTo(x, y + a);
+                ctx.lineTo(x, y + 1 - b);
+                any = true;
+              }
+            }
+            if (sm & 2) {
+              const j = i + 1;
+              const a = m & 2 || corner[j] & 1 ? 0.5 : 0;
+              const b = m & 8 || corner[j] & 4 ? 0.5 : 0;
+              if (a + b < 1) {
+                ctx.moveTo(x + 1, y + a);
+                ctx.lineTo(x + 1, y + 1 - b);
+                any = true;
+              }
+            }
+          }
+        }
+        if (m) {
+          for (let q = 0; q < 4; q++) {
+            if (!((m >> q) & 1)) continue;
+            const h = q & 1 ? i + 1 : i - 1;
+            if (IS_WATER[terr[h]] === wt) continue;
+            const sx = q & 1;
+            const sy = q >> 1;
+            ctx.moveTo(x + sx, y + 0.5);
+            ctx.arc(x + 0.5, y + 0.5, 0.5, sx ? 0 : Math.PI, sy ? HALF_PI : -HALF_PI, sx !== sy);
+            any = true;
+          }
+        }
+      }
+      if (any) {
+        const lw = Math.max(1, Math.min(3, S * 0.055));
+        ctx.lineWidth = lw / S;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.strokeStyle = CSS_SHORE;
+        ctx.stroke();
+      }
+    }
+    if (S < 12) return;
+    this.paintDetail(ctx, vlist, vn, S, { terr, gkey, corner, W, H: this.H });
+  }
+
+  /** The sprites for L px per tile (each drawn on demand by paintSprite). */
+  private atlas(L: number): Atlas {
+    let a = this.atlases.get(L);
+    if (!a) {
+      a = { cells: new Array(SPRITE_COLS * SPRITE_ROWS), cellPal: new Int32Array(SPRITE_COLS * SPRITE_ROWS).fill(-1) };
+      this.atlases.set(L, a);
+    }
+    return a;
+  }
+
+  /** Draw one sprite with the current palette. */
+  private paintSprite(a: Atlas, L: number, cell: number): void {
+    let c = a.cells[cell];
+    if (!c) {
+      c = makeCanvas(L, L);
+      a.cells[cell] = c;
+    }
+    const ctx = c.getContext('2d')!;
+    const col = cell % SPRITE_COLS;
+    const row = (cell - col) / SPRITE_COLS;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, L, L);
+    // sprite tile (col, row) of SPRITE_SRC maps onto this canvas
+    ctx.setTransform(L, 0, 0, L, -col * L, -row * L);
+    this.one[0] = cell;
+    this.paintDetail(ctx, this.one, 1, L, SPRITE_SRC);
+    a.cellPal[cell] = this.palVer;
+    this.area += (L * L) / AREA_UNIT;
+  }
+
+  /** Plants, tree crowns, stones, speckles and wall blocks (S >= 12 device px per tile). */
+  private paintDetail(ctx: CanvasRenderingContext2D, list: Int32Array, n: number, S: number, src: TileSrc): void {
+    const W = src.W;
+    const terr = src.terr;
+    const corner = src.corner;
+    const gkey = src.gkey;
+    const lod = S < 28 ? 1 : S < 80 ? 2 : 3;
+    const px = 1 / S;
+    // is (u,v) with radius r clear of the tile's rounded-off corners?
+    const clear = (m: number, u: number, v: number, r: number): boolean => {
+      if (!m) return true;
+      const q = (u > 0.5 ? 1 : 0) | (v > 0.5 ? 2 : 0);
+      if (!((m >> q) & 1)) return true;
+      const du = u - 0.5;
+      const dv = v - 0.5;
+      return Math.sqrt(du * du + dv * dv) + r <= 0.48;
+    };
+    let hasSand = false;
+    let hasDesert = false;
+    let hasRock = false;
+    let hasGrass = false;
+    let hasForest = false;
+    let hasWall = false;
+    let hasShrub = false;
+    for (let k = 0; k < n; k++) {
+      const t = terr[list[k]];
+      if (t === SAND) hasSand = true;
+      else if (t === DESERT) hasDesert = true;
+      else if (t === ROCK) hasRock = true;
+      else if (t === GRASS) hasGrass = true;
+      else if (t === FOREST) hasForest = true;
+      else if (t === WALL) hasWall = true;
+      if ((t === SAND || t === DESERT || t === ROCK) && ((gkey[list[k]] >> 3) & 7) >= 2) hasShrub = true;
+    }
+    // ---- speckles on sand and desert
+    const speck = (type: number, tone: number, style: string) => {
+      ctx.fillStyle = style;
+      ctx.beginPath();
+      const cnt = lod === 1 ? 3 : lod === 2 ? 6 : 10;
+      const sz = Math.max(1.1 * px, 0.022);
+      for (let k = 0; k < n; k++) {
+        const i = list[k];
+        if (terr[i] !== type) continue;
+        const x = i % W;
+        const y = (i - x) / W;
+        const m = corner[i];
+        for (let j = tone; j < cnt; j += 2) {
+          const u = 0.06 + hash3(x, y, 40 + j) * 0.88;
+          const v = 0.06 + hash3(x, y, 60 + j) * 0.88;
+          if (!clear(m, u, v, sz)) continue;
+          ctx.rect(x + u, y + v, sz, sz);
+        }
+      }
+      ctx.fill();
+    };
+    if (hasSand) {
+      speck(SAND, 0, CSS_SAND_DARK);
+      speck(SAND, 1, CSS_SAND_LIGHT);
+    }
+    if (hasDesert) {
+      speck(DESERT, 0, CSS_DESERT_DARK);
+      speck(DESERT, 1, CSS_DESERT_LIGHT);
+    }
+    // ---- stones on rock (and the odd pebble in the desert)
+    if (hasRock || hasDesert) {
+      for (let pass = 0; pass < 2; pass++) {
+        ctx.fillStyle = pass === 0 ? CSS_STONE_SHADE : CSS_STONE;
+        ctx.beginPath();
+        const ox = pass === 0 ? 0.025 : 0;
+        const oy = pass === 0 ? 0.03 : 0;
+        for (let k = 0; k < n; k++) {
+          const i = list[k];
+          const t = terr[i];
+          if (t !== ROCK && t !== DESERT) continue;
+          const x = i % W;
+          const y = (i - x) / W;
+          const m = corner[i];
+          const cnt = t === ROCK ? 1 + Math.floor(hash3(x, y, 7) * 3) : hash3(x, y, 7) < 0.35 ? 1 : 0;
+          for (let j = 0; j < cnt; j++) {
+            const rs = (t === ROCK ? 0.07 + hash3(x, y, 11 + j) * 0.08 : 0.04 + hash3(x, y, 11 + j) * 0.03) * (pass === 0 ? 1 : 0.92);
+            const u = rs + 0.06 + hash3(x, y, 13 + j) * (0.82 - rs * 2);
+            const v = rs + 0.06 + hash3(x, y, 17 + j) * (0.8 - rs * 2);
+            if (!clear(m, u, v, rs + 0.03)) continue;
+            const cx = x + u + ox;
+            const cy = y + v + oy;
+            if (lod === 1) {
+              ctx.moveTo(cx + rs, cy);
+              ctx.arc(cx, cy, rs, 0, Math.PI * 2);
+              continue;
+            }
+            // a rounded six-sided stone, a little flatter than tall
+            for (let s = 0; s < 6; s++) {
+              const ang = (s / 6) * Math.PI * 2 + hash3(x, y, 19 + j) * 1.2;
+              const rr = rs * (0.78 + hash3(x + s, y, 23 + j) * 0.32);
+              const vx = cx + Math.cos(ang) * rr;
+              const vy = cy + Math.sin(ang) * rr * 0.78;
+              if (s === 0) ctx.moveTo(vx, vy);
+              else ctx.lineTo(vx, vy);
+            }
+            ctx.closePath();
+          }
+        }
+        ctx.fill();
+      }
+    }
+    // ---- sparse shrubs where sand, desert or rock holds some food
+    if (hasShrub) {
+      ctx.fillStyle = this.shrubCss;
+      ctx.beginPath();
+      for (let k = 0; k < n; k++) {
+        const i = list[k];
+        const t = terr[i];
+        if (t !== SAND && t !== DESERT && t !== ROCK) continue;
+        const q = (gkey[i] >> 3) & 7;
+        if (q < 2) continue;
+        const x = i % W;
+        const y = (i - x) / W;
+        const m = corner[i];
+        const cnt = Math.min(3, q - 1);
+        for (let j = 0; j < cnt; j++) {
+          const r = 0.045 + hash3(x, y, 31 + j) * 0.025;
+          const u = 0.12 + hash3(x, y, 33 + j) * 0.76;
+          const v = 0.12 + hash3(x, y, 35 + j) * 0.76;
+          if (!clear(m, u, v, r)) continue;
+          ctx.moveTo(x + u + r, y + v);
+          ctx.arc(x + u, y + v, r, 0, Math.PI * 2);
+        }
+      }
+      ctx.fill();
+    }
+    // ---- grass: plants whose number and size follow the tile's food
+    if (hasGrass) {
+      const tuftPass = (light: boolean) => {
+        ctx.beginPath();
+        for (let k = 0; k < n; k++) {
+          const i = list[k];
+          if (terr[i] !== GRASS) continue;
+          const q = (gkey[i] >> 3) & 7;
+          if (q === 0) continue;
+          const x = i % W;
+          const y = (i - x) / W;
+          const m = corner[i];
+          const perm = PERMS[(hash3(x, y, 3) * 16) | 0];
+          const sz = 0.11 + q * 0.014;
+          for (let j = 0; j < q; j++) {
+            const c = perm[j];
+            const cu = c % 3;
+            const cv = (c - cu) / 3;
+            const u = (cu + 0.5 + (hash3(x, y, 50 + j) - 0.5) * 0.55) / 3;
+            const v = (cv + 0.62 + (hash3(x, y, 70 + j) - 0.5) * 0.45) / 3;
+            if (lod === 1) {
+              if (light) continue;
+              const r = sz * 0.42;
+              if (!clear(m, u, v, r) || u < r || v < r || u > 1 - r || v > 1 - r) continue;
+              ctx.rect(x + u - r, y + v - r, r * 2, r * 2);
+              continue;
+            }
+            const h = sz * (0.9 + hash3(x, y, 90 + j) * 0.3);
+            const bu = Math.min(1 - h * 0.72 - 0.02, Math.max(h * 0.72 + 0.02, u));
+            const bv = Math.min(0.97, Math.max(h * 1.15, v));
+            if (!clear(m, bu, bv - h * 0.5, h * 0.7)) continue;
+            const bx = x + bu;
+            const by = y + bv;
+            if (light) {
+              ctx.moveTo(bx, by);
+              ctx.lineTo(bx + h * 0.06, by - h * 1.12);
+              continue;
+            }
+            const bl = lod === 3 ? BLADES_FINE : BLADES;
+            for (let b = 0; b < bl.length; b += 3) {
+              ctx.moveTo(bx + bl[b] * h, by);
+              ctx.lineTo(bx + bl[b + 1] * h, by + bl[b + 2] * h);
+            }
+          }
+        }
+      };
+      if (lod === 1) {
+        ctx.fillStyle = this.tuftCss;
+        tuftPass(false);
+        ctx.fill();
+      } else {
+        ctx.lineCap = 'round';
+        ctx.lineWidth = Math.max(1.2 * px, lod === 2 ? 0.03 : 0.022);
+        ctx.strokeStyle = this.tuftCss;
+        tuftPass(false);
+        ctx.stroke();
+        ctx.strokeStyle = this.tuftLightCss;
+        tuftPass(true);
+        ctx.stroke();
+      }
+    }
+    // ---- forest: tree crowns (fewer and smaller where the forest is stripped)
+    if (hasForest) {
+      for (let pass = 0; pass < 2; pass++) {
+        ctx.fillStyle = pass === 0 ? this.crownShadeCss : this.crownCss;
+        ctx.beginPath();
+        const ox = pass === 0 ? 0.035 : 0;
+        const oy = pass === 0 ? 0.045 : 0;
+        for (let k = 0; k < n; k++) {
+          const i = list[k];
+          if (terr[i] !== FOREST) continue;
+          const q = (gkey[i] >> 3) & 7;
+          const x = i % W;
+          const y = (i - x) / W;
+          const m = corner[i];
+          const cnt = q === 0 ? 1 : q <= 2 ? 2 : 3;
+          const slot = (hash3(x, y, 150) * 3) | 0;
+          for (let j = 0; j < cnt; j++) {
+            const sj = (slot + j) % 3;
+            let rr = (0.14 + Math.min(q, 6) * 0.02) * (0.82 + hash3(x, y, 120 + j) * 0.36);
+            if (pass === 1) rr *= 0.94;
+            const lim = rr * 1.1 + 0.03;
+            let u = TREE_SLOTS[sj * 2] + (hash3(x, y, 130 + j) - 0.5) * 0.22;
+            let v = TREE_SLOTS[sj * 2 + 1] + (hash3(x, y, 140 + j) - 0.5) * 0.22;
+            u = Math.min(1 - lim - 0.04, Math.max(lim, u));
+            v = Math.min(1 - lim - 0.05, Math.max(lim, v));
+            if (!clear(m, u, v, rr * 0.8)) continue;
+            const cx = x + u + ox;
+            const cy = y + v + oy;
+            ctx.moveTo(cx + rr, cy);
+            ctx.arc(cx, cy, rr, 0, Math.PI * 2);
+            if (lod >= 2) {
+              // two smaller lobes at varied angles give each crown its own outline
+              const a1 = hash3(x, y, 160 + j) * Math.PI * 2;
+              const a2 = a1 + 1.9 + hash3(x, y, 170 + j) * 1.4;
+              const r1 = rr * (0.52 + hash3(x, y, 180 + j) * 0.14);
+              const r2 = rr * (0.5 + hash3(x, y, 190 + j) * 0.14);
+              const d1 = rr - r1 * 0.75;
+              const d2 = rr - r2 * 0.75;
+              const l1x = cx + Math.cos(a1) * d1;
+              const l1y = cy + Math.sin(a1) * d1;
+              const l2x = cx + Math.cos(a2) * d2;
+              const l2y = cy + Math.sin(a2) * d2;
+              ctx.moveTo(l1x + r1, l1y);
+              ctx.arc(l1x, l1y, r1, 0, Math.PI * 2);
+              ctx.moveTo(l2x + r2, l2y);
+              ctx.arc(l2x, l2y, r2, 0, Math.PI * 2);
+            }
+          }
+        }
+        ctx.fill();
+      }
+    }
+    // ---- walls as blocks (lines kept inside the tile)
+    if (hasWall) {
+      const lw = Math.max(1.2 * px, 0.035);
+      const e = lw / 2;
+      ctx.lineWidth = lw;
+      ctx.lineCap = 'butt';
+      ctx.strokeStyle = CSS_MORTAR;
+      ctx.beginPath();
+      for (let k = 0; k < n; k++) {
+        const i = list[k];
+        if (terr[i] !== WALL) continue;
+        const x = i % W;
+        const y = (i - x) / W;
+        ctx.moveTo(x, y + e);
+        ctx.lineTo(x + 1, y + e);
+        ctx.moveTo(x, y + 0.5);
+        ctx.lineTo(x + 1, y + 0.5);
+        ctx.moveTo(x + 0.5, y);
+        ctx.lineTo(x + 0.5, y + 0.5);
+        ctx.moveTo(x + e, y + 0.5);
+        ctx.lineTo(x + e, y + 1);
+        if (x + 1 >= W || terr[i + 1] !== WALL) {
+          ctx.moveTo(x + 1 - e, y);
+          ctx.lineTo(x + 1 - e, y + 1);
+        }
+        if (y + 1 >= src.H || terr[i + W] !== WALL) {
+          ctx.moveTo(x, y + 1 - e);
+          ctx.lineTo(x + 1, y + 1 - e);
+        }
+        if (x > 0 && terr[i - 1] !== WALL) {
+          ctx.moveTo(x + e, y);
+          ctx.lineTo(x + e, y + 0.5);
+        }
+      }
+      ctx.stroke();
+    }
+  }
+
+  // ---------------------------------------------------------------- scratch buffers
+
+  private scratch(n: number): Int32Array {
+    if (this.list.length < n) this.list = new Int32Array(Math.max(n, this.list.length * 2));
+    return this.list;
+  }
+
+  private growScratch(n: number): Int32Array {
+    const a = new Int32Array(Math.max(n, 64));
+    a.set(this.list.subarray(0, Math.min(this.list.length, a.length)));
+    this.list = a;
+    return a;
+  }
+
+  private scratch2(n: number): Int32Array {
+    if (this.list2.length < n) this.list2 = new Int32Array(Math.max(n, this.list2.length * 2));
+    return this.list2;
+  }
+
+  private growScratch2(n: number): Int32Array {
+    const a = new Int32Array(Math.max(n, 64));
+    a.set(this.list2.subarray(0, Math.min(this.list2.length, a.length)));
+    this.list2 = a;
+    return a;
+  }
+
+  // ---------------------------------------------------------------- chunks
+
+  private chunk(L: number, cx: number, cy: number): Surface {
+    const key = L * 4194304 + cy * 2048 + cx;
+    let c = this.chunks.get(key);
+    if (c) return c;
+    const T = CHUNK_PX / L;
+    const tx0 = cx * T;
+    const ty0 = cy * T;
+    const tw = Math.min(T, this.W - tx0);
+    const th = Math.min(T, this.H - ty0);
+    const w = tw * L;
+    const h = th * L;
+    let canvas: HTMLCanvasElement | undefined;
+    if (w === CHUNK_PX && h === CHUNK_PX) canvas = this.pool.pop();
+    if (!canvas) canvas = makeCanvas(w, h);
+    c = { canvas, ctx: canvas.getContext('2d')!, L, tx0, ty0, tw, th, keys: new Uint32Array((tw + 2) * (th + 2)), pal: -1, ver: 0, used: this.frame, bytes: w * h * 4 };
+    this.chunks.set(key, c);
+    this.bytes += c.bytes;
+    return c;
+  }
+
+  private evict(): void {
+    if (this.bytes <= CACHE_LIMIT) return;
+    const all = [...this.chunks.entries()].filter(([, c]) => c.used < this.frame).sort((a, b) => a[1].used - b[1].used);
+    for (const [k, c] of all) {
+      if (this.bytes <= CACHE_LIMIT * 0.8) break;
+      this.chunks.delete(k);
+      this.bytes -= c.bytes;
+      this.release(c);
+    }
+  }
+
+  // ---------------------------------------------------------------- drawing
+
+  /**
+   * Draw the ground into the world rectangle. ctx must be in world space (world units → device px).
+   * `view` (visible world rectangle, CSS px per unit) is optional; without it the visible area is
+   * taken from ctx's transform and canvas size.
+   */
+  draw(ctx: CanvasRenderingContext2D, worldW: number, worldH: number, view?: GroundView): void {
+    const ov = this.overview;
+    if (!this.world || !ov) return;
+    this.frame++;
+    const tf = ctx.getTransform();
+    const a = tf.a;
+    const d = tf.d;
+    if (!(a > 0) || !(d > 0)) return;
+    const W = this.W;
+    const H = this.H;
+    const ts = worldW / W;
+    const S = a * ts;
+    this.deadline = performance.now() + BUDGET_MS;
+    this.area = 0;
+    // larger screens get a proportionally larger area budget (up to 2.5x)
+    this.areaBudget = BUDGET_AREA * Math.max(1, Math.min(2.5, (ctx.canvas.width * ctx.canvas.height) / 1e6));
+    let x0: number;
+    let y0: number;
+    let x1: number;
+    let y1: number;
+    if (view && Number.isFinite(view.x0) && Number.isFinite(view.x1) && Number.isFinite(view.y0) && Number.isFinite(view.y1)) {
+      x0 = view.x0;
+      y0 = view.y0;
+      x1 = view.x1;
+      y1 = view.y1;
+    } else {
+      x0 = -tf.e / a;
+      y0 = -tf.f / d;
+      x1 = (ctx.canvas.width - tf.e) / a;
+      y1 = (ctx.canvas.height - tf.f) / d;
+    }
+    const tx0 = Math.max(0, Math.floor(x0 / ts));
+    const ty0 = Math.max(0, Math.floor(y0 / ts));
+    const tx1 = Math.min(W, Math.ceil(x1 / ts));
+    const ty1 = Math.min(H, Math.ceil(y1 / ts));
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+
+    // On high-density screens (2 device px per CSS px) a cached canvas may be enlarged up to 1.25x:
+    // each texel then still covers less than one CSS pixel, and far fewer chunks are needed.
+    const dpr = view && view.zoom > 0 ? a / view.zoom : 1;
+    const mag = dpr >= 1.5 ? 1.25 : 1;
+    if (S <= ov.L * mag || tx1 <= tx0 || ty1 <= ty0) {
+      this.lastLevel = 0;
+      this.syncSurface(ov, true);
+      // exactly 1:1 stays nearest (no half-texel blending); smaller or slightly larger is filtered
+      ctx.imageSmoothingEnabled = Math.abs(S / ov.L - 1) > 0.01;
+      ctx.imageSmoothingQuality = S < ov.L * 0.5 ? 'medium' : 'low';
+      ctx.drawImage(ov.canvas, 0, 0, worldW, worldH);
+      ctx.imageSmoothingEnabled = true;
+      return;
+    }
+
+    if (S > DIRECT_FROM * mag) {
+      this.lastLevel = -1;
+      this.drawDirect(ctx, tf, ts, tx0, ty0, tx1, ty1, S);
+      this.refreshOverview(ov);
+      return;
+    }
+    let L = LEVELS[LEVELS.length - 1];
+    for (const l of LEVELS) {
+      if (l * mag >= S) {
+        L = l;
+        break;
+      }
+    }
+    this.lastLevel = L;
+    const T = CHUNK_PX / L;
+    const cx0 = Math.floor(tx0 / T);
+    const cy0 = Math.floor(ty0 / T);
+    const cx1 = Math.floor((tx1 - 1) / T);
+    const cy1 = Math.floor((ty1 - 1) / T);
+    // paint: chunks nearest the centre first
+    const mx = (cx0 + cx1) / 2;
+    const my = (cy0 + cy1) / 2;
+    const todo: Surface[] = [];
+    for (let cy = cy0; cy <= cy1; cy++) for (let cx = cx0; cx <= cx1; cx++) todo.push(this.chunk(L, cx, cy));
+    todo.sort((p, q) => Math.abs(p.tx0 / T - mx) + Math.abs(p.ty0 / T - my) - (Math.abs(q.tx0 / T - mx) + Math.abs(q.ty0 / T - my)));
+    let first = true;
+    for (const c of todo) {
+      c.used = this.frame;
+      if (c.pal < 0) {
+        if (first || this.budgetLeft()) {
+          this.paintFull(c);
+          first = false;
+        }
+      } else this.syncSurface(c, false);
+    }
+    this.refreshOverview(ov);
+    // draw at whole device pixels so neighbouring chunks meet without seams
+    const oneToOne = Math.abs(S / L - 1) <= 0.01;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    for (const c of todo) {
+      const dx0 = Math.round(tf.e + a * c.tx0 * ts);
+      const dy0 = Math.round(tf.f + d * c.ty0 * ts);
+      const dx1 = Math.round(tf.e + a * (c.tx0 + c.tw) * ts);
+      const dy1 = Math.round(tf.f + d * (c.ty0 + c.th) * ts);
+      if (c.pal >= 0) {
+        ctx.imageSmoothingEnabled = oneToOne === false;
+        ctx.imageSmoothingQuality = 'low';
+        ctx.drawImage(c.canvas, 0, 0, c.canvas.width, c.canvas.height, dx0, dy0, dx1 - dx0, dy1 - dy0);
+        continue;
+      }
+      // not painted yet: the coarser level if cached, else the overview
+      const parent = L > LEVELS[0] ? this.chunks.get((L / 2) * 4194304 + Math.floor(c.ty0 / (T * 2)) * 2048 + Math.floor(c.tx0 / (T * 2))) : undefined;
+      if (parent && parent.pal >= 0) {
+        const pl = parent.L;
+        ctx.imageSmoothingEnabled = true;
+        ctx.drawImage(parent.canvas, (c.tx0 - parent.tx0) * pl, (c.ty0 - parent.ty0) * pl, c.tw * pl, c.th * pl, dx0, dy0, dx1 - dx0, dy1 - dy0);
+      } else {
+        const ol = ov.L;
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(ov.canvas, c.tx0 * ol, c.ty0 * ol, c.tw * ol, c.th * ol, dx0, dy0, dx1 - dx0, dy1 - dy0);
+      }
+    }
+    ctx.setTransform(tf);
     ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(this.base, 0, 0, worldW, worldH);
-    ctx.drawImage(this.veg, 0, 0, worldW, worldH);
-    ctx.drawImage(this.shade, 0, 0, worldW, worldH);
+    this.evict();
+  }
+
+  /** Keep the overview (minimap thumbnail, fallback) fresh while zoomed in, on frames with little other work. */
+  private refreshOverview(ov: Surface): void {
+    if (this.frame - this.ovSynced < 10) return;
+    if (this.area >= 0.25 && this.frame - this.ovSynced <= 240) return;
+    this.ovSynced = this.frame;
+    this.syncSurface(ov, true);
+  }
+
+  /** Close zoom: ground texels for the visible tiles, then corners, shore and detail as vectors. */
+  private drawDirect(ctx: CanvasRenderingContext2D, tf: DOMMatrix, ts: number, tx0: number, ty0: number, tx1: number, ty1: number, S: number): void {
+    const W = this.W;
+    const H = this.H;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(this.ground, tx0, ty0, tx1 - tx0, ty1 - ty0, tx0 * ts, ty0 * ts, (tx1 - tx0) * ts, (ty1 - ty0) * ts);
+    ctx.setTransform(tf.a * ts, tf.b, tf.c, tf.d * ts, tf.e, tf.f);
+    const n = (tx1 - tx0) * (ty1 - ty0);
+    const list = this.scratch(n);
+    let k = 0;
+    for (let y = ty0; y < ty1; y++) for (let x = tx0; x < tx1; x++) list[k++] = y * W + x;
+    const mx0 = Math.max(0, tx0 - 1);
+    const my0 = Math.max(0, ty0 - 1);
+    const mx1 = Math.min(W, tx1 + 1);
+    const my1 = Math.min(H, ty1 + 1);
+    const sl = this.scratch2((mx1 - mx0) * (my1 - my0));
+    let sn = 0;
+    for (let y = my0; y < my1; y++) {
+      for (let x = mx0; x < mx1; x++) {
+        const i = y * W + x;
+        if (this.shore[i] || this.corner[i]) sl[sn++] = i;
+      }
+    }
+    this.paintShapes(ctx, list, k, S, sl, sn);
+    ctx.setTransform(tf);
+    ctx.imageSmoothingEnabled = true;
   }
 
   /** Thumbnail draw (used by the minimap). */
   drawThumb(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number): void {
-    if (!this.baseImg) return;
+    const ov = this.overview;
+    if (!ov || ov.pal < 0) return;
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(this.base, x, y, w, h);
-    ctx.drawImage(this.veg, x, y, w, h);
-    ctx.drawImage(this.shade, x, y, w, h);
+    ctx.drawImage(ov.canvas, x, y, w, h);
   }
 }
-
-const MAX_FOOD: number[] = [];
-for (let t = 0; t < 8; t++) MAX_FOOD[t] = TERRAIN_INFO[t as TerrainType]?.maxFood ?? 0;
-for (let t = 8; t < 256; t++) MAX_FOOD[t] = 0;

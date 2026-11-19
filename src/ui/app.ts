@@ -1,59 +1,56 @@
-// OWNER: UI/UX agent. Application shell: layout, game loop, camera & tool input,
-// experiment lifecycle (start / restart / replay / save / load), panels and toasts.
+// OWNER: UI shell. Application shell: start screen, layout, game loop, camera and tool
+// input, experiment lifecycle (start, restart, replay, save, load), panels and notices.
 import { Simulation } from '../sim/simulation';
 import { SCENARIOS } from '../sim/presets';
 import { DEFAULT_CONFIG } from '../sim/config';
 import { SEASON_NAMES, TERRAIN_INFO } from '../sim/constants';
 import { deserializeState, serializeSim } from '../sim/persistence';
-import type { ActionKind, DeathCause, Intervention, InterventionRecord, ScenarioDef, SimConfig, SimEvent, TerrainType } from '../sim/types';
+import type { DeathCause, Intervention, InterventionRecord, ScenarioDef, SimConfig, SimEvent, TerrainType } from '../sim/types';
 import { Renderer, type OverlayKind, type ViewOptions } from '../render/renderer';
 import type { Camera } from '../render/camera';
-import { createAnalyticsPanel, type AnalyticsPanel } from './analytics';
-import { createInspector, type Inspector } from './inspector';
+import { createAnalyticsPanel, plainText, type AnalyticsPanel } from './analytics';
+import { createInspector, describeAction, type Inspector, type InspectorHandlers } from './inspector';
 import { createEventLog, type EventLogPanel } from './eventlog';
-import { fmtInt, h, icon, installTooltips, store, Toaster } from './dom';
+import { fill, fmtInt, h, icon, installTooltips, plural, store, Toaster, type ToastOpts } from './dom';
 import { DEFAULT_SETTINGS, Painter, TOOLS, brushColor, brushIntervention, effectiveRadius, toolById, type ToolDef, type ToolId, type ToolSettings } from './tools';
 import { PopulationDesigner } from './designer';
-import { buildLeftSidebar, OVERLAYS, viewPrefs, type LeftSidebar } from './controls';
+import { OVERLAYS, VIEW_TOGGLES, applyConnections, buildLayersMenu, buildToolPanel, viewPrefs, type LayersMenu, type ToolPanel } from './controls';
+import { buildSettings, type SettingsDrawer } from './settings';
+import { buildStartScreen, defaultSeedOf, parseSeed, type StartScreen } from './start';
 
 /** Speed multipliers; 0 = "Max" (as many ticks as fit the frame budget). */
 export const SPEEDS = [0.25, 0.5, 1, 2, 4, 8, 16, 32, 64, 0];
-const SPEED_LABELS = ['¼×', '½×', '1×', '2×', '4×', '8×', '16×', '32×', '64×', 'Max'];
-/** Ticks per second at 1×. */
+const SPEED_LABELS = ['1/4x', '1/2x', '1x', '2x', '4x', '8x', '16x', '32x', '64x', 'Max'];
+/** Ticks per second at 1x. */
 const BASE_TPS = 30;
 /** Hard budget for simulation stepping per animation frame (ms). */
 const STEP_BUDGET_MS = 12;
 const PAN_CODES = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']);
+/** Zoom step of the +, - buttons and keys. */
+const ZOOM_STEP = 1.5;
+/** Close view used when double-clicking an agent (CSS px per world unit). */
+const CLOSE_ZOOM = 5;
+/** Least time between two notices about simulation events (ms). */
+const EVENT_TOAST_GAP = 8000;
+/** Space on the right of the map kept for the zoom buttons (renderer legend stays clear). */
+const ZOOM_COL = 56;
+/** Room kept above the minimap for the renderer's map legend (connections and territory edges, 115 px with its gap). */
+const LEGEND_ZONE = 120;
 
 type Tab = 'stats' | 'inspector' | 'events';
-
-const ACTION_LABEL: Record<ActionKind, string> = {
-  idle: 'Idle',
-  wander: 'Wandering',
-  explore: 'Exploring',
-  forage: 'Foraging',
-  eat: 'Eating',
-  rest: 'Resting',
-  flee: 'Fleeing',
-  attack: 'Attacking',
-  share: 'Sharing food',
-  mate: 'Courting',
-  socialize: 'Socialising',
-  gohome: 'Heading home',
-  deposit: 'Storing food',
-  withdraw: 'Taking from stores',
-};
 
 const DEATH_LABEL: Record<DeathCause, string> = {
   starvation: 'starved',
   old_age: 'died of old age',
-  combat: 'was killed in combat',
-  disease: 'succumbed to disease',
+  combat: 'was killed in a fight',
+  disease: 'died of disease',
   disaster: 'was killed by a disaster',
   removed: 'was removed',
 };
 
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+/** An error message as one sentence (exactly one final period). */
+const sentence = (msg: string): string => `${msg.trim().replace(/[.\s]+$/, '')}.`;
 
 interface DragState {
   kind: 'pan' | 'paint' | 'click' | 'minimap';
@@ -66,6 +63,16 @@ interface DragState {
   moved: boolean;
 }
 
+/** URL hash options: #run starts the default experiment at once; #run=<id>&seed=<n> picks one. */
+function readHash(): { run: string | null; seed: number | undefined } {
+  try {
+    const p = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+    return { run: p.has('run') ? (p.get('run') ?? '') : null, seed: parseSeed(p.get('seed') ?? '') };
+  } catch {
+    return { run: null, seed: undefined };
+  }
+}
+
 export class App {
   sim!: Simulation;
   scenario!: ScenarioDef;
@@ -75,25 +82,45 @@ export class App {
   readonly designer: PopulationDesigner;
   readonly toaster: Toaster;
   readonly supportsMinimap: boolean;
+  /** Every experiment, in start screen order (for scripts). */
+  readonly scenarios: readonly ScenarioDef[] = SCENARIOS;
   tool: ToolDef = TOOLS[0];
-  running = true;
+  running = false;
   speedIdx = 2;
   followId = -1;
+  /** True while the start screen is shown (nothing runs). */
+  startOpen = false;
+  /** True once a run was started from the start screen or a save was loaded. */
+  hasRun = false;
+  /** Pop-up notices about simulation events (Settings). */
+  notices = store.get('notices') !== '0';
+  helpOpen = false;
+  readonly el: Record<string, HTMLElement> = {};
 
   private readonly root: HTMLElement;
   private readonly stage: HTMLElement;
   private readonly canvas: HTMLCanvasElement;
-  private readonly left: LeftSidebar;
+  private readonly start: StartScreen;
+  private readonly toolPanel: ToolPanel;
+  private readonly layers: LayersMenu;
+  private readonly drawer: SettingsDrawer;
   private readonly analytics: AnalyticsPanel;
   private readonly inspector: Inspector;
   private readonly eventlog: EventLogPanel;
   private readonly painter: Painter;
-  private readonly el: Record<string, HTMLElement> = {};
-  private readonly speedBtns: HTMLButtonElement[] = [];
   private readonly railBtns = new Map<ToolId, HTMLButtonElement>();
   private readonly tabBtns = new Map<Tab, HTMLButtonElement>();
   private readonly panes = new Map<Tab, HTMLElement>();
   private tab: Tab = 'stats';
+
+  /** World shown behind the start screen (null = the current run). */
+  private preview: { sim: Simulation; sc: ScenarioDef } | null = null;
+  /** View used while the start screen is open (no selection, brush or minimap). */
+  private startView: ViewOptions;
+  /** Width of the start column in CSS px (measured when the start screen is laid out). */
+  private startColW = 420;
+  /** Camera and run state to restore with "Back to current run". */
+  private resumeState: { x: number; y: number; zoom: number; running: boolean } | null = null;
 
   private drag: DragState | null = null;
   private pointer = { x: 0, y: 0, inside: false };
@@ -108,31 +135,29 @@ export class App {
   private ticksCounted = 0;
   private limitedUntil = 0;
   private needsApply = false;
-  /** Set when speed / pause changes so the next perf window is not judged. */
+  /** Set when speed or pause changes so the next perf window is not judged. */
   private perfDirty = true;
   private simError = false;
   private renderErrLogged = false;
   private panelErrLogged = false;
   /** Smoothed cost of one simulation tick in ms (see simulate()). */
   private tickCost = 1;
-  /** Content + width the top HUD layout was last fitted for (see fitHud()). */
-  private hudKey = '';
   private lastEventId = 0;
-  private unseenEvents = 0;
-  private toastQueue: SimEvent[] = [];
-  private lastToastT = 0;
-  private skippedToasts = 0;
-  private helpOpen = false;
+  /** One waiting notice about a simulation event (newest wins). */
+  private pendingEvent: { ev: SimEvent; at: number } | null = null;
+  private lastEventToast = -Infinity;
   private panelTicks = 0;
   private text: Record<string, string> = {};
+  private hoverKey = '';
+  private hudKey = '';
 
   constructor(mount: HTMLElement) {
     installTooltips();
     this.root = h('div', { class: 'al' });
     mount.replaceChildren(this.root);
 
-    // ---------------------------------------------------------- stage (canvas + HUD)
-    this.canvas = h('canvas', { class: 'world', tabindex: '0', 'aria-label': 'World view — use the tools to interact' });
+    // ---------------------------------------------------------- stage (canvas + map controls)
+    this.canvas = h('canvas', { class: 'world', tabindex: '0', 'aria-label': 'World map' });
     this.stage = h('main', { class: 'stage' }, this.canvas);
     this.renderer = new Renderer(this.canvas);
     this.toaster = new Toaster(this.stage);
@@ -151,18 +176,21 @@ export class App {
       showVision: true,
       showTrails: true,
       showRelations: true,
+      showConnections: true,
       showCamps: true,
       showLabels: true,
       showMinimap: true,
       showLegend: true,
       brush: null,
     } as Record<string, unknown>;
-    for (const [k, v] of Object.entries(storedView)) if (typeof v === 'boolean' && typeof view[k] === 'boolean') view[k] = v;
+    const allowed = new Set(VIEW_TOGGLES.map((t) => t.key));
+    for (const [k, v] of Object.entries(storedView)) if (allowed.has(k) && typeof v === 'boolean') view[k] = v;
     const ov = store.get('overlay');
     if (ov && OVERLAYS.some((o) => o.value === ov)) view.overlay = ov;
-    // keep the renderer's minimap & legend clear of the bottom HUD strip
-    view.insets = { top: 0, right: 0, bottom: 34, left: 0 };
+    view.insets = { top: 0, right: ZOOM_COL, bottom: 0, left: 0 };
     this.view = view as unknown as ViewOptions;
+    applyConnections(this.view, view.showConnections !== false);
+    this.startView = { ...this.view, overlay: 'none', selectedId: -1, hoverId: -1, brush: null, showMinimap: false, showLegend: false, insets: { top: 0, right: 0, bottom: 0, left: 0 } };
     this.supportsMinimap = detectMinimap(this.renderer);
 
     this.painter = new Painter((x, y) => {
@@ -170,41 +198,48 @@ export class App {
       if (iv) this.enqueue(iv);
     });
 
-    // ---------------------------------------------------------- simulation
-    const first = SCENARIOS.find((s) => s.id === 'eden') ?? SCENARIOS[0];
+    // ---------------------------------------------------------- simulation (always exists)
+    const hash = readHash();
+    const byId = (id: string | null) => (id ? SCENARIOS.find((s) => s.id === id) : undefined);
+    const first = byId(hash.run) ?? byId(store.get('lastScenario')) ?? SCENARIOS.find((s) => s.id === 'eden') ?? SCENARIOS[0];
     this.scenario = first;
-    this.sim = Simulation.create({ scenario: first });
+    this.sim = Simulation.create({ scenario: first, seed: hash.seed });
     this.designer = new PopulationDesigner(() => this.sim);
 
     // ---------------------------------------------------------- layout
+    this.toolPanel = buildToolPanel(this);
+    this.layers = buildLayersMenu(this);
+    this.drawer = buildSettings(this);
+    this.start = buildStartScreen({
+      onPick: (sc, seed) => this.previewPick(sc, seed),
+      onStart: () => this.begin(),
+      onBack: () => this.closeStart(),
+      onLoad: () => this.openLoadDialog(),
+      onHelp: () => this.showHelp(true),
+    });
     const top = this.buildTopbar();
-    this.left = buildLeftSidebar(this);
-    const right = this.buildRight();
-    this.buildHud();
-    this.root.append(top, this.left.el, this.stage, right);
-    this.root.append(this.buildHelp(), this.buildDrop());
-    if (store.get('hideLeft') === '1') this.root.classList.add('no-left');
-    if (store.get('hideRight') === '1') this.root.classList.add('no-right');
+    const side = this.buildSide();
+    this.buildMapControls();
+    this.root.append(top, this.stage, side, this.drawer.el, this.start.el, this.buildHelp(), this.buildDrop());
+    if (store.get('hideSide') === '1') this.root.classList.add('no-side');
+    this.el.sideBtn.classList.toggle('on', !this.root.classList.contains('no-side'));
 
     // ---------------------------------------------------------- panels
-    const handlers = {
-      onSelect: (id: number) => {
-        this.select(id);
-        const a = this.sim.getAgent(id);
-        if (a) this.flyTo(a.x, a.y);
-      },
+    const handlers: InspectorHandlers = {
+      onSelect: (id: number) => this.showAgent(id, false),
       onFollow: (id: number) => {
         this.select(id);
         this.follow(id);
       },
       onKill: (id: number) => this.enqueue({ kind: 'killAgent', id }),
       onBoost: (id: number) => this.enqueue({ kind: 'boostAgent', id }),
+      onShowOnMap: (id: number) => this.showAgent(id, true),
     };
-    this.analytics = createAnalyticsPanel(this.panes.get('stats')!);
+    this.analytics = createAnalyticsPanel(this.panes.get('stats')!, { onJump: (x, y) => this.flyTo(x, y, true) });
     this.inspector = createInspector(this.panes.get('inspector')!, handlers);
     this.eventlog = createEventLog(this.panes.get('events')!, (x, y) => {
-      this.flyTo(x, y);
-      this.ripple(x, y, 30, 'rgba(245,177,76,0.9)');
+      this.flyTo(x, y, true);
+      this.ripple(x, y, 30, 'rgba(214,166,72,0.9)');
     });
 
     // ---------------------------------------------------------- input
@@ -214,26 +249,30 @@ export class App {
     window.addEventListener('blur', () => this.keys.clear());
     new ResizeObserver(() => this.onResize()).observe(this.stage);
     document.addEventListener('mousedown', (e) => {
-      // keep keyboard shortcuts working after clicking buttons (no lingering focus): buttons never
-      // take focus, and a text box / dropdown that had it gives it up — otherwise e.g. typing a
-      // seed and clicking Restart would leave every shortcut key typing into the seed box
+      // keep keyboard shortcuts working after clicking buttons: buttons never take focus, and a
+      // text box that had it gives it up (typing a seed then clicking Restart must not leave
+      // every shortcut typing into the seed box)
       const t = e.target as Element | null;
-      if (t && t.closest && t.closest('button, .chip')) {
+      if (t && t.closest && t.closest('button, .chip, summary')) {
         e.preventDefault();
         const a = document.activeElement;
         if (a instanceof HTMLElement && a.matches('input:not([type=range]):not([type=checkbox]), select, textarea')) a.blur();
       }
     });
+    document.addEventListener('pointerdown', (e) => this.closeMenusOutside(e), true);
 
     // ---------------------------------------------------------- boot
     this.renderer.resize();
     this.setSim(this.sim, first);
-    this.setTool('inspect', false);
+    this.setTool('inspect');
     this.setSpeed(2);
     this.updateTransport();
-    if (!store.get('welcomed')) {
-      store.set('welcomed', '1');
-      this.toaster.show('Pick a tool on the left of the map (keys 1–9), click the world to intervene, and press H for every shortcut.', { title: 'Welcome to Artificial Life', timeout: 9000 });
+    if (hash.run !== null) {
+      this.hasRun = true;
+      this.setPaused(false);
+      this.maybeShowHint();
+    } else {
+      this.openStart();
     }
     requestAnimationFrame(this.frame);
   }
@@ -242,143 +281,163 @@ export class App {
     return this.renderer.camera;
   }
 
+  /** The world on screen: the start screen preview while it is open, else the current run. */
+  get shownSim(): Simulation {
+    return this.startOpen && this.preview ? this.preview.sim : this.sim;
+  }
+
   // ============================================================== layout builders
   private buildTopbar(): HTMLElement {
     const el = this.el;
-    el.expName = h('span', { class: 'exp-name' }, '—');
-    el.expSeed = h('span', { class: 'exp-seed mono' });
-    el.play = h('button', { type: 'button', class: 'btn icon play-btn', tip: 'Play / pause (Space)', 'aria-label': 'Play or pause', onclick: () => this.togglePause() });
-    const seg = h('div', { class: 'seg speed', role: 'radiogroup', 'aria-label': 'Simulation speed' });
+    el.expName = h('span', { class: 'exp-name' });
+    el.play = h('button', { type: 'button', class: 'btn icon play-btn', tip: 'Play or pause (Space)', 'aria-label': 'Play or pause', onclick: () => this.togglePause() });
+    el.speedLabel = h('button', { type: 'button', class: 'btn speed-label', 'aria-haspopup': 'true', 'aria-label': 'Speed', tip: 'Speed. Click to pick one.', onclick: () => this.toggleSpeedMenu() });
+    el.speedMenu = h('div', { class: 'menu speed-menu', role: 'menu' });
     SPEEDS.forEach((s, i) => {
-      const b = h(
-        'button',
-        {
-          type: 'button',
-          role: 'radio',
-          tip: s === 0 ? 'Max: run as many ticks as fit in the frame budget (12 ms per frame). Shortcut: < and >' : `${s}× speed = ${BASE_TPS * s} ticks per second. Shortcut: < and >`,
-          onclick: () => this.setSpeed(i),
-        },
-        SPEED_LABELS[i],
+      el.speedMenu.append(
+        h(
+          'button',
+          { type: 'button', class: 'menu-item', role: 'menuitemradio', 'data-i': String(i), onclick: () => { this.setSpeed(i); this.toggleSpeedMenu(false); } },
+          h('span', null, SPEED_LABELS[i]),
+          h('span', { class: 'menu-sub' }, s === 0 ? 'as fast as possible' : `${fmtInt(BASE_TPS * s)} ticks per second`),
+        ),
       );
-      this.speedBtns.push(b);
-      seg.append(b);
     });
     el.dayIcon = h('span', { class: 'day-ic' });
     el.clock = h('span', { class: 'clock-text' });
-    el.tick = h('span', { class: 'clock-tick mono' });
-    el.pop = h('span', { class: 'mono stat-num' });
-    el.tribes = h('span', { class: 'mono stat-num' });
-    el.tps = h('span', { class: 'mono' });
-    el.fps = h('span', { class: 'mono' });
-    el.cpu = h('span', { class: 'badge warn cpu', tip: 'CPU-limited: the requested speed needs more computation than the 12 ms per-frame budget allows, so the simulation runs as fast as it can.' }, icon('cpu', 12), 'CPU-limited');
+    el.pop = h('span', { class: 'pop-text' });
+    const speed = h(
+      'div',
+      { class: 'speed' },
+      h('button', { type: 'button', class: 'btn icon ghost', tip: 'Slower (<)', 'aria-label': 'Slower', onclick: () => this.setSpeed(this.speedIdx - 1) }, icon('slower', 16)),
+      el.speedLabel,
+      h('button', { type: 'button', class: 'btn icon ghost', tip: 'Faster (>)', 'aria-label': 'Faster', onclick: () => this.setSpeed(this.speedIdx + 1) }, icon('faster', 16)),
+      el.speedMenu,
+    );
+    el.sideBtn = h('button', { type: 'button', class: 'btn icon ghost', tip: 'Show or hide the side panel', 'aria-label': 'Side panel', onclick: () => this.showSide(this.root.classList.contains('no-side')) }, icon('panelRight', 18));
+    el.settingsBtn = h('button', { type: 'button', class: 'btn ghost', 'aria-label': 'Settings', onclick: () => this.showSettings(!this.drawer.isOpen) }, icon('gear', 17), h('span', null, 'Settings'));
     return h(
       'header',
       { class: 'topbar', 'data-tip-side': 'bottom' },
-      h('div', { class: 'brand' }, icon('logo', 22, 'brand-ic'), h('span', { class: 'brand-name' }, 'Artificial Life')),
+      h('div', { class: 'brand' }, icon('logo', 20, 'brand-ic'), h('span', { class: 'brand-name' }, 'Artificial Life')),
+      h('button', { type: 'button', class: 'exp-btn', tip: 'Choose an experiment', onclick: () => this.openStart() }, el.expName, icon('chevronDown', 14)),
+      h('div', { class: 'tb-gap' }),
       h(
-        'button',
-        {
-          type: 'button',
-          class: 'exp-chip',
-          tip: 'The experiment currently running. Click to choose another experiment, change the seed or replay your interventions.',
-          onclick: () => {
-            this.showLeft(true);
-            this.left.openSection('experiments');
-          },
-        },
-        h('span', { class: 'exp-kicker' }, 'Experiment'),
-        el.expName,
-        el.expSeed,
+        'div',
+        { class: 'transport' },
+        el.play,
+        h('button', { type: 'button', class: 'btn icon ghost', tip: 'Step one tick (.)', 'aria-label': 'Step one tick', onclick: () => this.stepOnce() }, icon('step', 16)),
+        speed,
       ),
-      h('div', { class: 'tb-spacer' }),
-      h('div', { class: 'transport' }, el.play, h('button', { type: 'button', class: 'btn icon', tip: 'Advance one tick (.)', 'aria-label': 'Step one tick', onclick: () => this.stepOnce() }, icon('step', 15)), seg),
-      h('div', { class: 'clock', tip: 'In-game calendar. Days alternate light and dark; seasons change plant growth and temperature.' }, el.dayIcon, h('span', { class: 'clock-stack' }, el.clock, el.tick)),
-      h('div', { class: 'tb-stat', tip: 'Living agents' }, icon('users', 15), el.pop),
-      h('div', { class: 'tb-stat', tip: 'Living tribes' }, icon('flag', 14), el.tribes),
-      h('div', { class: 'perf', tip: 'Simulation ticks per second · rendered frames per second' }, h('span', { class: 'perf-row' }, el.tps, h('span', { class: 'muted' }, ' TPS')), h('span', { class: 'perf-row' }, el.fps, h('span', { class: 'muted' }, ' FPS'))),
-      el.cpu,
-      h('div', { class: 'tb-spacer' }),
-      h('button', { type: 'button', class: 'btn icon ghost', tip: 'Keyboard & mouse shortcuts (H)', 'aria-label': 'Help', onclick: () => this.showHelp(true) }, icon('keyboard', 17)),
-      h('button', { type: 'button', class: 'btn icon ghost', tip: 'Show / hide the controls sidebar', 'aria-label': 'Toggle left sidebar', onclick: () => this.showLeft(this.root.classList.contains('no-left')) }, icon('panelLeft', 17)),
-      h('button', { type: 'button', class: 'btn icon ghost', tip: 'Show / hide the statistics sidebar', 'aria-label': 'Toggle right sidebar', onclick: () => this.showRight(this.root.classList.contains('no-right')) }, icon('panelRight', 17)),
+      h('div', { class: 'clock', tip: '' }, el.dayIcon, el.clock),
+      el.pop,
+      h('div', { class: 'tb-gap' }),
+      el.settingsBtn,
+      h('button', { type: 'button', class: 'btn ghost', 'aria-label': 'Help', tip: 'Mouse and keyboard controls (H)', onclick: () => this.showHelp(true) }, icon('help', 17), h('span', null, 'Help')),
+      el.sideBtn,
     );
   }
 
-  private buildRight(): HTMLElement {
-    const tabs: { id: Tab; label: string; icon: string; tip: string }[] = [
-      { id: 'stats', label: 'Stats', icon: 'chart', tip: 'Population, genetics, tribes and causes of death over time.' },
-      { id: 'inspector', label: 'Inspector', icon: 'person', tip: 'Everything about the selected agent: needs, mind, genes, family and relationships.' },
-      { id: 'events', label: 'Events', icon: 'list', tip: 'Chronicle of births of tribes, wars, disasters, plagues and records. Click an event to jump there.' },
+  private buildSide(): HTMLElement {
+    const tabs: { id: Tab; label: string; icon: string }[] = [
+      { id: 'stats', label: 'Overview', icon: 'chart' },
+      { id: 'inspector', label: 'Agent', icon: 'person' },
+      { id: 'events', label: 'Events', icon: 'list' },
     ];
     const bar = h('div', { class: 'tabs', role: 'tablist' });
     const panesEl = h('div', { class: 'panes' });
     for (const t of tabs) {
-      const b = h('button', { type: 'button', class: 'tab', role: 'tab', tip: t.tip, onclick: () => this.setTab(t.id) }, icon(t.icon, 15), h('span', null, t.label));
-      if (t.id === 'events') b.append((this.el.evBadge = h('span', { class: 'tab-badge' })));
+      const b = h('button', { type: 'button', class: 'tab', role: 'tab', onclick: () => this.setTab(t.id) }, icon(t.icon, 16), h('span', null, t.label));
       this.tabBtns.set(t.id, b);
       bar.append(b);
-      const pane = h('div', { class: `pane pane-${t.id}`, role: 'tabpanel' });
+      const pane = h('div', { class: `pane pane-${t.id}`, role: 'tabpanel', 'aria-label': t.label });
       this.panes.set(t.id, pane);
       panesEl.append(pane);
     }
-    const right = h('aside', { class: 'sidebar right', 'data-tip-side': 'left', 'aria-label': 'Analysis' }, bar, panesEl);
+    const side = h('aside', { class: 'side', 'data-tip-side': 'left', 'aria-label': 'What is happening' }, bar, panesEl);
     this.applyTab();
-    return right;
+    return side;
   }
 
-  private buildHud(): void {
+  private buildMapControls(): void {
+    const el = this.el;
+    // tool rail on the left edge, the options of the active tool next to it
     const rail = h('div', { class: 'rail', role: 'toolbar', 'aria-label': 'Tools', 'data-tip-side': 'right' });
     for (const t of TOOLS) {
-      const b = h('button', { type: 'button', class: 'rail-btn', tip: `${t.name}  [${t.key}]\n${t.how}`, 'aria-label': `${t.name} (key ${t.key})`, onclick: () => this.setTool(t.id) }, icon(t.icon, 18), h('span', { class: 'k' }, t.key));
+      const b = h('button', { type: 'button', class: 'rail-btn', tip: `${t.name} (${t.key})`, 'aria-label': `${t.name}, key ${t.key}`, onclick: () => this.setTool(this.tool.id === t.id && t.id !== 'inspect' ? 'inspect' : t.id) }, icon(t.icon, 20));
       this.railBtns.set(t.id, b);
       rail.append(b);
     }
-    const el = this.el;
-    el.paused = h('button', { type: 'button', class: 'hud-pill paused-pill', onclick: () => this.togglePause(), tip: 'Click or press Space to resume' }, icon('pause', 12), 'Paused');
-    el.follow = h('button', { type: 'button', class: 'hud-pill follow-pill', onclick: () => this.stopFollow(), tip: 'Click, press F or pan the camera to stop following' });
-    el.cursor = h('div', { class: 'cursor-info mono' });
-    el.toolHud = h('div', { class: 'tool-hud' });
-    el.keysHint = h('button', { type: 'button', class: 'keys-hint', onclick: () => this.showHelp(true) }, h('kbd', null, 'H'), ' shortcuts');
-    // One row: tool HUD on the left, status pills centred in what is left, so the two never
-    // overlap on a narrow stage (e.g. 1280 px wide with both sidebars open); see fitHud().
-    el.hudTop = h('div', { class: 'hud-top' }, el.paused, el.follow);
-    el.hudRow = h('div', { class: 'hud-row' }, el.toolHud, el.hudTop);
-    this.stage.append(rail, el.hudRow, el.cursor, el.keysHint);
-  }
-
-  /**
-   * Keep the top HUD on one row while it fits. On a stage too narrow for the tool HUD and the
-   * pills side by side (e.g. a 1024 px window with both sidebars) the pills move below the tool
-   * HUD instead of running off the stage edge (which hid the Following pill and its ×).
-   */
-  private fitHud(): void {
-    const row = this.el.hudRow;
-    const pills = this.el.hudTop;
-    if (!row || !pills) return;
-    // measure (a forced layout) only when the HUD's content or the stage width changed
-    const e = this.el;
-    const key = `${e.toolHud.textContent}|${e.paused.style.display}|${e.follow.style.display}|${e.follow.textContent}|${this.camera.viewW}`;
-    if (key === this.hudKey) return;
-    this.hudKey = key;
-    const st = this.stage.classList;
-    st.remove('hud-stack');
-    if (pills.offsetWidth > 0 && pills.getBoundingClientRect().right > row.getBoundingClientRect().right + 0.5) st.add('hud-stack');
+    // status pills at the top centre
+    el.paused = h('button', { type: 'button', class: 'pill', onclick: () => this.togglePause(), tip: 'Click or press Space to continue' }, icon('pause', 13), 'Paused');
+    el.follow = h('button', { type: 'button', class: 'pill', onclick: () => this.stopFollow(), tip: 'Stop following (F, or move the map)' });
+    el.pills = h('div', { class: 'pills' }, el.paused, el.follow);
+    // layers (top right)
+    const layersWrap = h('div', { class: 'map-tr' }, this.layers.button, this.layers.menu);
+    // zoom (bottom right)
+    el.zoom = h(
+      'div',
+      { class: 'zoom', role: 'group', 'aria-label': 'Zoom', 'data-tip-side': 'left' },
+      h('button', { type: 'button', class: 'btn icon map-btn', tip: 'Zoom in (+)', 'aria-label': 'Zoom in', onclick: () => this.zoomBy(ZOOM_STEP) }, icon('plus', 18)),
+      h('button', { type: 'button', class: 'btn icon map-btn', tip: 'Zoom out (-)', 'aria-label': 'Zoom out', onclick: () => this.zoomBy(1 / ZOOM_STEP) }, icon('minus', 18)),
+      h('button', { type: 'button', class: 'btn icon map-btn', tip: 'Show the whole map (0)', 'aria-label': 'Show the whole map', onclick: () => this.fitWorld() }, icon('fit', 17)),
+    );
+    // one-time hint (bottom left)
+    el.hint = h(
+      'div',
+      { class: 'hint-box', role: 'note' },
+      h('span', null, 'Scroll to zoom, drag to move. Click an agent to see what it is doing.'),
+      h('button', { type: 'button', class: 'btn icon ghost', 'aria-label': 'Dismiss hint', onclick: () => this.dismissHint() }, icon('x', 14)),
+    );
+    // hover card near the cursor
+    el.hover = h('div', { class: 'hover-card', 'aria-hidden': 'true' });
+    this.stage.append(rail, this.toolPanel.el, el.pills, layersWrap, el.zoom, el.hint, el.hover);
   }
 
   private buildHelp(): HTMLElement {
-    const row = (keys: string[], what: string) => h('div', { class: 'key-row' }, h('span', { class: 'keys' }, ...keys.map((k) => h('kbd', null, k))), h('span', null, what));
+    const row = (keys: string[], what: string) => h('div', { class: 'key-row' }, h('span', { class: 'keys' }, ...keys.map((k) => (k === 'or' || k === 'and' || k === 'to' ? h('span', { class: 'key-sep' }, k) : h('kbd', null, k)))), h('span', null, what));
     const modal = h(
       'div',
-      { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Shortcuts' },
-      h('div', { class: 'modal-head' }, icon('logo', 22, 'brand-ic'), h('h2', null, 'Artificial Life — controls'), h('button', { type: 'button', class: 'btn icon ghost', 'aria-label': 'Close', onclick: () => this.showHelp(false) }, icon('x', 16))),
-      h('p', { class: 'modal-lead' }, 'A living world of agents with genomes, needs, memories, relationships and tribes. Everything you do is an intervention recorded with its tick — the same seed plus the same interventions always replays the same history.'),
+      { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Controls' },
+      h('div', { class: 'modal-head' }, h('h2', null, 'Controls'), h('button', { type: 'button', class: 'btn icon ghost', 'aria-label': 'Close', onclick: () => this.showHelp(false) }, icon('x', 18))),
       h(
         'div',
         { class: 'key-grid' },
-        h('div', null, h('h3', null, 'Time'), row(['Space'], 'Play / pause'), row(['.'], 'Advance one tick'), row(['<', '>'], 'Slower / faster'), h('h3', null, 'Camera'), row(['Wheel'], 'Zoom at cursor'), row(['Drag'], 'Pan (Inspect tool, or any click tool)'), row(['Right-drag'], 'Pan with any tool'), row(['W', 'A', 'S', 'D'], 'Pan (or arrow keys)'), row(['+', '−'], 'Zoom in / out'), row(['0'], 'Fit the whole world'), row(['F'], 'Follow selected agent')),
-        h('div', null, h('h3', null, 'Tools'), row(['1', '–', '9'], 'Choose a tool'), ...TOOLS.map((t) => row([t.key], t.name)), row(['[', ']'], 'Brush smaller / larger (or Alt + wheel)'), row(['Shift', 'Click'], 'Smite (with Bless tool)')),
-        h('div', null, h('h3', null, 'Panels'), row(['O'], 'Cycle data overlay'), row(['Esc'], 'Deselect, back to Inspect, close'), row(['H'], 'This help'), row(['Ctrl', 'S'], 'Save experiment'), row(['Ctrl', 'O'], 'Load experiment'), h('h3', null, 'Tips'), h('ul', { class: 'tips' }, h('li', null, 'Paint a wall across the map and watch the two halves drift apart genetically.'), h('li', null, 'Spawn "Warlike raiders" next to "Gentle foragers" and compare in the Stats tab.'), h('li', null, 'While paused, each edit advances the world by a single tick so you can see it applied.'), h('li', null, 'Hover any control for an explanation.'))),
+        h(
+          'div',
+          null,
+          h('h3', null, 'Mouse'),
+          row(['Scroll'], 'Zoom in and out'),
+          row(['Drag'], 'Move the map'),
+          row(['Right-drag'], 'Move the map with any tool'),
+          row(['Click'], 'Select an agent (Inspect tool)'),
+          row(['Double-click'], 'On an agent: follow it up close. On the ground: zoom in there.'),
+          row(['Alt', 'and', 'Scroll'], 'Brush size'),
+          row(['Shift', 'and', 'Click'], 'Smite an agent (Bless or smite tool)'),
+          h('h3', null, 'Tools'),
+          ...TOOLS.map((t) => row([t.key], t.name)),
+        ),
+        h(
+          'div',
+          null,
+          h('h3', null, 'Keyboard'),
+          row(['Space'], 'Play or pause'),
+          row(['.'], 'Step one tick'),
+          row(['<', 'and', '>'], 'Slower and faster'),
+          row(['1', 'to', '9'], 'Choose a tool'),
+          row(['[', 'and', ']'], 'Smaller and larger brush'),
+          row(['+', 'and', '-'], 'Zoom in and out'),
+          row(['0'], 'Show the whole map'),
+          row(['W', 'A', 'S', 'D'], 'Move the map (or the arrow keys)'),
+          row(['F'], 'Follow the selected agent'),
+          row(['O'], 'Next data layer (Shift+O for the previous one)'),
+          row(['Esc'], 'Close, deselect, back to Inspect'),
+          row(['H', 'or', '?'], 'This list'),
+          row(['Ctrl', 'and', 'S'], 'Save the world'),
+          row(['Ctrl', 'and', 'O'], 'Load a saved world'),
+        ),
       ),
+      h('p', { class: 'modal-note' }, 'Everything you do to the world is recorded with its tick, so the same seed and the same interventions always replay the same history.'),
     );
     const back = h('div', { class: 'modal-back', onclick: (e: Event) => { if (e.target === back) this.showHelp(false); } }, modal);
     this.el.help = back;
@@ -386,7 +445,7 @@ export class App {
   }
 
   private buildDrop(): HTMLElement {
-    const drop = h('div', { class: 'drop' }, h('div', { class: 'drop-card' }, icon('load', 28), h('div', null, 'Drop a saved experiment (.json) to load it')));
+    const drop = h('div', { class: 'drop' }, h('div', { class: 'drop-card' }, icon('load', 28), h('div', null, 'Drop a saved world (.json) to load it')));
     let depth = 0;
     window.addEventListener('dragenter', (e) => {
       if (!e.dataTransfer || !Array.from(e.dataTransfer.types).includes('Files')) return;
@@ -410,6 +469,116 @@ export class App {
     return drop;
   }
 
+  // ============================================================== start screen
+  /** Show the start screen: the current run pauses until Start or "Back to current run". */
+  openStart(): void {
+    if (this.startOpen) return;
+    const cam = this.camera;
+    this.resumeState = { x: cam.x, y: cam.y, zoom: cam.zoom, running: this.running };
+    if (this.running) this.togglePause();
+    this.painter.end();
+    this.drag = null;
+    this.flight = null;
+    this.closeMenus();
+    this.showSettings(false);
+    this.toaster.clear();
+    this.startOpen = true;
+    this.preview = null;
+    this.view.hoverId = -1;
+    this.el.hover.classList.remove('show');
+    this.root.classList.add('start-open');
+    const seed = this.sim.config.seed;
+    this.start.show(this.scenario, seed === defaultSeedOf(this.scenario) ? null : seed, this.hasRun);
+    this.relayout();
+    this.fitStart(this.shownSim);
+  }
+
+  /** Close the start screen without changes ("Back to current run"); before the first run it starts the selection. */
+  closeStart(): void {
+    if (!this.startOpen) return;
+    if (!this.hasRun) {
+      this.begin();
+      return;
+    }
+    this.startOpen = false;
+    this.preview = null;
+    this.root.classList.remove('start-open');
+    this.relayout();
+    const r = this.resumeState;
+    this.resumeState = null;
+    if (r) {
+      const cam = this.camera;
+      cam.zoom = r.zoom;
+      cam.x = r.x;
+      cam.y = r.y;
+      this.setPaused(!r.running);
+    }
+  }
+
+  /** Start the experiment chosen on the start screen (same as pressing Start). */
+  begin(): void {
+    const sc = this.startOpen ? this.start.selected : this.scenario;
+    const want = this.startOpen ? (this.start.seed ?? defaultSeedOf(sc)) : this.sim.config.seed;
+    let sim: Simulation | null = null;
+    const p = this.preview;
+    if (p && p.sc.id === sc.id && p.sim.config.seed === want && p.sim.tick === 0) sim = p.sim;
+    else if (!this.hasRun && this.sim.tick === 0 && this.scenario.id === sc.id && this.sim.config.seed === want) sim = this.sim;
+    if (!sim) {
+      try {
+        sim = Simulation.create({ scenario: sc, seed: want });
+      } catch (err) {
+        console.error(err);
+        this.toaster.show(errMsg(err), { kind: 'error', title: `Could not start ${sc.name}.` });
+        return;
+      }
+    }
+    this.startOpen = false;
+    this.preview = null;
+    this.resumeState = null;
+    this.root.classList.remove('start-open');
+    this.relayout();
+    if (sim !== this.sim) this.setSim(sim, sc);
+    else this.fitWorld();
+    this.hasRun = true;
+    store.set('lastScenario', sc.id);
+    this.setSpeed(2);
+    this.setPaused(false);
+    this.maybeShowHint();
+  }
+
+  private previewPick(sc: ScenarioDef, seed: number | undefined): void {
+    const want = seed ?? defaultSeedOf(sc);
+    const p = this.preview;
+    if (p && p.sc.id === sc.id && p.sim.config.seed === want && p.sim.tick === 0) return;
+    if (this.sim.tick === 0 && this.scenario.id === sc.id && this.sim.config.seed === want) this.preview = { sim: this.sim, sc };
+    else {
+      try {
+        this.preview = { sim: Simulation.create({ scenario: sc, seed: want }), sc };
+      } catch (err) {
+        console.error(err);
+        this.toaster.show(errMsg(err), { kind: 'error', title: `Could not build ${sc.name}.` });
+        return;
+      }
+    }
+    this.fitStart(this.preview.sim);
+  }
+
+  /** Fit a world into the part of the map right of the start column. */
+  private fitStart(sim: Simulation): void {
+    const cam = this.camera;
+    const col = this.start.el.getBoundingClientRect().width;
+    this.startColW = col;
+    const pad = 28;
+    const w = Math.max(80, cam.viewW - col - pad * 2);
+    const hh = Math.max(80, cam.viewH - pad * 2);
+    const z = Math.min(w / sim.worldW, hh / sim.worldH);
+    this.flight = null;
+    this.followId = -1;
+    cam.zoom = z > 0 && Number.isFinite(z) ? z : 1;
+    cam.x = sim.worldW / 2 - col / 2 / cam.zoom;
+    cam.y = sim.worldH / 2;
+  }
+
   // ============================================================== experiment lifecycle
   /** Start a scenario from tick 0 (optionally with a seed and interventions to replay). */
   startScenario(sc: ScenarioDef, opts: { seed?: number; replay?: InterventionRecord[]; quiet?: boolean } = {}): boolean {
@@ -418,42 +587,53 @@ export class App {
       sim = Simulation.create({ scenario: sc, seed: opts.seed, replay: opts.replay });
     } catch (err) {
       console.error(err);
-      this.toaster.show(`Could not start "${sc.name}": ${errMsg(err)}`, { kind: 'error', title: 'Experiment failed to start' });
+      this.toaster.show(errMsg(err), { kind: 'error', title: `Could not start ${sc.name}.` });
       return false;
     }
+    const fromStart = this.startOpen;
+    if (fromStart) {
+      this.startOpen = false;
+      this.preview = null;
+      this.resumeState = null;
+      this.root.classList.remove('start-open');
+      this.relayout();
+    }
     this.setSim(sim, sc);
-    if (!opts.quiet) this.toaster.show(sc.tagline || 'Experiment started.', { title: `${sc.name} · seed ${sim.config.seed}`, kind: 'info' });
+    this.hasRun = true;
+    store.set('lastScenario', sc.id);
+    if (fromStart) this.setPaused(false);
+    if (!opts.quiet) this.confirm(`Started ${sc.name} with seed ${sim.config.seed}.`);
     return true;
   }
 
-  /** True when the loaded save names an experiment this app does not know (restart/replay cannot rebuild it). */
+  /** True when the loaded save names an experiment this app does not know (restart and replay cannot rebuild it). */
   private unknownScenario = false;
 
   private refuseUnknownScenario(action: string): boolean {
     if (!this.unknownScenario) return false;
-    this.toaster.show(`This save comes from an experiment this version does not know ("${this.sim.state.scenarioId}"), so its starting world cannot be rebuilt. Pick an experiment from the list instead.`, { kind: 'bad', title: `Cannot ${action}`, timeout: 9000 });
+    this.toaster.show(`This save comes from an experiment this version does not have ("${this.sim.state.scenarioId}"), so its first day cannot be rebuilt. Choose an experiment instead.`, { kind: 'bad', title: `Cannot ${action}.`, timeout: 9000 });
     return true;
   }
 
   restart(seed: number = this.sim.config.seed): void {
     if (this.refuseUnknownScenario('restart')) return;
-    this.startScenario(this.scenario, { seed });
+    if (this.startScenario(this.scenario, { seed, quiet: true })) this.confirm(`Restarted ${this.scenario.name} with seed ${seed}.`);
   }
 
   replay(seed: number = this.sim.config.seed): void {
     if (this.refuseUnknownScenario('replay')) return;
     const log = this.sim.state.interventionLog.map((r) => ({ tick: r.tick, intervention: r.intervention }));
     if (!log.length) {
-      this.toaster.show('You have not made any interventions in this run yet — use the tools, global events or parameters first.', { kind: 'info', title: 'Nothing to replay' });
+      this.confirm('There is nothing to replay yet. Use a tool or change a setting first.');
       return;
     }
     // the log keeps only the newest entries: once any were dropped the replay cannot match the run
     const dropped = (this.sim.state as { interventionLogDropped?: number }).interventionLogDropped ?? 0;
     if (this.startScenario(this.scenario, { seed, replay: log, quiet: true })) {
       if (dropped > 0) {
-        this.toaster.show(`Only your latest ${fmtInt(log.length)} interventions were kept; the first ${fmtInt(dropped)} were dropped from the log, so this replay will not reproduce your run exactly.`, { kind: 'bad', title: 'Replay is incomplete', timeout: 9000 });
+        this.toaster.show(`Only your latest ${fmtInt(log.length)} interventions were kept and the first ${fmtInt(dropped)} were dropped, so this replay will differ from your run.`, { kind: 'bad', title: 'Replay is incomplete.', timeout: 9000 });
       } else {
-        this.toaster.show(`Restarted with seed ${seed}; your ${fmtInt(log.length)} interventions will be re-applied at their original ticks.`, { kind: 'good', title: 'Replaying your interventions' });
+        this.confirm(`Restarted with seed ${seed}. Your ${plural(log.length, 'intervention')} will happen again at the same ticks.`);
       }
     }
   }
@@ -472,19 +652,17 @@ export class App {
     this.painter.end();
     const evs = sim.state.events;
     this.lastEventId = evs.length ? evs[evs.length - 1].id : 0;
-    this.toastQueue = [];
-    this.skippedToasts = 0;
-    this.unseenEvents = 0;
+    this.pendingEvent = null;
     this.el.expName.textContent = sc.name;
-    this.el.expSeed.textContent = `seed ${sim.config.seed}`;
-    document.title = `${sc.name} · Artificial Life`;
+    document.title = `Artificial Life: ${sc.name}`;
     this.fitWorld();
-    this.left.onSimChanged();
+    this.drawer.onSimChanged();
+    this.designer.refreshTribes();
     this.updateFollowChip();
     this.updatePanels(true);
   }
 
-  /** The current experiment's starting configuration (for "reset parameters"). */
+  /** The current experiment's starting configuration (for "reset to experiment defaults"). */
   scenarioConfig(): SimConfig {
     return { ...DEFAULT_CONFIG, ...this.scenario.config, seed: this.sim.config.seed };
   }
@@ -495,7 +673,7 @@ export class App {
       json = serializeSim(this.sim);
     } catch (err) {
       console.error(err);
-      this.toaster.show(errMsg(err), { kind: 'error', title: 'Could not save the experiment' });
+      this.toaster.show(errMsg(err), { kind: 'error', title: 'Could not save the world.' });
       return;
     }
     const name = `artificial-life_${this.sim.state.scenarioId || 'experiment'}_seed${this.sim.config.seed}_t${this.sim.tick}.json`;
@@ -505,7 +683,7 @@ export class App {
     a.click();
     a.remove();
     window.setTimeout(() => URL.revokeObjectURL(url), 4000);
-    this.toaster.show(`${name} (${(json.length / 1048576).toFixed(json.length > 1048576 ? 1 : 2)} MB)`, { kind: 'good', title: 'Experiment saved' });
+    this.confirm(`Saved ${name} (${(json.length / 1048576).toFixed(json.length > 1048576 ? 1 : 2)} MB).`);
   }
 
   openLoadDialog(): void {
@@ -524,7 +702,7 @@ export class App {
     try {
       text = await file.text();
     } catch (err) {
-      this.toaster.show(errMsg(err), { kind: 'error', title: `Could not read "${file.name}"` });
+      this.toaster.show(errMsg(err), { kind: 'error', title: `Could not read ${file.name}.` });
       return;
     }
     let sim: Simulation;
@@ -534,22 +712,123 @@ export class App {
       sim = Simulation.fromState(state);
     } catch (err) {
       console.info('Rejected save file:', errMsg(err));
-      this.toaster.show(errMsg(err), { kind: 'error', title: `"${file.name}" is not a valid Artificial Life save`, timeout: 9000 });
+      this.toaster.show(errMsg(err), { kind: 'error', title: `${file.name} is not an Artificial Life save.`, timeout: 9000 });
       return;
     }
     const id = sim.state.scenarioId;
     const known = SCENARIOS.find((s) => s.id === id);
-    const sc: ScenarioDef = known ?? { ...SCENARIOS[0], id, name: id ? `Loaded: ${id}` : 'Loaded experiment', tagline: 'Loaded from a save file', description: 'An experiment restored from a save file.', lookFor: [] };
+    const sc: ScenarioDef = known ?? { ...SCENARIOS[0], id, name: id ? `Loaded: ${id}` : 'Loaded world', tagline: 'Loaded from a save file', description: 'A world restored from a save file.', lookFor: [] };
+    const fromStart = this.startOpen;
+    if (fromStart) {
+      this.startOpen = false;
+      this.preview = null;
+      this.resumeState = null;
+      this.root.classList.remove('start-open');
+      this.relayout();
+    }
     this.setSim(sim, sc);
-    // restart / replay rebuild the world from the scenario definition, which this app does not have
+    this.hasRun = true;
+    // restart and replay rebuild the world from the scenario definition, which this app does not have
     this.unknownScenario = !known;
-    this.toaster.show(`Resumed at tick ${fmtInt(sim.tick)} with ${fmtInt(sim.state.agents.length)} agents and ${fmtInt(sim.state.interventionLog.length)} recorded interventions.`, { kind: 'good', title: `Loaded "${file.name}"` });
+    if (fromStart) this.setPaused(false);
+    const day = Math.floor(sim.state.env.day) + 1;
+    this.confirm(`Loaded ${file.name}: day ${fmtInt(day)}, ${plural(sim.state.agents.length, 'agent')}.`);
     if (warnings.length) {
       console.info('Save file repairs:', warnings);
-      const shown = warnings.slice(0, 4).join(' · ');
-      const more = warnings.length > 4 ? ` (+${warnings.length - 4} more, see console)` : '';
-      this.toaster.show(`${shown}${more}`, { kind: 'bad', title: `Repaired ${fmtInt(warnings.length)} problem${warnings.length === 1 ? '' : 's'} in the save`, timeout: 12000 });
+      const shown = warnings.slice(0, 3).join('; ');
+      const more = warnings.length > 3 ? ` (and ${warnings.length - 3} more in the console)` : '';
+      this.toaster.show(`${shown}${more}`, { kind: 'bad', title: `Repaired ${plural(warnings.length, 'problem')} in the save.`, timeout: 12000 });
     }
+  }
+
+  // ============================================================== notices
+  /** Short confirmation of something the user just did (replaces any notice on screen). */
+  confirm(message: string, opts: ToastOpts = {}): void {
+    this.toaster.show(message, { kind: 'info', timeout: 3200, ...opts });
+  }
+
+  setNotices(on: boolean): void {
+    this.notices = on;
+    store.set('notices', on ? '1' : '0');
+    if (!on) this.pendingEvent = null;
+  }
+
+  /** Simulation events worth a pop-up: wars, tribes dying out, epidemics, scheduled or big disasters, crashes. */
+  private isMajor(ev: SimEvent): boolean {
+    switch (ev.category) {
+      case 'conflict':
+        return ev.severity === 'major' && ev.agentId === undefined; // war declared (kill counts carry an agent)
+      case 'tribe': {
+        if (ev.severity !== 'major' || ev.tribeId === undefined) return false;
+        const t = this.sim.state.tribes.find((x) => x.id === ev.tribeId);
+        return Boolean(t && t.extinctTick !== -1); // died out
+      }
+      case 'disease':
+        return ev.severity === 'major' || /epidemic/i.test(ev.message);
+      case 'environment':
+      case 'disaster':
+        return ev.severity === 'major';
+      case 'population':
+        return ev.severity === 'major' || ev.severity === 'bad';
+      default:
+        return false;
+    }
+  }
+
+  private showEvent(ev: SimEvent): void {
+    this.lastEventToast = performance.now();
+    this.toaster.show(plainText(ev.message), {
+      kind: ev.severity === 'good' ? 'good' : 'major',
+      timeout: 5500,
+      onClick: () => {
+        if (ev.agentId !== undefined && this.sim.getAgent(ev.agentId)) this.showAgent(ev.agentId, true);
+        else if (ev.x !== undefined && ev.y !== undefined) this.flyTo(ev.x, ev.y, true);
+        else {
+          this.showSide(true);
+          this.setTab('events');
+        }
+      },
+    });
+  }
+
+  /** Queue major new events as notices (one at a time, spaced out). */
+  private checkEvents(): void {
+    const evs = this.sim.state.events;
+    if (evs.length) {
+      const newest = evs[evs.length - 1].id;
+      if (newest > this.lastEventId) {
+        for (let i = evs.length - 1; i >= 0 && evs[i].id > this.lastEventId; i--) {
+          if (this.notices && !this.startOpen && this.isMajor(evs[i])) {
+            if (!this.pendingEvent || this.pendingEvent.ev.id < evs[i].id) this.pendingEvent = { ev: evs[i], at: performance.now() };
+            break;
+          }
+        }
+        this.lastEventId = newest;
+      }
+    }
+    const p = this.pendingEvent;
+    if (!p) return;
+    const now = performance.now();
+    if (now - p.at > 20000) {
+      this.pendingEvent = null;
+      return;
+    }
+    if (!this.toaster.visible && now - this.lastEventToast >= EVENT_TOAST_GAP && now - this.toaster.lastShown >= 1500) {
+      this.pendingEvent = null;
+      this.showEvent(p.ev);
+    }
+  }
+
+  private maybeShowHint(): void {
+    if (store.get('hint') === 'done') return;
+    this.el.hint.classList.add('show');
+    this.stage.classList.add('hint-on');
+  }
+
+  private dismissHint(): void {
+    this.el.hint.classList.remove('show');
+    this.stage.classList.remove('hint-on');
+    store.set('hint', 'done');
   }
 
   // ============================================================== interventions
@@ -566,41 +845,42 @@ export class App {
     switch (this.tool.id) {
       case 'inspect': {
         const a = this.renderer.pickAgent(sim, sx, sy);
-        this.select(a ? a.id : -1);
+        this.select(a ? a.id : -1, true);
         break;
       }
       case 'spawn': {
         if (!sim.passableAt(w.x, w.y)) {
-          this.toaster.show('Agents cannot be placed on impassable terrain (deep water or walls).', { kind: 'bad', title: 'Cannot spawn here', timeout: 2600 });
+          this.confirm('Agents cannot stand on deep water or walls.', { kind: 'bad' });
+          return;
+        }
+        if (sim.population >= sim.config.maxAgents) {
+          this.confirm(`The population cap of ${fmtInt(sim.config.maxAgents)} is reached. Raise it under Settings, More settings.`, { kind: 'bad', timeout: 4500 });
           return;
         }
         this.enqueue({ kind: 'spawn', ...this.designer.spec(w.x, w.y, this.settings.radius) });
-        this.ripple(w.x, w.y, this.settings.radius, 'rgba(46,230,208,0.9)');
-        if (sim.population >= sim.config.maxAgents) this.toaster.show('The population cap is reached — raise "Population cap" in Parameters to add more agents.', { kind: 'bad', title: 'Population cap', timeout: 4000 });
+        this.ripple(w.x, w.y, this.settings.radius, 'rgba(143,181,115,0.95)');
         break;
       }
       case 'disaster': {
         const iv = brushIntervention('disaster', this.settings, w.x, w.y, sim.config.dayLength);
         if (iv) {
           this.enqueue(iv);
-          this.ripple(w.x, w.y, iv.kind === 'disaster' ? iv.radius : this.settings.radius, 'rgba(228,91,214,0.95)');
+          this.ripple(w.x, w.y, iv.kind === 'disaster' ? iv.radius : this.settings.radius, 'rgba(207,91,69,0.95)');
         }
         break;
       }
       case 'bless': {
         const a = this.renderer.pickAgent(sim, sx, sy);
         if (!a) {
-          this.toaster.show('Click directly on an agent to bless it (Shift-click to smite).', { kind: 'info', timeout: 2200 });
+          this.confirm('Click on an agent to bless it, or Shift-click to smite it.', { timeout: 2500 });
           return;
         }
         if (shift) {
           this.enqueue({ kind: 'killAgent', id: a.id });
-          this.ripple(a.x, a.y, 14, 'rgba(255,93,108,0.95)');
-          this.toaster.show(`${a.name} was struck down.`, { kind: 'bad', title: 'Smite', timeout: 2400 });
+          this.ripple(a.x, a.y, 14, 'rgba(207,91,69,0.95)');
         } else {
           this.enqueue({ kind: 'boostAgent', id: a.id });
-          this.ripple(a.x, a.y, 14, 'rgba(255,214,102,0.95)');
-          this.toaster.show(`${a.name} is fully healed and fed.`, { kind: 'good', title: 'Blessed', timeout: 2400 });
+          this.ripple(a.x, a.y, 14, 'rgba(214,166,72,0.95)');
         }
         break;
       }
@@ -613,13 +893,14 @@ export class App {
   ripple(wx: number, wy: number, worldRadius: number, color: string): void {
     const p = this.camera.worldToScreen(wx, wy);
     const r = Math.max(10, Math.min(600, worldRadius * this.camera.zoom));
-    const el = h('div', { class: 'ripple', style: `left:${p.x - r}px;top:${p.y - r}px;width:${r * 2}px;height:${r * 2}px;border-color:${color};box-shadow:0 0 18px ${color}` });
+    const el = h('div', { class: 'ripple', style: `left:${p.x - r}px;top:${p.y - r}px;width:${r * 2}px;height:${r * 2}px;border-color:${color}` });
     this.stage.append(el);
     window.setTimeout(() => el.remove(), 700);
   }
 
   // ============================================================== transport
   togglePause(): void {
+    if (this.startOpen && !this.running) return; // nothing runs behind the start screen
     this.running = !this.running;
     if (this.running) this.simError = false;
     this.tickAcc = 0;
@@ -634,6 +915,7 @@ export class App {
   }
 
   stepOnce(): void {
+    if (this.startOpen) return;
     if (this.running) this.running = false;
     this.simError = false;
     this.safeStep(1);
@@ -643,20 +925,28 @@ export class App {
 
   setSpeed(i: number): void {
     this.speedIdx = Math.max(0, Math.min(SPEEDS.length - 1, i));
-    this.speedBtns.forEach((b, j) => {
-      b.classList.toggle('on', j === this.speedIdx);
-      b.setAttribute('aria-checked', String(j === this.speedIdx));
-    });
+    const label = SPEED_LABELS[this.speedIdx];
+    this.el.speedLabel.textContent = label;
+    for (const b of this.el.speedMenu.children) {
+      const on = Number((b as HTMLElement).dataset.i) === this.speedIdx;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-checked', String(on));
+    }
     this.tickAcc = 0;
     this.limitedUntil = 0;
     this.perfDirty = true;
+    this.text.limited = '';
+  }
+
+  private toggleSpeedMenu(v?: boolean): void {
+    const m = this.el.speedMenu;
+    m.classList.toggle('show', v ?? !m.classList.contains('show'));
   }
 
   private updateTransport(): void {
-    this.el.play.replaceChildren(icon(this.running ? 'pause' : 'play', 15));
+    this.el.play.replaceChildren(icon(this.running ? 'pause' : 'play', 17));
     this.el.play.classList.toggle('is-paused', !this.running);
-    this.el.paused.style.display = this.running ? 'none' : '';
-    this.fitHud();
+    this.el.paused.style.display = this.running || this.startOpen ? 'none' : '';
   }
 
   private safeStep(n: number): number {
@@ -674,15 +964,26 @@ export class App {
     this.simError = true;
     this.running = false;
     this.updateTransport();
-    this.toaster.show(`${errMsg(err)} — the run was paused. Press play to retry, or restart / load another experiment.`, { kind: 'error', title: 'Simulation error', timeout: 12000 });
+    this.toaster.show(`${sentence(errMsg(err))} The run is paused: press play to try again, or restart.`, { kind: 'error', title: 'Simulation error.', timeout: 12000 });
   }
 
   // ============================================================== selection & camera
-  select(id: number): void {
+  /** Select an agent (-1 clears). `fromMap`: a click on the map, which also opens the side panel. */
+  select(id: number, fromMap = false): void {
     this.view.selectedId = id;
     if (this.followId !== -1 && this.followId !== id) this.stopFollow();
+    if (id !== -1 && fromMap && this.root.classList.contains('no-side')) this.showSide(true);
     if (id !== -1 && this.tab !== 'inspector') this.setTab('inspector');
     else this.updatePanel('inspector', true);
+  }
+
+  /** Select an agent and move the camera to it (zooming in when far out), without following. */
+  private showAgent(id: number, close: boolean): void {
+    this.select(id);
+    const a = this.sim.getAgent(id);
+    if (!a) return;
+    this.flyTo(a.x, a.y, !close);
+    if (close && this.camera.zoom < 3) this.camera.setZoom(3);
   }
 
   follow(id: number): void {
@@ -701,32 +1002,44 @@ export class App {
   toggleFollow(): void {
     if (this.followId !== -1) return this.stopFollow();
     if (this.view.selectedId !== -1 && this.sim.getAgent(this.view.selectedId)) this.follow(this.view.selectedId);
-    else this.toaster.show('Select a living agent first (Inspect tool, key 1), then press F.', { kind: 'info', timeout: 2600 });
+    else this.confirm('Select an agent first (Inspect tool), then press F.', { timeout: 2600 });
   }
 
   private updateFollowChip(): void {
     const a = this.followId !== -1 ? this.sim.getAgent(this.followId) : undefined;
     this.el.follow.style.display = a ? '' : 'none';
-    if (a) this.el.follow.replaceChildren(icon('target', 12), `Following ${a.name}`, icon('x', 11, 'pill-x'));
-    this.fitHud();
+    const label = a ? `Following ${a.name}` : '';
+    if (a && this.text.follow !== label) {
+      this.text.follow = label;
+      this.el.follow.replaceChildren(icon('target', 14), label, icon('x', 13, 'pill-x'));
+    }
   }
 
   fitWorld(): void {
     this.flight = null;
     this.stopFollow();
+    if (this.startOpen) {
+      this.fitStart(this.shownSim);
+      return;
+    }
     this.camera.fit(this.sim.worldW, this.sim.worldH);
+  }
+
+  /** Zoom around the centre of the map by `factor`. */
+  zoomBy(factor: number): void {
+    this.camera.zoomAt(this.camera.viewW / 2, this.camera.viewH / 2, factor);
   }
 
   /** Smoothly move the camera centre to a world point. */
   flyTo(x: number, y: number, zoomIn = true): void {
     this.stopFollow();
     this.flight = { fx: this.camera.x, fy: this.camera.y, tx: x, ty: y, t0: performance.now() };
-    if (zoomIn && this.camera.zoom < 1.2) this.camera.zoomAt(this.camera.viewW / 2, this.camera.viewH / 2, 1.6 / this.camera.zoom);
+    if (zoomIn && this.camera.zoom < 1.2) this.camera.setZoom(1.6);
   }
 
   /** World point under a screen point when it lies on the renderer's minimap (if the renderer has one). */
   private minimapWorld(sx: number, sy: number): { x: number; y: number } | null {
-    if ((this.view as { showMinimap?: boolean }).showMinimap === false) return null;
+    if (this.startOpen || (this.view as { showMinimap?: boolean }).showMinimap === false) return null;
     const r = this.renderer as unknown as { minimapToWorld?: (x: number, y: number) => { x: number; y: number } | null };
     try {
       return typeof r.minimapToWorld === 'function' ? r.minimapToWorld(sx, sy) : null;
@@ -737,7 +1050,7 @@ export class App {
 
   setOverlay(k: OverlayKind): void {
     this.view.overlay = k;
-    this.left.setOverlay(k);
+    this.layers.setOverlay(k);
     store.set('overlay', k);
   }
 
@@ -745,25 +1058,31 @@ export class App {
     store.set('view', JSON.stringify(viewPrefs(this.view)));
   }
 
-  setTool(id: ToolId, reveal = true): void {
+  setTool(id: ToolId): void {
     this.tool = toolById(id);
-    for (const [tid, b] of this.railBtns) b.classList.toggle('on', tid === id);
-    this.left.onToolChanged();
+    for (const [tid, b] of this.railBtns) {
+      b.classList.toggle('on', tid === id);
+      b.setAttribute('aria-pressed', String(tid === id));
+    }
     this.painter.end();
-    this.refreshToolHud();
+    this.toolPanel.onToolChanged();
+    this.stage.classList.toggle('tool-open', id !== 'inspect');
     this.canvas.dataset.tool = id;
     this.updateCursor();
-    if (reveal && id !== 'inspect' && !this.root.classList.contains('no-left')) this.left.openSection('tool');
+    if (id !== 'inspect') this.el.hover?.classList.remove('show');
   }
 
-  showLeft(show: boolean): void {
-    this.root.classList.toggle('no-left', !show);
-    store.set('hideLeft', show ? '0' : '1');
+  showSide(show: boolean): void {
+    this.root.classList.toggle('no-side', !show);
+    store.set('hideSide', show ? '0' : '1');
+    this.el.sideBtn.classList.toggle('on', show);
+    this.relayout();
   }
 
-  showRight(show: boolean): void {
-    this.root.classList.toggle('no-right', !show);
-    store.set('hideRight', show ? '0' : '1');
+  showSettings(show: boolean): void {
+    if (show) this.closeMenus();
+    this.drawer.open(show);
+    this.el.settingsBtn.classList.toggle('on', show);
   }
 
   showHelp(show: boolean): void {
@@ -775,7 +1094,6 @@ export class App {
     if (this.tab === t) return;
     this.tab = t;
     this.applyTab();
-    if (t === 'events') this.unseenEvents = 0;
     this.updatePanel(t, true);
   }
 
@@ -785,6 +1103,31 @@ export class App {
       b.setAttribute('aria-selected', String(id === this.tab));
     }
     for (const [id, p] of this.panes) p.classList.toggle('on', id === this.tab);
+  }
+
+  private closeMenus(): void {
+    this.layers.open(false);
+    this.toggleSpeedMenu(false);
+  }
+
+  /** A press outside an open menu closes it. */
+  private closeMenusOutside(e: Event): void {
+    const t = e.target as Element | null;
+    if (!t || !t.closest) return;
+    if (this.layers.isOpen && !t.closest('.map-tr')) this.layers.open(false);
+    if (this.el.speedMenu.classList.contains('show') && !t.closest('.speed')) this.toggleSpeedMenu(false);
+    if (this.drawer.isOpen && !t.closest('.drawer') && !t.closest('[aria-label="Settings"]') && t.closest('.stage')) this.showSettings(false);
+  }
+
+  /** Sizes changed (start screen, side panel): resize the canvas now and keep the view centre. */
+  private relayout(): void {
+    const cam = this.camera;
+    const cx = cam.x;
+    const cy = cam.y;
+    this.renderer.resize();
+    cam.x = cx;
+    cam.y = cy;
+    this.hudKey = '';
   }
 
   // ============================================================== canvas input
@@ -804,16 +1147,23 @@ export class App {
     c.addEventListener('pointerleave', () => {
       this.pointer.inside = false;
       this.view.hoverId = -1;
-      this.updateCursorInfo();
+      this.updateHoverCard();
     });
     c.addEventListener('wheel', (e) => this.onWheel(e), { passive: false });
     c.addEventListener('dblclick', (e) => {
-      if (this.tool.mode !== 'select') return;
       const p = this.local(e);
-      const a = this.renderer.pickAgent(this.sim, p.x, p.y);
+      if (this.minimapWorld(p.x, p.y)) return;
+      if (!this.startOpen && this.tool.mode !== 'select') return;
+      const a = this.startOpen ? null : this.renderer.pickAgent(this.sim, p.x, p.y);
       if (a) {
-        this.select(a.id);
+        // follow it and zoom to a close view
+        this.select(a.id, true);
         this.follow(a.id);
+        if (this.camera.targetZoom < CLOSE_ZOOM) this.camera.setZoom(CLOSE_ZOOM);
+      } else {
+        this.stopFollow();
+        this.flight = null;
+        this.camera.zoomAt(p.x, p.y, 2);
       }
     });
   }
@@ -830,7 +1180,9 @@ export class App {
     }
     const base = { id: e.pointerId, button: e.button, sx: p.x, sy: p.y, lx: p.x, ly: p.y, moved: false };
     const mm = e.button === 0 ? this.minimapWorld(p.x, p.y) : null;
-    if (mm) {
+    if (this.startOpen) {
+      this.drag = { kind: 'pan', ...base };
+    } else if (mm) {
       this.drag = { kind: 'minimap', ...base };
       this.stopFollow();
       this.flyTo(mm.x, mm.y, false);
@@ -887,7 +1239,6 @@ export class App {
         }
       }
     }
-    this.updateCursorInfo();
   }
 
   private onPointerUp(e: PointerEvent): void {
@@ -912,26 +1263,19 @@ export class App {
   private onWheel(e: WheelEvent): void {
     e.preventDefault();
     const dy = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaMode === 2 ? e.deltaY * 400 : e.deltaY;
-    if (e.altKey) {
+    if (e.altKey && !this.startOpen) {
       this.setRadius(this.settings.radius * Math.exp(-dy * 0.002));
       return;
     }
     const p = this.local(e);
-    const factor = Math.exp(-Math.max(-300, Math.min(300, dy)) * 0.0018);
+    // one wheel notch (100 px) zooms about 1.35x
+    const factor = Math.exp(-Math.max(-300, Math.min(300, dy)) * 0.003);
     this.camera.zoomAt(p.x, p.y, factor);
   }
 
   setRadius(r: number): void {
     this.settings.radius = Math.max(6, Math.min(320, Math.round(r)));
-    this.left.sync();
-    this.refreshToolHud();
-  }
-
-  /** Tool name + effective brush size in the HUD (also called when tool options change). */
-  refreshToolHud(): void {
-    this.el.toolHud.replaceChildren(icon(this.tool.icon, 13), h('span', null, this.tool.name));
-    if (this.tool.brush) this.el.toolHud.append(h('span', { class: 'muted mono' }, `· ${Math.round(effectiveRadius(this.tool.id, this.settings))} u`));
-    this.fitHud();
+    this.toolPanel.sync();
   }
 
   private cursorStyle = 'default';
@@ -940,7 +1284,7 @@ export class App {
     const d = this.drag;
     let c = 'default';
     if (d && (d.kind === 'pan' || d.kind === 'minimap')) c = 'grabbing';
-    else if (this.tool.brush) c = 'crosshair';
+    else if (this.tool.brush && !this.startOpen) c = 'crosshair';
     this.cursorStyle = c;
     this.canvas.style.cursor = c;
   }
@@ -953,7 +1297,7 @@ export class App {
     if (e.ctrlKey || e.metaKey) {
       if (e.key === 's' || e.key === 'S') {
         e.preventDefault();
-        this.save();
+        if (!this.startOpen) this.save();
       } else if (e.key === 'o' || e.key === 'O') {
         e.preventDefault();
         this.openLoadDialog();
@@ -973,6 +1317,19 @@ export class App {
       return;
     }
     const k = e.key;
+    if (this.startOpen) {
+      // only a few keys work on the start screen
+      if (k === 'Escape') {
+        if (this.hasRun) this.closeStart();
+      } else if (k === 'Enter' && !(tag === 'BUTTON')) this.begin();
+      else if (k === 'h' || k === 'H' || k === '?') this.showHelp(true);
+      else if (k === '+' || k === '=') this.zoomBy(ZOOM_STEP);
+      else if (k === '-' || k === '_') this.zoomBy(1 / ZOOM_STEP);
+      else if (k === '0') this.fitWorld();
+      else return;
+      e.preventDefault();
+      return;
+    }
     let handled = true;
     switch (k) {
       case ' ':
@@ -992,10 +1349,14 @@ export class App {
         this.toggleFollow();
         break;
       case 'Escape':
-        // deselect and cancel the current tool (back to Inspect), as documented
-        this.stopFollow();
-        this.select(-1);
-        if (this.tool.id !== 'inspect') this.setTool('inspect', false);
+        // close the topmost thing; otherwise deselect and go back to Inspect
+        if (this.layers.isOpen || this.el.speedMenu.classList.contains('show')) this.closeMenus();
+        else if (this.drawer.isOpen) this.showSettings(false);
+        else {
+          this.stopFollow();
+          this.select(-1);
+          if (this.tool.id !== 'inspect') this.setTool('inspect');
+        }
         break;
       case 'h':
       case 'H':
@@ -1017,11 +1378,11 @@ export class App {
         break;
       case '+':
       case '=':
-        this.camera.zoomAt(this.camera.viewW / 2, this.camera.viewH / 2, 1.3);
+        this.zoomBy(ZOOM_STEP);
         break;
       case '-':
       case '_':
-        this.camera.zoomAt(this.camera.viewW / 2, this.camera.viewH / 2, 1 / 1.3);
+        this.zoomBy(1 / ZOOM_STEP);
         break;
       case '0':
         this.fitWorld();
@@ -1038,7 +1399,7 @@ export class App {
   }
 
   private applyKeyPan(dt: number): void {
-    if (!this.keys.size) return;
+    if (!this.keys.size || this.startOpen) return;
     let x = 0;
     let y = 0;
     const k = this.keys;
@@ -1060,7 +1421,8 @@ export class App {
     this.renderer.resize();
     cam.x = cx;
     cam.y = cy;
-    this.fitHud();
+    this.hudKey = '';
+    if (this.startOpen) this.fitStart(this.shownSim);
     this.renderSafe(performance.now());
   }
 
@@ -1071,7 +1433,7 @@ export class App {
     this.lastFrame = now;
     this.applyKeyPan(dt);
     if (this.drag?.kind === 'paint') this.painter.hold(this.settings.radius, performance.now(), this.tool.airbrush);
-    this.simulate(dt, now);
+    this.simulate(dt);
     this.updateCamera(now);
     this.updateHover();
     this.updateBrush();
@@ -1080,17 +1442,18 @@ export class App {
     if (now - this.lastPanel >= 250) {
       this.lastPanel = now;
       this.updatePanels(false);
+      this.layoutHud();
     }
     this.frames++;
     if (now - this.lastPerf >= 1000) {
       const span = now - this.lastPerf;
       if (this.lastPerf) {
         const tps = (this.ticksCounted * 1000) / span;
-        this.setText('fps', String(Math.round((this.frames * 1000) / span)));
-        this.setText('tps', String(Math.round(tps)));
+        const fps = (this.frames * 1000) / span;
         // CPU-limited = the requested speed is not being met over the last second
         const sp = SPEEDS[this.speedIdx];
         if (this.running && sp > 0 && !this.perfDirty && tps < BASE_TPS * sp * 0.85) this.limitedUntil = now + 1100;
+        this.drawer.setPerf(tps, fps, this.running && sp > 0 && now < this.limitedUntil);
       }
       this.perfDirty = false;
       this.frames = 0;
@@ -1099,8 +1462,8 @@ export class App {
     }
   };
 
-  private simulate(dt: number, now: number): void {
-    if (this.simError) {
+  private simulate(dt: number): void {
+    if (this.simError || this.startOpen) {
       this.needsApply = false;
       return;
     }
@@ -1162,14 +1525,14 @@ export class App {
       cam.y = f.fy + (f.ty - f.fy) * e;
       if (t >= 1) this.flight = null;
     }
-    if (this.followId !== -1) {
+    if (this.followId !== -1 && !this.startOpen) {
       const a = this.sim.getAgent(this.followId);
       if (a) {
         cam.x += (a.x - cam.x) * 0.16;
         cam.y += (a.y - cam.y) * 0.16;
       } else {
         const rec = this.sim.lineageById.get(this.followId);
-        if (rec) this.toaster.show(`${rec.name} ${rec.deathCause ? DEATH_LABEL[rec.deathCause] : 'died'}.`, { kind: 'bad', title: 'Followed agent died', timeout: 3500 });
+        if (rec) this.confirm(`${rec.name} ${rec.deathCause ? DEATH_LABEL[rec.deathCause] : 'died'}. The camera stopped following.`, { timeout: 4000 });
         this.followId = -1;
         this.updateFollowChip();
       }
@@ -1178,12 +1541,20 @@ export class App {
 
   private renderSafe(now: number): void {
     try {
-      this.renderer.render(this.sim, this.view, now);
+      if (this.startOpen) {
+        const sv = this.startView as unknown as Record<string, unknown>;
+        const v = this.view as unknown as Record<string, unknown>;
+        for (const t of VIEW_TOGGLES) if (t.key !== 'showMinimap') sv[t.key] = v[t.key];
+        sv.showRelations = v.showRelations;
+        const ins = this.startView.insets!;
+        ins.left = this.startColW;
+        this.renderer.render(this.shownSim, this.startView, now);
+      } else this.renderer.render(this.sim, this.view, now);
     } catch (err) {
       if (!this.renderErrLogged) {
         this.renderErrLogged = true;
         console.error(err);
-        this.toaster.show(errMsg(err), { kind: 'error', title: 'Rendering error' });
+        this.toaster.show(errMsg(err), { kind: 'error', title: 'Drawing error.' });
       }
     }
   }
@@ -1191,7 +1562,7 @@ export class App {
   private updateBrush(): void {
     const t = this.tool;
     const d = this.drag;
-    if (t.brush && this.pointer.inside && !(d && (d.kind === 'pan' || d.kind === 'minimap')) && !this.helpOpen && !(!d && this.minimapWorld(this.pointer.x, this.pointer.y))) {
+    if (!this.startOpen && t.brush && this.pointer.inside && !(d && (d.kind === 'pan' || d.kind === 'minimap')) && !this.helpOpen && !(!d && this.minimapWorld(this.pointer.x, this.pointer.y))) {
       const w = this.camera.screenToWorld(this.pointer.x, this.pointer.y);
       const b = this.view.brush;
       const color = brushColor(t, this.settings);
@@ -1205,66 +1576,132 @@ export class App {
     } else this.view.brush = null;
   }
 
-  /** Hovered agent → view.hoverId (the renderer draws its name tag); details go to the status strip. */
+  /** Hovered agent: view.hoverId (the renderer rings it) and the hover card. */
   private updateHover(): void {
-    const allow = this.pointer.inside && !this.drag && (this.tool.mode !== 'paint' || this.tool.id === 'remove') && !this.helpOpen && !this.minimapWorld(this.pointer.x, this.pointer.y);
+    const allow = !this.startOpen && this.pointer.inside && !this.drag && (this.tool.mode !== 'paint' || this.tool.id === 'remove') && !this.helpOpen && !this.minimapWorld(this.pointer.x, this.pointer.y);
     const a = allow ? this.renderer.pickAgent(this.sim, this.pointer.x, this.pointer.y) : null;
     const id = a ? a.id : -1;
     if (id !== this.view.hoverId) {
       this.view.hoverId = id;
-      this.updateCursorInfo();
-    } else if (a && this.frames % 6 === 0) this.updateCursorInfo();
+      this.updateHoverCard();
+    } else if (this.frames % 6 === 0) this.updateHoverCard();
+    else this.placeHoverCard();
     this.canvas.style.cursor = a && !this.drag && this.tool.mode !== 'paint' ? 'pointer' : this.cursorStyle;
   }
 
-  /** Bottom status strip: hovered agent details, or the tile under the cursor. */
-  private updateCursorInfo(): void {
-    const el = this.el.cursor;
-    if (!this.pointer.inside) {
-      el.classList.remove('show');
+  /** Card near the cursor: the hovered agent (Inspect tool), or the ground under it while a data layer is on. */
+  private updateHoverCard(): void {
+    const card = this.el.hover;
+    const show = !this.startOpen && this.pointer.inside && !this.drag && this.tool.id === 'inspect' && !this.helpOpen && !this.minimapWorld(this.pointer.x, this.pointer.y);
+    if (!show) {
+      card.classList.remove('show');
+      this.hoverKey = '';
       return;
     }
     const sim = this.sim;
     const a = this.view.hoverId !== -1 ? sim.getAgent(this.view.hoverId) : undefined;
+    let key = '';
+    let build: (() => void) | null = null;
     if (a) {
       const tribe = sim.getTribe(a.tribeId);
-      const hp = Math.round((a.health / Math.max(1, a.traits.maxHealth)) * 100);
-      const fed = Math.round((a.food / Math.max(1, a.traits.maxFood)) * 100);
-      const thought = a.thought ? ` — “${a.thought.length > 90 ? a.thought.slice(0, 88) + '…' : a.thought}”` : '';
-      const key = `a|${a.id}|${a.action}|${thought}|${hp}|${fed}|${tribe?.id}|${a.infection > 0}`;
-      if (this.text.cursor !== key) {
-        this.text.cursor = key;
-        el.replaceChildren(
-          h('span', { class: 'ci-dot', style: `background:hsl(${a.traits.hue},70%,60%)` }),
-          h('b', null, a.name),
-          h('span', { class: 'muted' }, ` gen ${a.generation} · `),
-          tribe ? h('span', { style: `color:hsl(${tribe.hue},70%,70%)` }, tribe.name) : h('span', { class: 'muted' }, 'no tribe'),
-          h('span', { class: 'muted' }, ' · '),
-          h('span', { class: 'ci-act' }, ACTION_LABEL[a.action] ?? a.action),
-          h('span', { class: 'muted' }, thought),
-          h('span', { class: 'ci-vitals' }, `  ♥ ${hp}%  ◍ ${fed}%`),
-          a.infection > 0 ? h('span', { class: 'ci-sick' }, '  infected') : '',
+      const days = a.age / Math.max(1, sim.config.dayLength);
+      const age = days < 1 ? 'less than a day old' : `${days < 10 ? days.toFixed(1) : Math.round(days)} days old`;
+      // the same sentence and thought text as the Agent tab
+      const doing = describeAction(sim, a);
+      const said = a.thought ? plainText(a.thought) : '';
+      const thought = said.length > 80 ? `${said.slice(0, 78).trimEnd()}...` : said;
+      key = `a|${a.id}|${doing}|${thought}|${age}|${tribe?.id ?? -1}`;
+      build = () =>
+        fill(
+          card,
+          h('div', { class: 'hc-name' }, h('span', { class: 'hc-dot', style: `background:hsl(${tribe ? tribe.hue : a.traits.hue}, 45%, 58%)` }), a.name),
+          h('div', { class: 'hc-sub' }, `${tribe ? tribe.name : 'No tribe'}, ${age}, generation ${a.generation}`),
+          h('div', { class: 'hc-doing' }, doing),
+          thought ? h('div', { class: 'hc-thought' }, thought) : null,
         );
+    } else if (this.view.overlay !== 'none') {
+      const w = this.camera.screenToWorld(this.pointer.x, this.pointer.y);
+      const i = sim.tileIndex(w.x, w.y);
+      if (i >= 0) {
+        const world = sim.state.world;
+        const terr = TERRAIN_INFO[world.terrain[i] as TerrainType];
+        const owner = world.territory ? world.territory[i] : -1;
+        const tribe = owner >= 0 ? sim.getTribe(owner) : undefined;
+        const food = world.food[i];
+        const fert = Math.round(world.fertility[i] * 100);
+        key = `t|${i}|${food.toFixed(1)}|${fert}|${tribe?.id ?? -1}`;
+        build = () =>
+          fill(
+            card,
+            h('div', { class: 'hc-name' }, terr ? terr.name : 'Land'),
+            h('div', { class: 'hc-sub' }, `Food ${food.toFixed(1)}, fertility ${fert}%`),
+            tribe ? h('div', { class: 'hc-sub' }, `${tribe.name} land`) : null,
+          );
       }
-      el.classList.add('show');
+    }
+    if (!build) {
+      card.classList.remove('show');
+      this.hoverKey = '';
       return;
     }
-    const w = this.camera.screenToWorld(this.pointer.x, this.pointer.y);
-    const i = sim.tileIndex(w.x, w.y);
-    if (i < 0) {
-      el.classList.remove('show');
-      return;
+    const fresh = key !== this.hoverKey || !card.classList.contains('show');
+    if (key !== this.hoverKey) {
+      this.hoverKey = key;
+      build();
     }
-    const world = sim.state.world;
-    const terr = TERRAIN_INFO[world.terrain[i] as TerrainType];
-    const owner = world.territory ? world.territory[i] : -1;
-    const tribe = owner >= 0 ? sim.getTribe(owner) : undefined;
-    const txt = `${Math.round(w.x)}, ${Math.round(w.y)}  ·  ${terr ? terr.name : '?'}  ·  food ${world.food[i].toFixed(1)}  ·  fertility ${Math.round(world.fertility[i] * 100)}%${tribe ? `  ·  ${tribe.name} land` : ''}`;
-    if (this.text.cursor !== txt) {
-      this.text.cursor = txt;
-      el.textContent = txt;
-    }
-    el.classList.add('show');
+    card.classList.add('show');
+    if (fresh) this.hoverSize = { w: card.offsetWidth, h: card.offsetHeight };
+    this.placeHoverCard();
+  }
+
+  /** Size of the hover card, measured when its content changes (not every frame). */
+  private hoverSize = { w: 0, h: 0 };
+
+  private placeHoverCard(): void {
+    const card = this.el.hover;
+    if (!card.classList.contains('show')) return;
+    const vw = this.camera.viewW;
+    const vh = this.camera.viewH;
+    const w = this.hoverSize.w;
+    const hh = this.hoverSize.h;
+    let x = this.pointer.x + 16;
+    let y = this.pointer.y + 18;
+    if (x + w > vw - 8) x = this.pointer.x - w - 12;
+    if (y + hh > vh - 8) y = this.pointer.y - hh - 12;
+    card.style.transform = `translate(${Math.round(Math.max(4, x))}px, ${Math.round(Math.max(4, y))}px)`;
+  }
+
+  /** Keep the hint box, zoom buttons and tool options clear of the minimap wherever the renderer puts it. */
+  private layoutHud(): void {
+    const r = this.renderer as unknown as {
+      minimapRect?: { x: number; y: number; w: number; h: number; visible: boolean };
+      connectionsLegendRect?: { y: number; visible: boolean };
+    };
+    const rect = r.minimapRect;
+    const vw = this.camera.viewW;
+    const vh = this.camera.viewH;
+    const ties = (this.view as { showConnections?: boolean; showCamps?: boolean }).showConnections !== false || this.view.showCamps;
+    const leg = r.connectionsLegendRect;
+    // a legend taller than the room kept for it (a future renderer change) lays the panel out again
+    const tall = !!rect && !!leg && leg.visible && leg.y < rect.y - LEGEND_ZONE ? Math.round(leg.y) : 0;
+    const key = rect ? `${rect.visible}|${Math.round(rect.x)}|${Math.round(rect.y)}|${Math.round(rect.w)}|${Math.round(rect.h)}|${vw}|${vh}|${ties}|${tall}` : `none|${vw}|${vh}`;
+    if (key === this.hudKey) return;
+    this.hudKey = key;
+    const onLeft = !!rect && rect.visible && rect.x < vw / 2;
+    const left = onLeft ? Math.round(rect!.x + rect!.w + 12) : 14;
+    this.el.hint.style.left = `${left}px`;
+    const onRight = rect && rect.visible && rect.x >= vw / 2;
+    this.el.zoom.style.right = onRight ? `${Math.round(vw - rect.x + 10)}px` : '';
+    // the options panel stops above the minimap and the connections legend drawn just above it
+    // (read from the style sheet: the panel is often hidden here, with no layout of its own)
+    const panel = this.toolPanel.el;
+    const ps = getComputedStyle(panel);
+    const pLeft = parseFloat(ps.left) || 0;
+    const pTop = parseFloat(ps.top) || 0;
+    if (onLeft && rect!.x < pLeft + (parseFloat(ps.width) || 0)) {
+      const legendTop = !ties ? rect!.y : tall ? Math.min(tall, rect!.y - LEGEND_ZONE) : rect!.y - LEGEND_ZONE;
+      panel.style.maxHeight = `${Math.max(180, Math.round(legendTop - pTop - 10))}px`;
+    } else panel.style.maxHeight = '';
   }
 
   private setText(key: string, value: string): void {
@@ -1277,23 +1714,27 @@ export class App {
   private updateTopbar(now: number): void {
     const sim = this.sim;
     const env = sim.state.env;
-    this.setText('clock', `Year ${env.year + 1} · ${SEASON_NAMES[env.season] ?? '—'} · Day ${Math.floor(env.day) + 1}`);
-    this.setText('tick', `tick ${fmtInt(sim.tick)}`);
+    const season = sim.config.seasons ? `, ${(SEASON_NAMES[env.season] ?? '').toLowerCase()}` : '';
+    this.setText('clock', `Day ${fmtInt(Math.floor(env.day) + 1)}${season}, year ${env.year + 1}`);
     const night = sim.config.dayNight && env.daylight < 0.4;
     const dayKey = night ? 'moon' : 'sun';
     if (this.text.dayIcon !== dayKey) {
       this.text.dayIcon = dayKey;
-      this.el.dayIcon.replaceChildren(icon(dayKey, 16));
+      this.el.dayIcon.replaceChildren(icon(dayKey, 17));
       this.el.dayIcon.classList.toggle('night', night);
     }
-    this.setText('pop', fmtInt(sim.state.agents.length));
-    let tribes = 0;
-    for (const t of sim.state.tribes) if (t.extinctTick === -1) tribes++;
-    this.setText('tribes', String(tribes));
+    if (this.frames % 15 === 0) {
+      const clock = this.el.clock.parentElement;
+      if (clock) clock.dataset.tip = `Tick ${fmtInt(sim.tick)}. A day is ${fmtInt(sim.config.dayLength)} ticks.`;
+    }
+    this.setText('pop', plural(sim.state.agents.length, 'agent'));
     const limited = this.running && SPEEDS[this.speedIdx] !== 0 && now < this.limitedUntil;
-    if (this.text.cpu !== String(limited)) {
-      this.text.cpu = String(limited);
-      this.el.cpu.classList.toggle('show', limited);
+    const lk = String(limited);
+    if (this.text.limited !== lk) {
+      this.text.limited = lk;
+      const b = this.el.speedLabel;
+      b.classList.toggle('limited', limited);
+      b.dataset.tip = limited ? `Your computer cannot keep up with ${SPEED_LABELS[this.speedIdx]}, so the simulation runs as fast as it can.` : 'Speed. Click to pick one.';
     }
   }
 
@@ -1316,62 +1757,12 @@ export class App {
 
   private updatePanels(force: boolean): void {
     if (force) for (const t of this.panes.keys()) this.updatePanel(t, true);
-    else this.updatePanel(this.tab, false);
+    else if (!this.startOpen && !this.root.classList.contains('no-side')) this.updatePanel(this.tab, false);
     this.checkEvents();
-    this.left.sync();
-    this.updateCursorInfo();
+    if (this.drawer.isOpen) this.drawer.sync();
+    this.updateHoverCard();
     this.updateFollowChip();
     if (this.tool.id === 'spawn' && ++this.panelTicks % 8 === 0) this.designer.refreshTribes();
-  }
-
-  /** Toast new 'major' events (rate-limited) and badge the Events tab. */
-  private checkEvents(): void {
-    const evs = this.sim.state.events;
-    if (evs.length) {
-      const newest = evs[evs.length - 1].id;
-      if (newest > this.lastEventId) {
-        const fresh: SimEvent[] = [];
-        let count = 0;
-        for (let i = evs.length - 1; i >= 0 && evs[i].id > this.lastEventId; i--) {
-          count++;
-          if (evs[i].severity === 'major' && evs[i].category !== 'intervention') fresh.push(evs[i]);
-        }
-        this.lastEventId = newest;
-        if (this.tab !== 'events') this.unseenEvents += count;
-        fresh.reverse();
-        this.toastQueue.push(...fresh);
-        if (this.toastQueue.length > 2) this.skippedToasts += this.toastQueue.splice(0, this.toastQueue.length - 2).length;
-      }
-    }
-    const badge = this.el.evBadge;
-    const label = this.unseenEvents > 0 ? (this.unseenEvents > 99 ? '99+' : String(this.unseenEvents)) : '';
-    if (badge.textContent !== label) {
-      badge.textContent = label;
-      badge.classList.toggle('show', Boolean(label));
-    }
-    const now = performance.now();
-    if (this.toastQueue.length && now - this.lastToastT > 2000) {
-      const ev = this.toastQueue.shift()!;
-      this.lastToastT = now;
-      const more = this.toastQueue.length + this.skippedToasts;
-      this.skippedToasts = 0;
-      this.toaster.show(ev.message, {
-        kind: 'major',
-        title: `${ev.category.charAt(0).toUpperCase()}${ev.category.slice(1)} · tick ${fmtInt(ev.tick)}${more ? `  · +${more} more in Events` : ''}`,
-        timeout: 5000,
-        onClick: () => {
-          if (ev.agentId !== undefined && this.sim.getAgent(ev.agentId)) this.handlersSelect(ev.agentId);
-          else if (ev.x !== undefined && ev.y !== undefined) this.flyTo(ev.x, ev.y);
-          else this.setTab('events');
-        },
-      });
-    }
-  }
-
-  private handlersSelect(id: number): void {
-    this.select(id);
-    const a = this.sim.getAgent(id);
-    if (a) this.flyTo(a.x, a.y);
   }
 }
 

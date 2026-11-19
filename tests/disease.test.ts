@@ -254,7 +254,7 @@ describe('disease: epidemic tracking', () => {
     for (const a of pop) a.infection = 1;
     diseaseTick(sim);
     expect(infectedCount(sim)).toBe(0);
-    expect(sim.state.events.some((e) => e.category === 'disease' && e.message.includes('burned out — 0 died'))).toBe(true);
+    expect(sim.state.events.some((e) => e.category === 'disease' && e.message.includes('The epidemic is over. No one died'))).toBe(true);
   });
 
   it('is deterministic for identical seeds', () => {
