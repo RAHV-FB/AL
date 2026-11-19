@@ -67,7 +67,7 @@ export function esc(s: string): string {
 
 /** Compact number formatting: 1234 → 1.2k, 0.123 → 0.12. */
 export function formatNum(v: number): string {
-  if (!Number.isFinite(v)) return '–';
+  if (!Number.isFinite(v)) return 'n/a';
   const a = Math.abs(v);
   if (a >= 1e6) return (v / 1e6).toFixed(a >= 1e7 ? 0 : 1) + 'M';
   if (a >= 1e4) return (v / 1e3).toFixed(0) + 'k';
@@ -79,7 +79,7 @@ export function formatNum(v: number): string {
 }
 
 export function formatPct(v: number): string {
-  return Number.isFinite(v) ? `${Math.round(v * 100)}%` : '–';
+  return Number.isFinite(v) ? `${Math.round(v * 100)}%` : 'n/a';
 }
 
 /** A "nice" step (1, 2, 2.5, 5 × 10^k) splitting `range` into about `target` intervals. */

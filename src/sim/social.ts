@@ -1344,8 +1344,8 @@ function considerFission(sim: Simulation, c: SocialCache): void {
     const list = g.list;
     const n = list.length;
     if (n < K.fissionMinMembers || s.tick - t.foundedTick < K.fissionMinAge) continue;
-    // members away on a raid are coming back: they neither stretch the tribe nor leave with a faction (a raiding
-    // party marching on an enemy camp used to be split off as a new tribe halfway there)
+    // members away on a raid are coming back: they neither make the tribe too big or stretched nor leave with a
+    // faction (a raiding party marching on an enemy camp used to be split off as a new tribe halfway there)
     let far = 0;
     let home = 0;
     let pole: Agent | null = null;
@@ -1360,7 +1360,8 @@ function considerFission(sim: Simulation, c: SocialCache): void {
         pole = m;
       }
     }
-    const big = n > K.fissionSize;
+    if (home < K.fissionMinMembers) continue;
+    const big = home > K.fissionSize;
     const stretched = far >= Math.max(K.fissionMinFaction, K.fissionStretch * home);
     if (!pole || (!big && !stretched)) continue;
     if (!sim.rng.chance(big ? 0.3 : 0.2)) continue;

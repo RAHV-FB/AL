@@ -1,4 +1,29 @@
-// OWNER: Rendering agent. Colour helpers, cached CSS strings and heatmap ramps.
+// OWNER: map agents engineer. Palette tokens, colour helpers, cached CSS strings and heatmap ramps.
+
+/** Palette tokens shared by the canvas layers (same values as the CSS tokens of the UI). */
+export const PAL = {
+  bg: '#131210',
+  panel: '#1c1b18',
+  border: '#302e29',
+  border2: '#3e3b34',
+  text: '#e8e3d8',
+  muted: '#aba596',
+  faint: '#938d7f',
+  sage: '#8fb573',
+  ochre: '#d6a648',
+  rust: '#cf5b45',
+  water: '#6f9fc2',
+  sand: '#c8b48a',
+  /** Dark ink for outlines under text and marks. */
+  ink: 'rgba(19,18,16,0.88)',
+} as const;
+
+/** Line colours of the connections between agents. */
+export const TIE = {
+  family: PAL.sand,
+  friend: PAL.sage,
+  enemy: PAL.rust,
+} as const;
 
 /** HSL (h 0..360, s/l 0..1) → packed [r,g,b] 0..255 written into `out`. */
 export function hslToRgb(h: number, s: number, l: number, out: number[] = [0, 0, 0]): number[] {
@@ -51,6 +76,16 @@ export function hueColor(h: number, s: number, l: number, a = 1): string {
   return v;
 }
 
+/** Tribe colour, the same everywhere (map bodies, territory, charts, swatches): hsl(hue, 45%, 58%). */
+export function tribeColor(hue: number, a = 1): string {
+  return hueColor(hue, 0.45, 0.58, a);
+}
+
+/** Darker shade of a tribe colour, for outlines on the map. */
+export function tribeShade(hue: number, a = 1): string {
+  return hueColor(hue, 0.4, 0.26, a);
+}
+
 /** 256-entry RGBA lookup table (Uint8ClampedArray, 1024 bytes) built from colour stops. */
 export type Ramp = Uint8ClampedArray;
 
@@ -69,48 +104,66 @@ export function makeRamp(stops: [number, number, number, number, number][]): Ram
   return lut;
 }
 
-/** CSS linear-gradient-like colour string for legend stops. */
+/** CSS colour string of a ramp at t (legend stops). */
 export function rampColor(r: Ramp, t: number): string {
   const i = Math.max(0, Math.min(255, Math.round(t * 255))) * 4;
   return `rgba(${r[i]},${r[i + 1]},${r[i + 2]},${(r[i + 3] / 255).toFixed(3)})`;
 }
 
+// Heatmap ramps for the data overlays, built from the palette (sand, ochre, sage, rust, water).
 // stops: [t, r, g, b, a]
 export const RAMPS = {
   food: makeRamp([
-    [0, 40, 20, 60, 0],
-    [0.08, 50, 40, 110, 90],
-    [0.35, 32, 140, 150, 150],
-    [0.65, 90, 200, 90, 175],
-    [1, 250, 240, 90, 200],
+    [0, 90, 70, 45, 0],
+    [0.06, 150, 112, 66, 90],
+    [0.35, 200, 180, 120, 135],
+    [0.7, 143, 181, 115, 170],
+    [1, 205, 226, 168, 200],
   ]),
   fertility: makeRamp([
-    [0, 120, 60, 30, 180],
-    [0.3, 190, 130, 50, 150],
-    [0.6, 200, 200, 80, 120],
-    [1, 60, 210, 110, 150],
+    [0, 160, 86, 60, 180],
+    [0.3, 196, 146, 82, 150],
+    [0.6, 205, 190, 125, 120],
+    [1, 143, 181, 115, 160],
   ]),
   density: makeRamp([
-    [0, 20, 10, 40, 0],
-    [0.1, 70, 20, 120, 110],
-    [0.4, 200, 50, 110, 165],
-    [0.7, 250, 140, 40, 195],
-    [1, 255, 250, 180, 225],
+    [0, 60, 50, 35, 0],
+    [0.1, 150, 120, 70, 110],
+    [0.4, 214, 166, 72, 165],
+    [0.7, 207, 91, 69, 195],
+    [1, 240, 222, 196, 225],
   ]),
   disease: makeRamp([
-    [0, 30, 60, 10, 0],
-    [0.15, 80, 140, 20, 110],
-    [0.5, 150, 230, 40, 170],
-    [1, 235, 255, 170, 215],
+    [0, 80, 80, 30, 0],
+    [0.15, 128, 132, 58, 110],
+    [0.5, 172, 176, 92, 170],
+    [1, 228, 226, 168, 215],
   ]),
   climateDown: makeRamp([
-    [0, 255, 70, 50, 0],
-    [0.1, 255, 80, 60, 70],
-    [1, 255, 40, 30, 190],
+    [0, 207, 91, 69, 0],
+    [0.1, 207, 91, 69, 70],
+    [1, 207, 91, 69, 190],
   ]),
   climateUp: makeRamp([
-    [0, 60, 255, 120, 0],
-    [0.1, 70, 255, 130, 70],
-    [1, 120, 255, 140, 190],
+    [0, 143, 181, 115, 0],
+    [0.1, 143, 181, 115, 70],
+    [1, 165, 205, 135, 190],
   ]),
 };
+
+/** Plain panel for canvas legends and notes: flat fill, 1px border, 2px radius (screen space). */
+export function flatPanel(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number): void {
+  const r = 2;
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+  ctx.fillStyle = PAL.panel;
+  ctx.fill();
+  ctx.strokeStyle = PAL.border2;
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}

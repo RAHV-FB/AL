@@ -1,15 +1,18 @@
 /**
- * Agent inspector (OWNER: Analytics). The DOM skeleton is built once per selected
- * id; afterwards text, bars and keyed lists are updated in place (throttled).
- * A dead agent keeps its last snapshot (with cause of death); an id known only
- * from the lineage registry shows its lineage record.
+ * Agent tab (OWNER: UI panels). The DOM is built once per selected id; afterwards text, bars and keyed
+ * lists are updated in place (throttled). A dead agent keeps its last snapshot (with the cause of death);
+ * an id known only from the lineage registry shows its lineage record.
+ *
+ * Reading order: who it is, what it is doing now and its needs, why (the options it weighed), the agents it
+ * knows and its family; genes, skills and its life story are folded.
  */
 import './analytics.css';
 import type { Simulation } from '../sim/simulation';
-import { GENES, NONE, type ActionKind, type Agent, type AgentId, type GeneName, type LineageRecord, type Traits } from '../sim/types';
-import { CAUSE_LABELS, GENE_DESCRIPTIONS, GENE_LABELS, ROLE_LABELS, dayOfTick, tribeColor } from './analytics';
+import { GENES, NONE, type ActionKind, type Agent, type AgentId, type GeneName, type LineageRecord, type Relationship, type Traits } from '../sim/types';
+import { ACTION_LABELS, OPTION_LABELS, GENE_DESCRIPTIONS, GENE_LABELS, ROLE_LABELS, clockOfTick, dayOfTick, tribeColor } from './analytics';
 import { REPRO, mateFoodThreshold, rangeFoodThreshold } from '../sim/genetics';
 import { localFoodFraction } from '../sim/ecology';
+import { SOCIAL_TUNING, carryCapacity, theTribe } from '../sim/social';
 
 export interface InspectorHandlers {
   onSelect(id: number): void; // select another agent (e.g. click a relative)
@@ -24,22 +27,33 @@ export interface Inspector {
   update(sim: Simulation, selectedId: number): void;
 }
 
-const ACTION_LABELS: Record<ActionKind, string> = {
-  idle: 'Idling',
-  wander: 'Wandering',
-  explore: 'Exploring',
-  forage: 'Foraging',
-  eat: 'Eating',
-  rest: 'Resting',
-  flee: 'Fleeing',
-  attack: 'Attacking',
-  share: 'Sharing food',
-  mate: 'Courting',
-  socialize: 'Socialising',
-  gohome: 'Heading home',
-  deposit: 'Storing food',
-  withdraw: 'Taking from store',
-};
+/** What the agent is doing, as one short sentence ("Fighting Ada Brook."). Pure; also used by the map's hover card. */
+export function describeAction(sim: Simulation, a: Agent): string {
+  if (!a.alive) return 'Dead.';
+  const t = a.targetId !== NONE ? sim.getAgent(a.targetId) : undefined;
+  const who = t && t.alive && t.id !== a.id ? t.name : '';
+  const tribe = a.tribeId !== NONE ? sim.getTribe(a.tribeId) : undefined;
+  switch (a.action) {
+    case 'attack':
+      return who ? `Fighting ${who}.` : 'Fighting.';
+    case 'flee':
+      return who ? `Fleeing from ${who}.` : 'Fleeing from danger.';
+    case 'share':
+      return who ? `Sharing food with ${who}.` : 'Sharing food.';
+    case 'mate':
+      return who ? `Courting ${who}.` : 'Courting.';
+    case 'socialize':
+      return who ? `Spending time with ${who}.` : 'Spending time with others.';
+    case 'gohome':
+      return tribe ? `Going back to the camp of ${theTribe(tribe)}.` : 'Going home.';
+    case 'deposit':
+      return 'Storing food at the camp.';
+    case 'withdraw':
+      return 'Taking food from the camp store.';
+    default:
+      return `${ACTION_LABELS[a.action] ?? a.action}.`;
+  }
+}
 
 // ------------------------------------------------------------------ tiny DOM helpers
 
@@ -111,9 +125,19 @@ function syncList<T>(
   }
 }
 
-function section(parent: HTMLElement, title: string, open = true): HTMLElement {
+/** A plain section with a heading (always open). */
+function block(parent: HTMLElement, title: string): HTMLElement {
+  const sec = h('section', 'insp-block');
+  sec.append(h('h3', 'insp-h', title));
+  const body = h('div', 'insp-block-body');
+  sec.append(body);
+  parent.append(sec);
+  return body;
+}
+
+/** A folded section. */
+function folded(parent: HTMLElement, title: string): HTMLElement {
   const d = h('details', 'insp-sec');
-  d.open = open;
   d.append(h('summary', 'insp-sec-title', title));
   const body = h('div', 'insp-sec-body');
   d.append(body);
@@ -124,23 +148,28 @@ function section(parent: HTMLElement, title: string, open = true): HTMLElement {
 function phenotype(g: GeneName, t: Traits, dayLen: number): string {
   switch (g) {
     case 'speed':
-      return `${t.speed.toFixed(2)} u/tick`;
+      return `${t.speed.toFixed(2)} units per tick`;
     case 'size':
-      return `×${t.size.toFixed(2)}`;
+      return `${t.size.toFixed(2)} times`;
     case 'perception':
-      return `${Math.round(t.perception)} u`;
+      return `${Math.round(t.perception)} units`;
     case 'metabolism':
-      return `×${t.metabolism.toFixed(2)} burn`;
+      return `${t.metabolism.toFixed(2)} times`;
     case 'longevity':
       return `${(t.longevity / dayLen).toFixed(1)} days`;
     case 'efficiency':
-      return `×${t.efficiency.toFixed(2)} /bite`;
+      return `${t.efficiency.toFixed(2)} times`;
     case 'hue':
-      return `${Math.round(t.hue)}°`;
+      return `${Math.round(t.hue)} degrees`;
     default:
       return `${Math.round((t[g] as number) * 100)}%`;
   }
 }
+
+const days = (ticks: number, dl: number): string => {
+  const d = ticks / dl;
+  return `${d.toFixed(1)} ${d.toFixed(1) === '1.0' ? 'day' : 'days'}`;
+};
 
 // ------------------------------------------------------------------ lineage helpers
 
@@ -156,7 +185,7 @@ function personRef(sim: Simulation, id: AgentId): PersonRef {
   if (a) return { id, name: a.name, alive: true, known: true };
   const rec = sim.lineageById.get(id);
   if (rec) return { id, name: rec.name, alive: false, known: true };
-  return { id, name: `#${id}`, alive: false, known: false };
+  return { id, name: `Agent ${id}`, alive: false, known: false };
 }
 
 function parentsOf(sim: Simulation, id: AgentId): [AgentId, AgentId] | null {
@@ -166,7 +195,7 @@ function parentsOf(sim: Simulation, id: AgentId): [AgentId, AgentId] | null {
   return rec ? rec.parents : null;
 }
 
-/** parent id → child ids, built from the lineage registry (cached by the caller). */
+/** parent id to child ids, built from the lineage registry (cached by the caller). */
 function buildChildIndex(sim: Simulation): Map<AgentId, AgentId[]> {
   const idx = new Map<AgentId, AgentId[]>();
   for (const rec of sim.state.lineage) {
@@ -174,7 +203,7 @@ function buildChildIndex(sim: Simulation): Map<AgentId, AgentId[]> {
       if (p === NONE) continue;
       let arr = idx.get(p);
       if (!arr) idx.set(p, (arr = []));
-      arr.push(rec.id);
+      if (!arr.includes(rec.id)) arr.push(rec.id);
     }
   }
   return idx;
@@ -200,6 +229,14 @@ function countDescendants(sim: Simulation, idx: Map<AgentId, AgentId[]>, root: A
   return { living, total };
 }
 
+const CAUSE_PHRASE: Record<string, string> = {
+  starvation: 'of starvation',
+  old_age: 'of old age',
+  combat: 'in a fight',
+  disease: 'of disease',
+  disaster: 'in a disaster',
+};
+
 // ------------------------------------------------------------------ inspector
 
 interface View {
@@ -212,7 +249,7 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
   container.textContent = '';
   container.classList.add('insp-root');
   const empty = h('div', 'insp-empty');
-  empty.append(h('div', 'insp-empty-icon', '◎'), h('div', '', 'Click an agent to inspect it'), h('div', 'insp-empty-sub', 'Its genes, needs, thoughts, relationships and family appear here.'));
+  empty.append(h('p', '', 'Click an agent on the map to see what it is doing and why.'));
   container.append(empty);
 
   let sim: Simulation | null = null;
@@ -239,83 +276,133 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
     return desc;
   };
 
-  /** Clickable person link (alive or recorded dead → selectable). */
-  const personEl = (p: PersonRef, extra = ''): HTMLElement => {
+  const pick = (p: PersonRef) => {
+    handlers.onSelect(p.id);
+    if (p.alive) handlers.onShowOnMap?.(p.id);
+  };
+
+  /** Clickable name (a living agent or a recorded dead one can be selected). */
+  const personEl = (p: PersonRef, tip?: string): HTMLElement => {
     const el = h(p.known ? 'button' : 'span', `insp-person${p.alive ? '' : ' insp-dead'}`);
     if (el instanceof HTMLButtonElement) {
       el.type = 'button';
-      el.addEventListener('click', () => handlers.onSelect(p.id));
-      el.title = p.alive ? `Inspect ${p.name}` : `${p.name} (deceased) — show lineage record`;
+      el.addEventListener('click', () => pick(p));
+      el.title = tip ?? (p.alive ? `Select ${p.name} and show it on the map` : `${p.name} is dead. Select to see its record.`);
     }
-    el.textContent = `${p.name}${p.alive ? '' : ' †'}${extra}`;
+    el.textContent = p.alive ? p.name : `${p.name} (dead)`;
     return el;
+  };
+
+  /** A labelled row of names, at most `max` shown. */
+  const nameRow = (host: HTMLElement, label: string, people: { ref: PersonRef; tip?: string }[], emptyText: string, extra = '', max = 6) => {
+    host.textContent = '';
+    host.append(h('span', 'insp-row-label', label));
+    const list = h('span', 'insp-names');
+    if (!people.length) list.append(h('span', 'insp-muted', emptyText));
+    for (const p of people.slice(0, max)) list.append(personEl(p.ref, p.tip));
+    const more = people.length > max ? `and ${people.length - max} more` : '';
+    const tail = [more, extra].filter(Boolean).join(', ');
+    if (tail) list.append(h('span', 'insp-muted', tail));
+    host.append(list);
   };
 
   function buildView(s: Simulation, id: AgentId): View {
     const root = h('div', 'insp-body');
     const dayLen = () => Math.max(1, s.config.dayLength || 600);
 
-    // header
+    // ---------------------------------------------------------------- header
     const head = h('div', 'insp-head');
-    const sw = h('span', 'insp-swatch');
-    const titleBox = h('div', 'insp-title');
+    const nameLine = h('div', 'insp-name-line');
     const name = h('div', 'insp-name');
-    const idLine = h('div', 'insp-idline');
-    titleBox.append(name, idLine);
-    const badge = h('span', 'insp-badge');
-    head.append(sw, titleBox, badge);
+    const badge = h('span', 'insp-badge', 'Dead');
+    nameLine.append(name, badge);
+    const meta1 = h('div', 'insp-meta');
+    const sw = h('i', 'insp-swatch');
+    const tribeName = h('span', 'insp-tribe');
+    const roleEl = h('span', 'insp-role');
+    meta1.append(sw, tribeName, roleEl);
+    const meta2 = h('div', 'insp-meta insp-meta-2');
+    head.append(nameLine, meta1, meta2);
     root.append(head);
-    const chipRow = h('div', 'insp-chiprow');
-    const tribeChip = h('span', 'insp-chip');
-    const tribeDot = h('i');
-    const tribeName = h('span');
-    tribeChip.append(tribeDot, tribeName);
-    const roleChip = h('span', 'insp-chip insp-chip-plain');
-    const ageChip = h('span', 'insp-chip insp-chip-plain');
-    chipRow.append(tribeChip, roleChip, ageChip);
-    root.append(chipRow);
 
-    const deathBanner = h('div', 'insp-death');
-    deathBanner.hidden = true;
-    root.append(deathBanner);
+    const deathLine = h('p', 'insp-death');
+    deathLine.hidden = true;
+    root.append(deathLine);
 
-    // thought
-    const doing = h('div', 'insp-doing');
-    const actionEl = h('div', 'insp-action');
-    const thought = h('div', 'insp-thought');
-    doing.append(actionEl, thought);
-    root.append(doing);
-
-    // buttons
+    // buttons: two for the camera, two small ones that act on the agent
     const btns = h('div', 'insp-btns');
-    const bFollow = h('button', 'insp-btn', 'Follow');
-    const bBoost = h('button', 'insp-btn insp-btn-good', 'Feed & heal');
-    const bKill = h('button', 'insp-btn insp-btn-bad', 'Smite');
-    for (const b of [bFollow, bBoost, bKill]) b.type = 'button';
-    bFollow.title = 'Camera follows this agent';
-    bBoost.title = 'Restore health and fill its stomach';
-    bKill.title = 'Strike this agent down';
+    const bFollow = h('button', 'insp-btn insp-btn-primary', 'Follow');
+    const bShow = h('button', 'insp-btn', 'Show on map');
+    const bBoost = h('button', 'insp-btn insp-btn-small', 'Bless');
+    const bKill = h('button', 'insp-btn insp-btn-small insp-btn-bad', 'Smite');
+    for (const b of [bFollow, bShow, bBoost, bKill]) b.type = 'button';
+    bFollow.title = 'Keep the camera on this agent';
+    bShow.title = 'Move the camera to this agent';
+    bBoost.title = 'Fully heal and feed this agent';
+    bKill.title = 'Kill this agent';
     bFollow.addEventListener('click', () => handlers.onFollow(id));
+    bShow.addEventListener('click', () => (handlers.onShowOnMap ? handlers.onShowOnMap(id) : handlers.onSelect(id)));
     bBoost.addEventListener('click', () => handlers.onBoost(id));
     bKill.addEventListener('click', () => handlers.onKill(id));
-    btns.append(bFollow, bBoost, bKill);
+    const actGroup = h('span', 'insp-btns-act');
+    actGroup.append(bBoost, bKill);
+    btns.append(bFollow, bShow, actGroup);
     root.append(btns);
 
-    // vitals
-    const vit = section(root, 'Condition');
-    const mHealth = meter(vit, 'Health', 'insp-m-health');
-    const mHunger = meter(vit, 'Hunger', 'insp-m-hunger');
-    const mEnergy = meter(vit, 'Energy', 'insp-m-energy');
-    const mCarried = meter(vit, 'Carried', 'insp-m-carried');
-    const disease = h('div', 'insp-status');
-    const repro = h('div', 'insp-status');
-    const navLine = h('div', 'insp-status');
+    // ---------------------------------------------------------------- now
+    const nowB = block(root, 'Now');
+    const nowSec = nowB.parentElement as HTMLElement;
+    const doing = h('p', 'insp-doing');
+    const thought = h('p', 'insp-thought');
+    nowB.append(doing, thought);
+    const needs = h('div', 'insp-needs');
+    nowB.append(needs);
+    const mHealth = meter(needs, 'Health', 'insp-m-health');
+    const mHunger = meter(needs, 'Hunger', 'insp-m-hunger');
+    const mEnergy = meter(needs, 'Energy', 'insp-m-energy');
+    const mCarried = meter(needs, 'Carrying', 'insp-m-carried');
+    const mFear = meter(needs, 'Fear', 'insp-m-fear');
+    mFear.root.hidden = true;
+    const disease = h('p', 'insp-status');
+    const repro = h('p', 'insp-status');
+    const navLine = h('p', 'insp-status');
     navLine.hidden = true;
-    repro.title = 'Reproductive status: breeding needs an adult that is not too old, off cooldown, well fed (threshold depends on the fertility gene), rested and healthy — plus a compatible partner nearby.';
-    vit.append(disease, repro, navLine);
+    repro.title =
+      'To breed, an agent must be an adult and not too old, past the rest after its last birth, well fed (how full depends on its fertility gene), rested and healthy, with a willing partner nearby.';
+    nowB.append(disease, repro, navLine);
 
-    // traits
-    const traitSec = section(root, 'Genes & traits');
+    // ---------------------------------------------------------------- why
+    const whyB = block(root, 'Why');
+    const whySec = whyB.parentElement as HTMLElement;
+    whyB.append(h('p', 'insp-explain', 'How much each option appealed to it at its last decision. It acts on the strongest.'));
+    const utilList = h('div', 'insp-utils');
+    whyB.append(utilList);
+    const utilEmpty = h('p', 'insp-muted', 'No decision yet.');
+    whyB.append(utilEmpty);
+    const utilCache = new Map<string | number, HTMLElement>();
+
+    // ---------------------------------------------------------------- relationships
+    const relB = block(root, 'Relationships');
+    const relSec = relB.parentElement as HTMLElement;
+    const relFriends = h('div', 'insp-row');
+    const relEnemies = h('div', 'insp-row');
+    const relOthers = h('div', 'insp-row');
+    relB.append(relFriends, relEnemies, relOthers);
+    let relKey = '';
+
+    // ---------------------------------------------------------------- family
+    const famB = block(root, 'Family');
+    const famParents = h('div', 'insp-row');
+    const famGrand = h('div', 'insp-row');
+    const famSibs = h('div', 'insp-row');
+    const famKids = h('div', 'insp-row');
+    const famDesc = h('div', 'insp-row');
+    famB.append(famParents, famGrand, famSibs, famKids, famDesc);
+    let famKey = '';
+
+    // ---------------------------------------------------------------- folded details
+    const traitSec = folded(root, 'Genes');
+    traitSec.append(h('p', 'insp-explain', 'Gene values from 0 to 1, with what they mean for this body.'));
     const traitTable = h('div', 'insp-traits');
     traitSec.append(traitTable);
     const traitRows = GENES.map((g) => {
@@ -330,161 +417,128 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
       traitTable.append(row);
       return { g, fill, val };
     });
-    const derived = h('div', 'insp-derived');
+    const derived = h('p', 'insp-derived');
     traitSec.append(derived);
 
-    // decision
-    const decSec = section(root, 'Last decision');
-    const utilList = h('div', 'insp-utils');
-    decSec.append(utilList);
-    const utilCache = new Map<string | number, HTMLElement>();
-
-    // skills
-    const skillSec = section(root, 'Skills', false);
+    const skillSec = folded(root, 'Skills and lifetime');
     const sForage = meter(skillSec, 'Foraging');
-    const sCombat = meter(skillSec, 'Combat');
+    const sCombat = meter(skillSec, 'Fighting');
     const sSocial = meter(skillSec, 'Social');
+    const statList = h('dl', 'insp-stats');
+    skillSec.append(statList);
+    const statCells: Record<string, HTMLElement> = {};
+    for (const k of ['Children', 'Food eaten', 'Distance walked', 'Fights', 'Kills', 'Food shared', 'Food received']) {
+      const dt = h('dt', '', k);
+      const dd = h('dd', '', '');
+      statList.append(dt, dd);
+      statCells[k] = dd;
+    }
 
-    // relationships
-    const relSec = section(root, 'Relationships');
-    const relList = h('div', 'insp-rels');
-    const relEmpty = h('div', 'insp-muted', 'No relationships yet.');
-    relSec.append(relList, relEmpty);
-    const relCache = new Map<string | number, HTMLElement>();
-
-    // family
-    const famSec = section(root, 'Family');
-    const famParents = h('div', 'insp-fam-row');
-    const famGrand = h('div', 'insp-fam-row');
-    const famKids = h('div', 'insp-fam-row');
-    const famDesc = h('div', 'insp-fam-row');
-    famSec.append(famParents, famGrand, famKids, famDesc);
-    let famKey = '';
-
-    // history
-    const histSec = section(root, 'Life story');
+    const histSec = folded(root, 'Life story');
     const histList = h('ol', 'insp-hist');
     histSec.append(histList);
     const histCache = new Map<string | number, HTMLElement>();
 
-    // lifetime stats
-    const statSec = section(root, 'Lifetime', false);
-    const statGrid = h('div', 'insp-stats');
-    statSec.append(statGrid);
-    const statCells: Record<string, HTMLElement> = {};
-    for (const k of ['Offspring', 'Food eaten', 'Distance', 'Fights', 'Kills', 'Shared', 'Received']) {
-      const cell = h('div', 'insp-stat');
-      const v = h('b', '', '–');
-      cell.append(v, h('span', '', k));
-      statGrid.append(cell);
-      statCells[k] = v;
-    }
-
-    const famLabel = (label: string, host: HTMLElement, people: (PersonRef | null)[], emptyText: string, extra?: string) => {
-      host.textContent = '';
-      host.append(h('span', 'insp-fam-label', label));
-      const list = h('span', 'insp-fam-list');
-      const ps = people.filter((p): p is PersonRef => !!p);
-      if (!ps.length) list.append(h('span', 'insp-muted', emptyText));
-      for (const p of ps) list.append(personEl(p));
-      if (extra) list.append(h('span', 'insp-muted', extra));
-      host.append(list);
-    };
-
     function refresh(s2: Simulation, a: Agent | null, rec: LineageRecord | null, force: boolean): void {
       const dl = dayLen();
       const alive = !!a && a.alive;
-      const nm = a ? a.name : rec ? rec.name : `#${id}`;
+      const nm = a ? a.name : rec ? rec.name : `Agent ${id}`;
       const gen = a ? a.generation : rec ? rec.generation : 0;
       const hue = a ? a.traits.hue : rec ? rec.hue : 0;
       const tribeId = a ? a.tribeId : rec ? rec.tribeId : NONE;
-      setText(name, nm + (alive ? '' : ' †'));
-      setText(idLine, `#${id} · generation ${gen}`);
-      sw.style.background = `hsl(${Math.round(hue)}, 70%, 58%)`;
-      setText(badge, alive ? 'Alive' : 'Dead');
-      badge.classList.toggle('insp-badge-dead', !alive);
+      setText(name, nm);
+      badge.hidden = alive;
       const tribe = s2.getTribe(tribeId);
-      tribeChip.hidden = !tribe;
-      if (tribe) {
-        tribeDot.style.background = tribeColor(tribe.hue);
-        setText(tribeName, tribe.name + (tribe.extinctTick !== -1 ? ' (extinct)' : ''));
-        tribeChip.title = `Tribe ${tribe.name}: ${tribe.members} members`;
-      }
+      const swc = tribe ? tribeColor(tribe.hue) : tribeColor(hue);
+      if (sw.style.background !== swc) sw.style.background = swc;
+      setText(tribeName, tribe ? tribe.name + (tribe.extinctTick !== -1 ? ' (died out)' : '') : 'No tribe');
+      tribeName.title = tribe ? `${tribe.name}: ${tribe.members} members` : 'Not a member of any tribe';
       const role = a ? a.role : 'none';
-      roleChip.hidden = !a || role === 'none';
-      setText(roleChip, ROLE_LABELS[role]);
+      roleEl.hidden = !a || role === 'none';
+      setText(roleEl, ROLE_LABELS[role]);
       const birth = a ? a.birthTick : rec ? rec.birthTick : 0;
       const deathTick = a ? a.deathTick : rec ? rec.deathTick : -1;
       const ageTicks = a ? a.age : (deathTick >= 0 ? deathTick : s2.state.tick) - birth;
       const adult = a ? a.age >= a.traits.maturityAge : true;
-      setText(ageChip, `${(ageTicks / dl).toFixed(1)} days old${a && !adult ? ' · juvenile' : ''}`);
+      setText(meta2, `${days(ageTicks, dl)} old${a && !adult ? ', not yet adult' : ''}, generation ${gen}`);
 
-      // death banner
+      // death line
       const cause = a ? a.deathCause : rec ? rec.deathCause : null;
-      deathBanner.hidden = alive;
+      deathLine.hidden = alive;
       if (!alive) {
-        const when = deathTick >= 0 ? ` on day ${dayOfTick(s2, deathTick)}` : '';
-        setText(deathBanner, `Died${when}${cause ? ` — ${CAUSE_LABELS[cause].toLowerCase()}` : ''}, aged ${(ageTicks / dl).toFixed(1)} days.`);
+        const day = deathTick >= 0 ? dayOfTick(s2, deathTick) : NaN;
+        const on = Number.isFinite(day) ? ` on day ${day}` : '';
+        if (cause === 'removed') setText(deathLine, `Removed by you${on}, aged ${days(ageTicks, dl)}.`);
+        else setText(deathLine, `Died${on}${cause ? ` ${CAUSE_PHRASE[cause] ?? ''}` : ''}, aged ${days(ageTicks, dl)}.`);
       }
-      for (const b of [bFollow, bBoost, bKill]) b.disabled = !alive;
+      for (const b of [bFollow, bShow, bBoost, bKill]) b.disabled = !alive;
 
       // sections that need a full agent snapshot
-      doing.hidden = !a;
-      for (const sec of [vit, traitSec, decSec, skillSec, relSec, histSec]) (sec.parentElement as HTMLElement).hidden = !a;
+      for (const sec of [nowSec, whySec, relSec]) sec.hidden = !a;
+      for (const sec of [traitSec, skillSec, histSec]) (sec.parentElement as HTMLElement).hidden = !a;
       if (a) {
         const tr = a.traits;
-        setText(actionEl, alive ? ACTION_LABELS[a.action] ?? a.action : 'Deceased');
-        const extras: string[] = [];
-        if (a.fear !== undefined && a.fear > 0.15) extras.push(`fear ${Math.round(a.fear * 100)}%`);
-        setText(thought, alive ? (a.thought ? `“${a.thought}”` : '') + (extras.length ? ` (${extras.join(', ')})` : '') : '');
+        setText(doing, alive ? describeAction(s2, a) : 'Dead.');
+        setText(thought, alive && a.thought ? a.thought : '');
+        thought.hidden = !alive || !a.thought;
 
-        setMeter(mHealth, a.health / tr.maxHealth, `${Math.round(a.health)} / ${Math.round(tr.maxHealth)}`);
+        setMeter(mHealth, a.health / tr.maxHealth, `${Math.round(a.health)} of ${Math.round(tr.maxHealth)}`);
         const hunger = 1 - a.food / tr.maxFood;
         setMeter(mHunger, hunger, `${Math.round(hunger * 100)}%`);
         mHunger.root.classList.toggle('insp-warn', hunger > 0.75);
         setMeter(mEnergy, a.energy, `${Math.round(a.energy * 100)}%`);
-        setMeter(mCarried, a.carried / tr.maxFood, a.carried > 0 ? a.carried.toFixed(1) : '0');
-        let st = '';
+        const carryMax = carryCapacity(a) || tr.maxFood;
+        setMeter(mCarried, carryMax > 0 ? a.carried / carryMax : 0, a.carried >= 0.5 ? `${Math.round(a.carried)} food` : 'nothing');
+        const fear = a.fear ?? 0;
+        mFear.root.hidden = !(alive && fear > 0.15);
+        if (!mFear.root.hidden) setMeter(mFear, fear, `${Math.round(fear * 100)}%`);
+
+        let st: string;
         let cls = '';
         if (a.infection > 0) {
-          st = `Infected — virulence ${Math.round(a.virulence * 100)}%, ${(a.infection / dl).toFixed(1)} days left`;
+          st = `Ill: strain virulence ${Math.round(a.virulence * 100)}%, ${days(a.infection, dl)} left.`;
           cls = 'insp-status-bad';
         } else if (a.immuneTicks > 0) {
-          st = `Immune (recovered) — ${(a.immuneTicks / dl).toFixed(1)} days left`;
+          st = `Immune after an illness for ${days(a.immuneTicks, dl)} more.`;
           cls = 'insp-status-good';
-        } else st = 'Healthy';
-        st += ` · resistance ${Math.round(tr.immunity * 100)}%`;
+        } else st = 'Not ill.';
+        st += ` Disease resistance ${Math.round(tr.immunity * 100)}%.`;
         setText(disease, st);
         disease.className = `insp-status ${cls}`;
 
         // reproductive status (mirrors genetics.isFertile, with the first unmet condition spelled out)
         let rs: string;
         let rcls = '';
-        if (a.age < tr.maturityAge) rs = `Juvenile — matures in ${((tr.maturityAge - a.age) / dl).toFixed(1)} days`;
-        else if (a.age >= REPRO.maxAgeFrac * tr.longevity) rs = 'Past breeding age';
-        else if (a.reproCooldown > 0) rs = `Recovering from a birth — fertile again in ${(a.reproCooldown / dl).toFixed(1)} days`;
-        else if (a.food < mateFoodThreshold(tr) * tr.maxFood) rs = `Not fertile — needs ${Math.round(mateFoodThreshold(tr) * 100)}% stomach to breed`;
-        else if (a.energy <= REPRO.minEnergy) rs = 'Not fertile — too tired';
-        else if (a.health < REPRO.minHealthFrac * tr.maxHealth) rs = 'Not fertile — too injured or sick';
+        if (a.age < tr.maturityAge) rs = `Not yet adult: grown up in ${days(tr.maturityAge - a.age, dl)}.`;
+        else if (a.age >= REPRO.maxAgeFrac * tr.longevity) rs = 'Too old to breed.';
+        else if (a.reproCooldown > 0) rs = `Resting after a birth: fertile again in ${days(a.reproCooldown, dl)}.`;
+        else if (a.food < mateFoodThreshold(tr) * tr.maxFood) rs = `Not fertile: needs a stomach ${Math.round(mateFoodThreshold(tr) * 100)}% full to breed.`;
+        else if (a.energy <= REPRO.minEnergy) rs = 'Not fertile: too tired.';
+        else if (a.health < REPRO.minHealthFrac * tr.maxHealth) rs = 'Not fertile: too injured or sick.';
         else {
           // canMate also needs a lush home range around the couple (grazed-down land stops births)
           const range = localFoodFraction(s2, a.x, a.y, REPRO.rangeTiles, REPRO.rangeStride);
           const need = rangeFoodThreshold(tr);
-          if (range < need) rs = `Fertile, but the land around is grazed down (${Math.round(range * 100)}% food, needs ${Math.round(need * 100)}%)`;
+          if (range < need) rs = `Fertile, but the land around is grazed down (${Math.round(range * 100)}% food, needs ${Math.round(need * 100)}%).`;
           else {
-            rs = 'Fertile — ready to mate';
+            rs = 'Fertile and ready to mate.';
             rcls = 'insp-status-good';
           }
         }
-        setText(repro, `${rs} · ${a.offspring} offspring`);
+        setText(repro, rs);
         repro.className = `insp-status ${rcls}`;
 
-        // navigation: a planned route (dashed gold line on the map) and a migrant's trek
+        // navigation: a planned route (dashed line on the map) and a committed trek
         const rt = a.route;
-        let nav = '';
-        if (a.trek) nav = `Migrating to greener land — trek ends in ${(Math.max(0, a.trek.until - s2.state.tick) / dl).toFixed(1)} days`;
+        const parts: string[] = [];
+        if (a.trek) {
+          const left = days(Math.max(0, a.trek.until - s2.state.tick), dl);
+          const target = a.trek.kind === 'raid' && a.trek.tribe !== undefined ? s2.getTribe(a.trek.tribe) : undefined;
+          if (a.trek.kind === 'raid') parts.push(`On a raid against ${target ? theTribe(target) : 'an enemy camp'}; it gives up in ${left} at the latest.`);
+          else parts.push(`Migrating to greener land; the trek ends in ${left} at the latest.`);
+        }
         const moving = a.vx !== 0 || a.vy !== 0;
-        if (rt && rt.wait) nav = `${nav ? nav + ' · ' : ''}Working out a route…`;
+        if (rt && rt.wait) parts.push('Working out a route.');
         else if (rt && !rt.fail && rt.pts.length > 0 && moving) {
           const left = Math.max(0, (rt.pts.length - rt.i) / 2);
           let len = 0;
@@ -495,23 +549,14 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
             px = rt.pts[k];
             py = rt.pts[k + 1];
           }
-          nav = `${nav ? nav + ' · ' : ''}Following a planned route round water or walls: ${left} waypoint${left === 1 ? '' : 's'}, ≈${Math.round(len)} units to go`;
-        } else if (rt && rt.fail) nav = `${nav ? nav + ' · ' : ''}No way there on foot right now — will look again`;
+          parts.push(`Following a route around water or walls: ${left} ${left === 1 ? 'waypoint' : 'waypoints'}, about ${Math.round(len)} units to go.`);
+        } else if (rt && rt.fail) parts.push('There is no way there on foot right now; it will look again.');
+        const nav = parts.join(' ');
         setText(navLine, nav);
         navLine.hidden = !nav;
 
-        for (const r of traitRows) {
-          const gv = a.genes[GENES.indexOf(r.g)] ?? 0;
-          setWidth(r.fill, gv);
-          setText(r.val, phenotype(r.g, tr, dl));
-        }
-        setText(
-          derived,
-          `Max health ${Math.round(tr.maxHealth)} · stomach ${Math.round(tr.maxFood)} · strength ${tr.strength.toFixed(2)} · adult at ${(tr.maturityAge / dl).toFixed(1)} d`,
-        );
-
-        // utilities
-        const utils = (Object.entries(a.utilities) as [ActionKind, number][]).filter((e) => Number.isFinite(e[1])).sort((x, y) => y[1] - x[1]).slice(0, 8);
+        // why: the options of the last decision, strongest first
+        const utils = (Object.entries(a.utilities) as [ActionKind, number][]).filter((e) => Number.isFinite(e[1])).sort((x, y) => y[1] - x[1]).slice(0, 6);
         let umax = 0;
         for (const [, v] of utils) if (v > umax) umax = v;
         syncList(
@@ -521,7 +566,8 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
           (u) => u[0],
           (u) => {
             const row = h('div', 'insp-util');
-            const lab = h('span', 'insp-util-name', ACTION_LABELS[u[0]] ?? u[0]);
+            const lab = h('span', 'insp-util-name');
+            lab.append(h('span', '', OPTION_LABELS[u[0]] ?? u[0]), h('span', 'insp-chosen', 'chosen'));
             const track = h('span', 'insp-track insp-track-thin');
             track.append(h('span', 'insp-fill'));
             row.append(lab, track, h('span', 'insp-util-val'));
@@ -530,56 +576,34 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
           (row, u) => {
             setWidth(row.children[1].firstChild as HTMLElement, umax > 0 ? u[1] / umax : 0);
             setText(row.children[2] as HTMLElement, u[1].toFixed(2));
-            row.classList.toggle('insp-on', u[0] === a.action);
+            row.classList.toggle('insp-on', alive && u[0] === a.action);
           },
         );
-        if (!utils.length && !utilList.querySelector('.insp-muted')) utilList.append(h('div', 'insp-muted', 'No decision yet.'));
-        else if (utils.length) utilList.querySelector('.insp-muted')?.remove();
+        utilEmpty.hidden = utils.length > 0;
 
-        setMeter(sForage, a.skills.forage, `${Math.round(a.skills.forage * 100)}%`);
-        setMeter(sCombat, a.skills.combat, `${Math.round(a.skills.combat * 100)}%`);
-        setMeter(sSocial, a.skills.social, `${Math.round(a.skills.social * 100)}%`);
+        // relationships (rebuilt only when the people or their groups change)
+        const rels = [...a.relationships];
+        const friends = rels.filter((r) => r.affinity >= SOCIAL_TUNING.friend).sort((x, y) => y.affinity - x.affinity);
+        const enemies = rels.filter((r) => r.affinity <= SOCIAL_TUNING.grudge).sort((x, y) => x.affinity - y.affinity);
+        const others = rels
+          .filter((r) => r.affinity < SOCIAL_TUNING.friend && r.affinity > SOCIAL_TUNING.grudge)
+          .sort((x, y) => Math.abs(y.affinity) - Math.abs(x.affinity));
+        const refOf = (r: Relationship) => {
+          const p = personRef(s2, r.id);
+          const kin = r.kin === 1 ? ' Parent or child.' : r.kin === 2 ? ' Sibling.' : '';
+          const aff = `${r.affinity >= 0 ? '+' : ''}${r.affinity.toFixed(2)}`;
+          const meet = `${r.interactions} ${r.interactions === 1 ? 'meeting' : 'meetings'}`;
+          return { ref: p, tip: `Affinity ${aff} after ${meet}.${kin}${p.alive ? ' Click to select.' : ' Dead.'}` };
+        };
+        const rk = [friends, enemies, others].map((g) => g.map((r) => `${r.id}${personRef(s2, r.id).alive ? 1 : 0}`).join(',')).join('|');
+        if (force || rk !== relKey) {
+          relKey = rk;
+          nameRow(relFriends, 'Friends', friends.map(refOf), 'None');
+          nameRow(relEnemies, 'Enemies', enemies.map(refOf), 'None');
+          nameRow(relOthers, 'Knows', others.map(refOf), 'Nobody else yet');
+        }
 
-        // relationships
-        const rels = [...a.relationships].sort((x, y) => y.affinity - x.affinity);
-        relEmpty.hidden = rels.length > 0;
-        syncList(
-          relList,
-          relCache,
-          rels,
-          (r) => r.id,
-          (r) => {
-            const row = h('div', 'insp-rel');
-            const p = personRef(s2, r.id);
-            const who = personEl(p);
-            const kin = h('span', 'insp-kin');
-            const track = h('span', 'insp-aff');
-            const fill = h('span', 'insp-aff-fill');
-            track.append(h('span', 'insp-aff-mid'), fill);
-            row.append(who, kin, track);
-            row.dataset.alive = String(p.alive);
-            return row;
-          },
-          (row, r) => {
-            const p = personRef(s2, r.id);
-            if (row.dataset.alive !== String(p.alive)) {
-              const fresh = personEl(p);
-              row.replaceChild(fresh, row.firstChild as HTMLElement);
-              row.dataset.alive = String(p.alive);
-            }
-            setText(row.children[1] as HTMLElement, r.kin === 1 ? 'parent/child' : r.kin === 2 ? 'sibling' : '');
-            const fill = (row.children[2] as HTMLElement).children[1] as HTMLElement;
-            const aff = Math.max(-1, Math.min(1, r.affinity));
-            const left = aff < 0 ? 50 + aff * 50 : 50;
-            const l = `${left.toFixed(1)}%`;
-            if (fill.style.left !== l) fill.style.left = l;
-            setWidth(fill, Math.abs(aff) / 2);
-            fill.classList.toggle('insp-aff-neg', aff < 0);
-            row.title = `Affinity ${aff >= 0 ? '+' : ''}${aff.toFixed(2)} · ${r.interactions} interactions`;
-          },
-        );
-
-        // history (newest first)
+        // life story (newest first)
         const hist = [...a.history].reverse();
         syncList(
           histList,
@@ -588,7 +612,7 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
           (e) => `${e.tick}|${e.text}`,
           (e) => {
             const li = h('li');
-            li.append(h('span', 'insp-hist-t', `Day ${dayOfTick(s2, e.tick)}`), h('span', 'insp-hist-x', e.text));
+            li.append(h('span', 'insp-hist-t', clockOfTick(s2, e.tick)), h('span', 'insp-hist-x', e.text));
             return li;
           },
           () => {},
@@ -597,35 +621,53 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
           if (!histList.childElementCount) histList.append(h('li', 'insp-muted', 'Nothing remarkable yet.'));
         } else histList.querySelector('.insp-muted')?.remove();
 
+        for (const r of traitRows) {
+          const gv = a.genes[GENES.indexOf(r.g)] ?? 0;
+          setWidth(r.fill, gv);
+          setText(r.val, phenotype(r.g, tr, dl));
+        }
+        setText(
+          derived,
+          `Maximum health ${Math.round(tr.maxHealth)}, stomach ${Math.round(tr.maxFood)}, strength ${tr.strength.toFixed(2)}, adult at ${days(tr.maturityAge, dl)}.`,
+        );
+
+        setMeter(sForage, a.skills.forage, `${Math.round(a.skills.forage * 100)}%`);
+        setMeter(sCombat, a.skills.combat, `${Math.round(a.skills.combat * 100)}%`);
+        setMeter(sSocial, a.skills.social, `${Math.round(a.skills.social * 100)}%`);
         const stt = a.stats;
-        setText(statCells['Offspring'], String(a.offspring));
-        setText(statCells['Food eaten'], Math.round(stt.foodEaten).toString());
-        setText(statCells['Distance'], Math.round(stt.distance).toString());
+        setText(statCells['Children'], String(a.offspring));
+        setText(statCells['Food eaten'], Math.round(stt.foodEaten).toLocaleString('en-US'));
+        setText(statCells['Distance walked'], `${Math.round(stt.distance).toLocaleString('en-US')} units`);
         setText(statCells['Fights'], String(stt.fights));
         setText(statCells['Kills'], String(stt.kills));
-        setText(statCells['Shared'], Math.round(stt.shared).toString());
-        setText(statCells['Received'], Math.round(stt.received).toString());
-      } else if (rec) {
-        setText(statCells['Offspring'], String(rec.offspring));
+        setText(statCells['Food shared'], Math.round(stt.shared).toLocaleString('en-US'));
+        setText(statCells['Food received'], Math.round(stt.received).toLocaleString('en-US'));
       }
-      (statSec.parentElement as HTMLElement).hidden = !a && !rec;
 
       // family (rebuilt only when its content changes)
       const parents = a ? a.parents : rec ? rec.parents : ([NONE, NONE] as [AgentId, AgentId]);
-      const pRefs = parents.map((p) => (p === NONE ? null : personRef(s2, p)));
-      const gRefs: (PersonRef | null)[] = [];
+      const pRefs = parents.filter((p) => p !== NONE).map((p) => personRef(s2, p));
+      const gRefs: PersonRef[] = [];
       for (const p of parents) {
         if (p === NONE) continue;
         const pp = parentsOf(s2, p);
-        if (pp) for (const g of pp) if (g !== NONE) gRefs.push(personRef(s2, g));
+        if (pp) for (const g of pp) if (g !== NONE && !gRefs.some((r) => r.id === g)) gRefs.push(personRef(s2, g));
       }
-      const kids = a ? a.children : (getChildIndex(s2).get(id) ?? []);
+      const idx = getChildIndex(s2);
+      const sibIds: AgentId[] = [];
+      for (const p of parents) {
+        if (p === NONE) continue;
+        for (const c of idx.get(p) ?? []) if (c !== id && !sibIds.includes(c)) sibIds.push(c);
+      }
+      const sRefs = sibIds.map((k) => personRef(s2, k)).sort((x, y) => Number(y.alive) - Number(x.alive));
+      const kids = a ? a.children : (idx.get(id) ?? []);
       const kRefs = kids.map((k) => personRef(s2, k));
       const offspring = a ? a.offspring : rec ? rec.offspring : kids.length;
       const d = descendants(s2, id);
       const key = [
-        pRefs.map((p) => (p ? `${p.id}${p.alive}` : '-')).join(','),
-        gRefs.map((p) => (p ? `${p.id}${p.alive}` : '-')).join(','),
+        pRefs.map((p) => `${p.id}${p.alive}`).join(','),
+        gRefs.map((p) => `${p.id}${p.alive}`).join(','),
+        sRefs.map((p) => `${p.id}${p.alive}`).join(','),
         kRefs.map((p) => `${p.id}${p.alive}`).join(','),
         offspring,
         d.living,
@@ -634,14 +676,15 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
       if (force || key !== famKey) {
         famKey = key;
         const founder = parents[0] === NONE && parents[1] === NONE;
-        famLabel('Parents', famParents, pRefs, founder ? 'Founder — no parents' : 'Unknown');
-        famLabel('Grandparents', famGrand, gRefs, founder ? '—' : 'Unknown');
-        const more = offspring > kRefs.length ? ` +${offspring - kRefs.length} more` : '';
-        famLabel('Children', famKids, kRefs, 'None yet', more);
+        nameRow(famParents, 'Parents', pRefs.map((ref) => ({ ref })), founder ? 'None, a founder' : 'Unknown');
+        nameRow(famGrand, 'Grandparents', gRefs.map((ref) => ({ ref })), founder ? 'None' : 'Unknown');
+        nameRow(famSibs, 'Siblings', sRefs.map((ref) => ({ ref })), 'None known');
+        const unlisted = offspring > kRefs.length ? `${offspring - kRefs.length} earlier ones not listed` : '';
+        nameRow(famKids, 'Children', kRefs.map((ref) => ({ ref })), 'None yet', unlisted, 8);
         famDesc.textContent = '';
         famDesc.append(
-          h('span', 'insp-fam-label', 'Descendants'),
-          h('span', 'insp-fam-list', `${d.living} living · ${d.total} known in total`),
+          h('span', 'insp-row-label', 'Descendants'),
+          h('span', 'insp-names', d.total ? `${d.living} living, ${d.total} known in all` : 'None yet'),
         );
       }
     }
@@ -688,7 +731,7 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
     }
     view.root.hidden = false;
     empty.hidden = true;
-    // throttle: once per tick change, at most ~8 Hz
+    // throttle: once per tick change, at most about 8 times a second
     const now = typeof performance !== 'undefined' ? performance.now() : 0;
     if (!force && (s.state.tick === lastTick || now - lastTime < 120)) return;
     lastTick = s.state.tick;
