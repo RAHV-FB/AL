@@ -14,7 +14,7 @@ import { describe, expect, it } from 'vitest';
 import { Simulation } from '../src/sim/simulation';
 import { DEFAULT_CONFIG } from '../src/sim/config';
 import { ROOT_RESERVE, consumeFood, estimateCarryingCapacity, initEnvironment, localFoodFraction, tileCapacity, updateEnvironment, updateResources } from '../src/sim/ecology';
-import { REPRO, canMate, isFertile } from '../src/sim/genetics';
+import { REPRO, canMate, isFertile, rangeFoodThreshold } from '../src/sim/genetics';
 import { createAgent } from '../src/sim/lifecycle';
 import { GENE_COUNT, TERRAIN, type Agent, type SimConfig, type SimState, type WorldState } from '../src/sim/types';
 
@@ -137,18 +137,20 @@ describe('breeding needs a food-rich home range and good condition', () => {
     }
   };
 
-  it('a lush range allows breeding; a range grazed below minRangeFood does not', () => {
+  it('a lush range allows breeding; a range grazed below the threshold does not', () => {
     const sim = grassSim();
     const a = adult(sim, 240, 160);
     const b = adult(sim, 244, 160);
     expect(isFertile(a) && isFertile(b)).toBe(true);
+    const need = rangeFoodThreshold(a.traits);
+    expect(need).toBeGreaterThan(0.3);
     setRange(sim, 242, 160, 1);
     expect(canMate(sim, a, b)).toBe(true);
-    setRange(sim, 242, 160, REPRO.minRangeFood - 0.05);
-    expect(localFoodFraction(sim, 242, 160, REPRO.rangeTiles, REPRO.rangeStride)).toBeLessThan(REPRO.minRangeFood);
+    setRange(sim, 242, 160, need - 0.05);
+    expect(localFoodFraction(sim, 242, 160, REPRO.rangeTiles, REPRO.rangeStride)).toBeLessThan(need);
     expect(canMate(sim, a, b)).toBe(false);
     expect(canMate(sim, b, a)).toBe(false);
-    setRange(sim, 242, 160, REPRO.minRangeFood + 0.05);
+    setRange(sim, 242, 160, need + 0.05);
     expect(canMate(sim, a, b)).toBe(true);
   });
 

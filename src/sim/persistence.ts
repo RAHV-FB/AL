@@ -17,7 +17,9 @@
  *
  * ROUND-TRIP GUARANTEE: for a save taken between ticks,
  *   Simulation.fromState(deserializeState(serializeSim(sim)))
- * is indistinguishable from `sim` — same hash() now and after any number of further ticks.
+ * is indistinguishable from `sim` — same hash() now, and the same trajectory (hash({ events: false }))
+ * after any number of further ticks. A few later event-log messages can still differ: disease.ts and
+ * social.ts keep their epidemic / diplomacy logging bookkeeping in per-Simulation WeakMaps, not in SimState.
  * Floats are exact (typed arrays as raw bytes, JS numbers via shortest round-trip JSON).
  * The RNG state is captured from `sim.rng` directly, so saving right after Simulation.create()
  * (before any step) is also exact.

@@ -5,10 +5,15 @@
  *  • Environment clock: time of day, daylight, days, seasons, years, temperature and the
  *    global season growth multiplier. A pure function of `state.tick` + config, so it is
  *    identical after save/load and on replays.
- *  • Plant resources: per-tile logistic regrowth plus "seed rain" (bare soil re-seeds in
- *    proportion to its fertility, faster next to lush tiles, so regrowth spreads from
- *    edges), excess food decaying back to capacity, and soil fertility that erodes on
- *    tiles grazed bare (desertification) and recovers under lush cover.
+ *  • Plant resources: per-tile logistic regrowth from the standing plants PLUS their roots
+ *    (ROOT_RESERVE: grazing never removes the whole plant, so grazed-bare land keeps regrowing —
+ *    the grazing refuge that keeps foragers from collapsing their own food supply), "seed rain"
+ *    (bare soil re-seeds in proportion to its fertility, faster next to lush tiles, so regrowth
+ *    also spreads from edges), excess food decaying back to capacity, and soil fertility that
+ *    erodes on tiles grazed bare (desertification) and recovers under lush cover.
+ *  • Seasons set plant growth (SEASON_GROWTH) and temperature; together with the population's
+ *    own grazing they produce a fluctuating, food-limited population (see genetics.REPRO for
+ *    the breeding side of that density dependence).
  *
  * No hidden state and no randomness: everything is derived from SimState, so this module
  * is deterministic and needs nothing extra persisted.
@@ -32,14 +37,20 @@ const SEASON_BLEND = 0.25;
 /** Daily temperature swing (± °C) when the day/night cycle is on; coldest ≈ 03:30, warmest ≈ 15:30. */
 export const DAILY_TEMP_SWING = 4;
 
-/** Logistic regrowth rate r per tick. Grass (maxFood 10) at half capacity: r·5·0.5 ≈ 0.008 food/tick at seasonGrowth 1. */
+/**
+ * Logistic regrowth rate r per tick: food += r·(food + ROOT_RESERVE·cap)·(1 − food/cap) (× growth
+ * modifiers). Grass (cap 10) at half capacity: r·(5 + 3)·0.5 ≈ 0.014 food/tick at seasonGrowth 1;
+ * grazed bare: r·3 ≈ 0.010 food/tick (+ seed rain). Together with AGENT_FOOD_PER_TICK this sets
+ * the land's carrying capacity (estimateCarryingCapacity).
+ */
 export const REGROWTH_RATE = 0.0034;
 /**
  * Root reserve: grazing only removes the edible above-ground part of a plant, so a grazed tile
  * keeps regrowing as if ROOT_RESERVE × capacity were still standing (roots, stems, seed bank).
- * This is the grazing refuge that keeps a heavily grazed landscape productive (≈ 4·ROOT_RESERVE
- * of the logistic maximum sustainable yield instead of seed rain alone), so foragers can no
- * longer graze the land into a near-barren state that collapses their own food supply.
+ * This is the grazing refuge that keeps a heavily grazed landscape productive (bare ground regrows
+ * at 4·ROOT_RESERVE/(1+ROOT_RESERVE)² ≈ 70 % of the tile's peak rate instead of ≈ 9 % from seed
+ * rain alone), so foragers can no longer graze the land into a near-barren state that collapses
+ * their own food supply, and the population settles where its grazing balances regrowth.
  */
 export const ROOT_RESERVE = 0.3;
 /** Seed rain on bare soil: food/tick per unit fertility (× growth modifiers × (1 − food/cap)). */
@@ -224,7 +235,7 @@ export function seasonName(env: EnvState): string {
  * RESOURCE_STAGGER-th row (phase = tick % RESOURCE_STAGGER) with a RESOURCE_STAGGER× step.
  *
  * Per tile (cap = tileCapacity, q = food/cap, mod = foodRegen·terrain.regen·seasonGrowth·climateMod):
- *   food < cap:  food += dt·mod·(REGROWTH_RATE·food + SEED_RAIN·fertility·(1 + SEED_SPREAD·n))·(1 − q)
+ *   food < cap:  food += dt·mod·(REGROWTH_RATE·(food + ROOT_RESERVE·cap) + SEED_RAIN·fertility·(1 + SEED_SPREAD·n))·(1 − q)
  *   food > cap:  excess decays by OVERFILL_DECAY/tick; hard ceiling MAX_OVERFILL·cap
  *   q < BARE_FRACTION && overgrazing:  fertility erodes toward FERTILITY_MIN (desertification)
  *   q > LUSH_FRACTION:  fertility recovers toward baseFertility (speed ∝ growth conditions)

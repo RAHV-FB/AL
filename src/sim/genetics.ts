@@ -218,7 +218,7 @@ export const REPRO = {
    */
   rangeTiles: 3,
   rangeStride: 1,
-  minRangeFood: 0.72,
+  minRangeFood: 0.75,
   rangeFertilityDrop: 0.4,
   /** Stamina each parent spends on a birth. */
   energyCost: 0.12,

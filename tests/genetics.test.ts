@@ -43,6 +43,9 @@ const TEST_SCENARIO: ScenarioDef = {
 function makeSim(config: Partial<SimConfig> = {}): Simulation {
   const sim = Simulation.create({ scenario: TEST_SCENARIO, seed: 1, config });
   sim.state.world.terrain.fill(TERRAIN.Grass);
+  // breeding needs a food-rich home range (REPRO.minRangeFood): give the test world lush pasture
+  sim.state.world.fertility.fill(1);
+  sim.state.world.food.fill(10 * sim.config.foodCapacity);
   sim.state.env.temperature = 15;
   sim.state.env.daylight = 1;
   return sim;

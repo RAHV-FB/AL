@@ -1,6 +1,7 @@
 /**
- * Regression tests for defects found in the agent-intelligence / social audit. Each test failed on the
- * pre-audit code (see the comment on each) and pins the fixed behaviour.
+ * Regression tests for defects found in the agent-intelligence / social audit. Tests whose name says
+ * "(was: …)" or whose comment says "pre-fix" failed on the pre-audit code; the others pin behaviour
+ * around those fixes (e.g. a sated parent must still feed its child after the share-ping-pong fix).
  */
 import { describe, expect, it } from 'vitest';
 import { think } from '../src/sim/brain';
