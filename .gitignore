@@ -4,3 +4,7 @@ dist
 .DS_Store
 coverage
 test-results
+
+# temporary experiment files written by reviewers/auditors
+tests/*-tmp-*.test.ts
+tests/*-tmp-*.ts
