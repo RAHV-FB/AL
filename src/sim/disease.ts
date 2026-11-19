@@ -15,7 +15,7 @@
  *    Tuned (with lifecycle healing) so mortality ≈ 20–35% at virulence 0.6 / immunity 0.5 / default config.
  *  - Recovery grants acquired immunity for DISEASE.immuneMin..immuneMax ticks.
  *
- * Determinism: randomness only via sim.rng. Module state (WeakMap) only drives
+ * Determinism: randomness only via sim.rng. Epidemic bookkeeping (state.epidemic) only drives
  * epidemic event logging, never the simulation trajectory, so save/load is exact.
  */
 import type { Simulation } from './simulation';
@@ -114,13 +114,15 @@ interface EpidemicState {
   peak: number;
 }
 
-const epidemics = new WeakMap<Simulation, EpidemicState>();
-
+/**
+ * The bookkeeping lives in SimState (saved), so a loaded run logs the same epidemic summary as the
+ * original. Older saves without it start `fresh` and adopt an epidemic under way silently.
+ */
 function epidemicState(sim: Simulation): EpidemicState {
-  let st = epidemics.get(sim);
+  let st = sim.state.epidemic;
   if (!st) {
     st = { fresh: true, active: false, pandemic: false, deaths: 0, peak: 0 };
-    epidemics.set(sim, st);
+    sim.state.epidemic = st;
   }
   return st;
 }

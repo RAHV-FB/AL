@@ -17,9 +17,8 @@
  *
  * ROUND-TRIP GUARANTEE: for a save taken between ticks,
  *   Simulation.fromState(deserializeState(serializeSim(sim)))
- * is indistinguishable from `sim` — same hash() now, and the same trajectory (hash({ events: false }))
- * after any number of further ticks. A few later event-log messages can still differ: disease.ts and
- * social.ts keep their epidemic / diplomacy logging bookkeeping in per-Simulation WeakMaps, not in SimState.
+ * is indistinguishable from `sim` — same hash() now and after any number of further ticks, including the
+ * event log: the epidemic and diplomacy log bookkeeping lives in SimState (state.epidemic, state.diplomacy).
  * Floats are exact (typed arrays as raw bytes, JS numbers via shortest round-trip JSON).
  * The RNG state is captured from `sim.rng` directly, so saving right after Simulation.create()
  * (before any step) is also exact.
@@ -1042,7 +1041,7 @@ function sanitizeStats(raw: unknown, r: Repairs): StatsState {
 const STATE_KEYS = new Set([
   'version', 'scenarioId', 'config', 'tick', 'rngState', 'nextAgentId', 'nextTribeId', 'nextEventId', 'nextDisasterId',
   'world', 'env', 'agents', 'tribes', 'lineage', 'events', 'disasters', 'scheduled', 'interventionLog', 'stats',
-  'interventionLogDropped', 'pendingReplay', 'pendingQueue', 'diplomacy',
+  'interventionLogDropped', 'pendingReplay', 'pendingQueue', 'diplomacy', 'epidemic',
 ]);
 
 /** Next free id: the saved counter when it is sane, but always above every id in use. */
@@ -1207,6 +1206,24 @@ function sanitizeState(raw: Obj, r: Repairs): SimState {
         list(r, `diplomacy.${field}`, v, 20000, true, (k) => (isInt(k) && k >= 0 ? k : null)) as number[];
       state.diplomacy = { wars: keys('wars', raw.diplomacy.wars), alliances: keys('alliances', raw.diplomacy.alliances), feuds: keys('feuds', raw.diplomacy.feuds) };
     } else r.fix('diplomacy');
+  }
+  // optional: epidemic log bookkeeping; absent → disease.ts starts fresh and adopts a running epidemic
+  if (raw.epidemic !== undefined) {
+    const e = raw.epidemic;
+    if (isObj(e)) {
+      const flag = (k: string): boolean => {
+        if (typeof e[k] === 'boolean') return e[k] as boolean;
+        r.fix(`epidemic.${k}`);
+        return false;
+      };
+      state.epidemic = {
+        fresh: flag('fresh'),
+        active: flag('active'),
+        pandemic: flag('pandemic'),
+        deaths: int(r, 'epidemic.deaths', e.deaths, 0, 0, Number.MAX_SAFE_INTEGER),
+        peak: int(r, 'epidemic.peak', e.peak, 0, 0, Number.MAX_SAFE_INTEGER),
+      };
+    } else r.fix('epidemic');
   }
   if (raw.pendingQueue !== undefined) {
     const pq = list(r, 'pendingQueue', raw.pendingQueue, 1000, true, (e) => sanitizeIntervention(e, refs, r)) as unknown as Intervention[];

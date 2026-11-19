@@ -2,7 +2,7 @@
 
 **An offline, deterministic civilization simulator in the browser.** Hundreds of agents forage, rest, fight, share, mate and form tribes on a procedurally generated island. Their behavior comes from needs, genes and local rules, not scripts, and natural selection shifts the gene pool over generations. You can step in at any time with food, terrain, disasters and new populations.
 
-- **Play online:** <https://rahv-fb.github.io/AL/>, deployed from this repository by `.github/workflows/pages.yml`. As of 2026-11-18 no deployment has succeeded yet (see [CI and deployment](#testing-and-verification)), so the link may not load. Use the offline file instead.
+- **Play online:** <https://rahv-fb.github.io/AL/>, deployed from the `main` branch by `.github/workflows/pages.yml` (see [CI and deployment](#testing-and-verification)). If the page does not load, use the offline file.
 - **Play offline:** download [`release/artificial-life.html`](release/artificial-life.html) and open it in any modern browser. It is one self-contained file: no server, no install and no network access.
 - **Stack:** TypeScript, Vite and Canvas 2D, with no runtime dependencies. The app makes no network requests and sends no telemetry. The only thing it stores is UI preferences (view toggles, overlay, open panels), in `localStorage`.
 - **Docs:** requirement coverage is in [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) and measured results are in [`docs/VERIFICATION.md`](docs/VERIFICATION.md).
@@ -22,11 +22,12 @@
 | Typecheck | `npm run typecheck` |
 | Run all tests (several minutes; includes the long-run, perf and balance tests) | `npm test` |
 | Production build (single file) | `npm run build` → `dist/index.html` |
-| Update the committed offline file | `npm run build && cp dist/index.html release/artificial-life.html` |
+| Update the committed offline file | `npm run release` (build, then copy `dist/index.html` to `release/artificial-life.html`) |
 | Preview the production build | `npm run preview` |
 | Simulation benchmark | `npm run bench` |
 | Balance report (a per-day table for each preset) | `npm run balance` |
 | Browser smoke test and screenshot | `npm run build && npm run smoke:browser` |
+| Drive every UI control in a real browser (231 checks) | `npm run build && node scripts/ui-audit.mjs --file dist/index.html` |
 
 ## Controls
 
@@ -95,7 +96,7 @@ Each preset is a declarative `ScenarioDef` in `src/sim/presets.ts`. It sets the 
 | Preset | Setup | What it explores |
 | --- | --- | --- |
 | **Garden of Eden** (`eden`) | Twice the plant regrowth, 1.5× food capacity, cheap metabolism and no random disasters. Three gentle tribes. A bloom on day 4 | Growth with selection relaxed: how fast the bands fill the island, what finally limits them, and what happens when their territories meet |
-| **Survival of the Fittest** (`fittest`) | Scarce food, wide deserts, 1.6× harshness, 1.5× aggression and a raised mutation rate. Four groups of very diverse loners. Drought on day 3, frost on day 7, plague on day 10 | Selection under pressure. A short boom ends in a starvation crash, and the survivors are faster (the mean speed gene rises). Do loners still band together into tribes? |
+| **Survival of the Fittest** (`fittest`) | Scarce food, wide deserts, 1.6× harshness, 1.5× aggression and a raised mutation rate. Four groups of very diverse loners. Drought on day 3, frost on day 7, plague on day 10 | Selection under pressure. A short boom ends in a starvation crash (seed 42: 280 → 68 by day 12), and the survivors are faster, leaner and more fertile (speed 0.48 → 0.67, metabolism 0.50 → 0.41, fertility 0.50 → 0.70). Do loners still band together into tribes? |
 | **Two Civilizations** (`two-civs`) | A river with a few fords splits the island. Peaceful, efficient foragers live in the west and big, aggressive raiders in the east. A western harvest on day 5 and an eastern drought on day 9 | Whether cooperation or aggression wins territory and food, with borders, raids and wars at the fords |
 | **Evolution Laboratory** (`evolab`) | About 3× the mutation rate, strict mate compatibility (0.2) and a mountain range with passes. Four groups of loners. Every 2 days a drought, cold snap or bloom hits the next quadrant | Local adaptation and speciation: hue clusters separating by region, and gene histograms with two peaks |
 | **Civilization Collapse** (`collapse`) | A lush world with one big, fast-breeding tribe, overgrazing on and a cap of 1,400. Global drought plus a heartland blight on day 8, a global cold snap on day 10, and rain returning only in the north-east on day 14 | Overshoot, soil degradation (fertility overlay), starvation collapse and possible recovery |
@@ -139,6 +140,7 @@ There are 12 genes, each in [0, 1]. `genetics.expressTraits` turns them into tra
 **Reproduction:**
 
 - Two fertile adults produce a child. Its genes come from crossover with mild gene linkage, followed by Gaussian mutation (`mutationRate`, `mutationSize`). Close kin cannot mate.
+- **Fertile** means adult and not senescent, off the post-birth cooldown, well fed (a stomach threshold set by the fertility gene), rested and at least half healthy. The couple also needs a **lush home range**: the standing food on the tiles around them must be above a threshold (lower for high-fertility genomes). Grazed-down land, including crowded camps, therefore stops births long before famine — this density dependence, not a script, is what levels populations off. The inspector spells out which condition an agent is missing.
 - Mates must be within `mateCompatibility` of each other in genetic distance (mean absolute gene difference, hue included). A low value causes reproductive isolation and **speciation**.
 - A capped lineage registry tracks generations and family trees.
 
@@ -236,7 +238,7 @@ Derived indexes (`agentById`, `tribeById`, `lineageById` and the spatial hash) l
 - **Your interventions are recorded** with their ticks in `state.interventionLog`, including parameter changes. **Replay my interventions** recreates the run from the scenario and seed, then re-applies the log at the original ticks.
 - **Save files** are JSON snapshots of `SimState`, tagged with `"format": "artificial-life-save"` and a `version` (`SAVE_VERSION`). Typed arrays are base64-encoded, and NaN and ±Infinity are tagged.
 - **Loading** treats the file as untrusted. It enforces a size limit and checks the format and version, then validates every field. Damaged values are repaired, and unusable files are rejected with a readable message. The loader lists each repair (`deserializeState(json, { warnings })`) and the app shows them in a warning toast (full list in the browser console), so a damaged file never loads silently.
-- **Save → load → continue** gives the same simulation as never saving: agents, tribes and the world evolve identically. This is covered by `tests/determinism.test.ts` and `tests/persistence.test.ts`. Some event-log messages can still differ after a load, because the bookkeeping behind them is not saved. Examples are an epidemic's final death and peak counts, and some alliance announcements.
+- **Save → load → continue** gives the same simulation as never saving, event log included: the epidemic and diplomacy bookkeeping, interventions not yet applied and an unfinished "replay my interventions" are all part of the save. This is covered by `tests/determinism.test.ts`, `tests/persistence.test.ts` and `tests/lead-*.test.ts`.
 - **Caveat:** replays are bit-exact within the same build and JavaScript engine. World generation uses only IEEE-exact arithmetic, but the simulation calls `Math.sin`, `Math.exp` and similar functions, which may round differently in the last bit on another engine. A replay can therefore drift slightly across browsers.
 
 ## Testing and verification
@@ -252,6 +254,12 @@ Derived indexes (`agentById`, `tribeById`, `lineageById` and the spatial hash) l
 | `tests/balance.report.test.ts` | informational: a per-day table for each preset (population, births, deaths by cause, tribes, generation, hunger, food, gene means) |
 | `tests/spec-requirements.test.ts` | the required features and presets exist, every intervention is explained, the offline build is self-contained, selection visibly shifts a gene, and this README matches the code |
 | `tests/spec-docs-drift.test.ts` | what this README says about loading save files (repairs are made, listed and shown to the user) still matches the code |
+| `tests/core-*.test.ts` | core audit regressions: population accounting at the cap, exact replay (also through a save file), hostile interventions and save files, full-state hash, world generation per preset |
+| `tests/behavior-*.test.ts` | behaviour audit regressions: emergent conflict motives, raids, timid avoidance, reachability, deposit loops, grudges, diplomacy saturation, tribe sizes |
+| `tests/eco-*.test.ts` | ecology audit regressions: spatial cold snaps, regrowth from grazed land, breeding range gate, seasonal stability, stats records |
+| `tests/ui-*.test.ts` | UI logic: brush previews match applied radii, day labels match the clock, contrast tokens |
+| `tests/lead-*.test.ts` | save/load continuity: mid-replay saves, pending interventions, diplomacy and epidemic event logs |
+| `scripts/ui-audit.mjs` | Playwright: drives every visible control of the built app (231 checks: tools, events, experiments, parameters, overlays, save/load, inspector, shortcuts, layout at 3 sizes, contrast, FPS) and asserts real effects |
 | `scripts/browser-smoke.mjs` | loads `dist/index.html` (or `--url`) in headless Chromium and fails on console or page errors, failed requests or a blank canvas; toggles play/pause, presses a few shortcuts and saves `docs/screenshot.png` |
 
 Vitest hides the console output of passing tests. Add `--silent=false` to see the reports:
@@ -282,6 +290,8 @@ AL_LONGRUN_TICKS=5000 npx vitest run tests/longrun.test.ts --silent=false  # qui
 - **Economy:** plant food is the only resource. Exchange means gifts between agents and a shared tribe stockpile; there is no trade between different goods.
 - **Analytics:** statistics are sampled every 30 ticks, and old history is merged to save space during long runs. The lineage registry holds at most 6,000 records. When it is full, the oldest dead ancestors are dropped first, so very deep family trees are cut short.
 - **Replay length:** the intervention log keeps only the latest 5,000 interventions. Drag-painting records a stamp about every 40 ms, so after a long editing session the earliest interventions are dropped and **Replay my interventions** is no longer exact.
-- **Saving during a replay:** a save made while a replay is still re-applying interventions does not include the ones not yet reached. Let the replay pass your last recorded intervention before saving.
+- **Navigation:** agents steer around obstacles locally and avoid targets they cannot reach in a straight line (allowing for thin obstacles), but there is no route planning: food or enemies reachable only through a long detour (a distant ford or pass) are skipped.
+- **Diplomacy:** wars between neighbouring warlike tribes cool only slowly; within a 12-day run they rarely end in a formal peace.
+- **Eden and the population cap:** Garden of Eden is deliberately limited by the population cap rather than by food (its land could feed many times the cap); births continue at the cap, replacing deaths.
 - **Save files:** a file from a newer save-format version is rejected with a readable error.
 - **Cross-browser replays:** see the determinism caveat above.

@@ -479,6 +479,8 @@ export interface SimState {
    * would have; rebuilt from tribe relations when absent (older saves).
    */
   diplomacy?: { wars: number[]; alliances: number[]; feuds: number[] };
+  /** Epidemic log bookkeeping (disease.ts): saved so a loaded run reports the same deaths and peak. */
+  epidemic?: { fresh: boolean; active: boolean; pandemic: boolean; deaths: number; peak: number };
 }
 
 // ---------------------------------------------------------------- scenarios

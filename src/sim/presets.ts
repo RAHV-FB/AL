@@ -115,7 +115,7 @@ export const SCENARIOS: ScenarioDef[] = [
       'This tests natural selection under strong pressure: which trait combinations win, and does cooperation emerge anyway?',
     lookFor: [
       'An early crash as poorly adapted genomes starve, then a smaller but tougher population',
-      'Gene means shifting quickly — watch efficiency rise and costly traits (speed, longevity) get trimmed',
+      'Gene means shifting quickly — survivors get faster and leaner (speed up, metabolism down) while efficiency and fertility creep up',
       'Frequent fights over food, and the combat share of deaths climbing during the drought',
       'Whether tribes still form spontaneously when everyone starts as a loner',
     ],
@@ -273,10 +273,10 @@ export const SCENARIOS: ScenarioDef[] = [
       'On day 8 a long global drought begins and blight hits the heartland, on day 10 a cold snap follows, and the rains only return on day 14, far to the north-east. ' +
       'This tests overshoot and collapse: does the population crash below its old level, and can survivors migrate and recover?',
     lookFor: [
-      'Boom: rapid growth while food is plentiful, then mean fertility of the soil sliding as the land is overgrazed',
+      'Boom: rapid growth while food is plentiful, then births slowing as the land around the camps is grazed down',
       'Bust: starvation deaths spiking after day 8, stockpiles draining, the tribe splintering or turning on itself',
       'Survivors clustering on the last fertile patches; recovery (or not) after the rains return on day 14',
-      'Selection during the crash: efficiency and low metabolism should rise in the survivors',
+      'Selection during the crash: which genomes come through the famine (compare the gene charts before and after)',
     ],
     config: {
       foodRegen: 1.4,

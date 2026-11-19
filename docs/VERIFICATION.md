@@ -156,3 +156,37 @@ A second verifier re-ran the audit's checks against the working tree: baseline `
 | — | Requirements and README drift | `npx vitest run tests/spec-requirements.test.ts` | 00:14: **15 of 16.** The core auditor had briefly raised `LIMITS.interventionLog` to 50,000, and the README check caught the stale "5,000". 00:19 and later, with the cap back at 5,000: **16 of 16.** |
 | — | Docs drift, save/load and determinism | `npx vitest run tests/spec-requirements.test.ts tests/spec-docs-drift.test.ts` (00:27, again 00:30); `npx vitest run tests/determinism.test.ts tests/persistence.test.ts` (00:28) | **Pass:** 18 of 18, and 39 of 39. |
 | 1 | Typecheck | `npx tsc --noEmit` (00:27, again 00:30) | **Pass** (exit code 0). The other auditors' temporary files no longer break it. |
+
+## Final results — after the 2026-11-19 audit (Linux container, Node 22, 4 shared vCPU)
+
+All numbers below are from runs on the final tree. Five parallel audits (core, behaviour, ecology, UI, spec/docs), each followed by an independent adversarial verifier, fixed the defects listed in `docs/REQUIREMENTS.md` (gap list) and added regression tests.
+
+**Automated tests** — `npx vitest run --exclude tests/balance.report.test.ts`: **36 files, 365 tests, all passing** (one test, the REQUIREMENTS summary check, was re-run on its own after a wording fix: 18/18 spec tests pass). `npx tsc --noEmit`: clean.
+
+**Browser** — `npm run build` → single-file `dist/index.html` (≈379 kB), then:
+
+- `node scripts/ui-audit.mjs --file dist/index.html` → **231 passed, 0 failed** (every visible control driven in Chromium with its real effect asserted; layout at 1280×720, 1440×900, 1920×1080; WCAG AA contrast; no console errors).
+- `node scripts/browser-smoke.mjs` → passed over `file://` (589 distinct colours, speed set 4× then 1×, no console errors); `docs/screenshot.png` refreshed.
+- Rendering at ~1000 agents: 1× → 60 FPS / 30 TPS; Max → 39 FPS / 175–181 TPS (render ≈1.2 ms/frame).
+
+**Simulation performance** (`tests/perf.bench.test.ts`): 1000 agents → mean **3.86 ms/tick** (p50 3.09, p95 8.02) ≈ 259 ticks/s; eden's starting population → 0.96 ms/tick.
+
+**Long run** (`tests/longrun.test.ts`, 20,000 ticks): eden 3.63 ms/tick, heap 34.8 → 28.3 MB; predators 3.26 ms/tick, heap 36.8 → 32.4 MB (bounded).
+
+**Determinism & persistence**: same seed + same interventions ⇒ identical full-state hash; *Replay my interventions* reproduces the run (also from a log that went through a save file); save → load → continue gives the identical full hash including the event log, also mid-epidemic (`plague-island`), mid-war (`two-civs`) and mid-replay (`tests/lead-*.test.ts`).
+
+**Population dynamics** (`npm run balance`, 12 in-game days, seed 42; population on day 6 → day 12, peak):
+
+| preset | day 6 | day 12 | peak | notes |
+| --- | --- | --- | --- | --- |
+| eden | 1000 | 1000 | 1000 (d6) | cap-limited by design; births continue at the cap (80/day on d12) |
+| fittest | 195 | 68 | 280 (d4) | harsh but viable; speed 0.48→0.67, metabolism 0.50→0.41, fertility 0.50→0.70, longevity 0.50→0.66 |
+| two-civs | 540 | 519 | 573 (d10) | raiders lose: aggression 0.48→0.15, altruism 0.51→0.75, efficiency 0.59→0.76 |
+| evolab | 574 | 716 | 778 (d11) | fertility 0.50→0.61, longevity 0.50→0.60 |
+| collapse | 1217 | 1148 | 1400 (d7) | scripted drought/blight (d8) and cold snap (d10): 413 deaths on d12, 328 by starvation |
+| plague-island | 717 | 982 | 1000 (d10) | epidemic on d3 absorbed; second strain d10 |
+| predators | 689 | 655 | 768 (d10) | predation and raids from day 5 |
+
+No preset goes extinct within 12 days. In 20-day runs, measured by the ecology auditor, the seasonal swing is −6% to −28% instead of the earlier −82% to −94% winter crashes, and `fittest` survives on seeds 42, 1, 7 and 99.
+
+**Emergent conflict** (behaviour audit, seed 42, 12 days, integrated tree): fights/day — eden 0, collapse 0, plague-island 0 (gentle genomes), predators ≈22, fittest ≈104, two-civs ≈181, evolab ≈196; living tribes ≈5–15 per 1000 agents (was ≈40 tiny splinters).

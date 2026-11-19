@@ -8,7 +8,8 @@ import './analytics.css';
 import type { Simulation } from '../sim/simulation';
 import { GENES, NONE, type ActionKind, type Agent, type AgentId, type GeneName, type LineageRecord, type Traits } from '../sim/types';
 import { CAUSE_LABELS, GENE_DESCRIPTIONS, GENE_LABELS, ROLE_LABELS, dayOfTick, tribeColor } from './analytics';
-import { REPRO, mateFoodThreshold } from '../sim/genetics';
+import { REPRO, mateFoodThreshold, rangeFoodThreshold } from '../sim/genetics';
+import { localFoodFraction } from '../sim/ecology';
 
 export interface InspectorHandlers {
   onSelect(id: number): void; // select another agent (e.g. click a relative)
@@ -462,8 +463,14 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
         else if (a.energy <= REPRO.minEnergy) rs = 'Not fertile — too tired';
         else if (a.health < REPRO.minHealthFrac * tr.maxHealth) rs = 'Not fertile — too injured or sick';
         else {
-          rs = 'Fertile — ready to mate';
-          rcls = 'insp-status-good';
+          // canMate also needs a lush home range around the couple (grazed-down land stops births)
+          const range = localFoodFraction(s2, a.x, a.y, REPRO.rangeTiles, REPRO.rangeStride);
+          const need = rangeFoodThreshold(tr);
+          if (range < need) rs = `Fertile, but the land around is grazed down (${Math.round(range * 100)}% food, needs ${Math.round(need * 100)}%)`;
+          else {
+            rs = 'Fertile — ready to mate';
+            rcls = 'insp-status-good';
+          }
         }
         setText(repro, `${rs} · ${a.offspring} offspring`);
         repro.className = `insp-status ${rcls}`;

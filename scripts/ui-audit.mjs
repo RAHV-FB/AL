@@ -1142,27 +1142,27 @@ try {
     // control under test can change pixels (paused sim, no hover, no brush).
     // The minimap caches a thumbnail on its own frame counter (and the app's rAF renders run in between),
     // so it is excluded from these pixel comparisons; it has dedicated checks of its own.
-    const renderSnap = () =>
-      ev(() => {
+    const renderSnap = (keepMinimap = false) =>
+      ev((keep) => {
         const a = window.app;
         a.view.hoverId = -1;
-        a.renderer.render(a.sim, { ...a.view, showMinimap: false }, 987654);
+        a.renderer.render(a.sim, keep ? a.view : { ...a.view, showMinimap: false }, 987654);
         const c = a.renderer.canvas;
         window.__snap = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
         return true;
-      });
-    const renderDiff = () =>
-      ev(() => {
+      }, keepMinimap);
+    const renderDiff = (keepMinimap = false) =>
+      ev((keep) => {
         const a = window.app;
         a.view.hoverId = -1;
-        a.renderer.render(a.sim, { ...a.view, showMinimap: false }, 987654);
+        a.renderer.render(a.sim, keep ? a.view : { ...a.view, showMinimap: false }, 987654);
         const c = a.renderer.canvas;
         const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
         const p = window.__snap;
         let n = 0;
         for (let i = 0; i < d.length; i += 4) if (Math.abs(d[i] - p[i]) + Math.abs(d[i + 1] - p[i + 1]) + Math.abs(d[i + 2] - p[i + 2]) > 24) n++;
         return n;
-      });
+      }, keepMinimap);
     await fresh('eden', 12345, 900);
     await page.mouse.move(700, 20); // park the pointer on the top bar: no hover tag, no brush
     // a selected agent with visible relationships that walks for a while, so it leaves a trail
@@ -1266,9 +1266,10 @@ try {
         await frames(2);
         const ctl = toggleCtl('#sec-view', label);
         const v0 = await ev((k) => window.app.view[k], key);
-        await renderSnap();
+        const keepMinimap = key === 'showMinimap'; // the minimap toggle is the one comparison that must include it
+        await renderSnap(keepMinimap);
         await ctl.click();
-        const n = await renderDiff();
+        const n = await renderDiff(keepMinimap);
         const v1 = await ev((k) => window.app.view[k], key);
         const stored = await ev((k) => JSON.parse(localStorage.getItem('al:view') || '{}')[k], key);
         const extra = await ev((k) => (k === 'showMinimap' ? window.app.renderer.minimapRect.visible : k === 'showLegend' ? window.app.renderer.legendRect.visible : null), key);
@@ -2098,12 +2099,15 @@ try {
     });
     await check('toasts are dismissed on click', async () => {
       await page.locator('#sec-global .gev-btn', { hasText: 'Drought' }).click();
-      const toast = page.locator('.toast:not(.out)').last();
-      const text = await toast.textContent();
+      // Pin one element: a locator re-resolves on every action, and the event log raises further toasts
+      // (e.g. the drought's own event) while this check runs, so .last() can change between steps.
+      const toast = await page.locator('.toast:not(.out)').last().elementHandle();
+      assert(toast, 'no toast shown');
+      const text = (await toast.textContent()) ?? '';
       await toast.click();
       await sleep(350);
-      const still = await page.locator('.toast', { hasText: text }).count();
-      assert(still === 0, `clicked toast “${text.slice(0, 40)}” still shown`);
+      const still = await toast.evaluate((el) => el.isConnected && !el.classList.contains('out'));
+      assert(!still, `clicked toast “${text.slice(0, 40)}” still shown`);
     });
 
     await check('no console errors in the main session', async () => {

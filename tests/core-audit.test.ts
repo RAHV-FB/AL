@@ -238,7 +238,7 @@ describe('normalizeIntervention (canonical form shared by recording, applying an
 });
 
 describe('spawn', () => {
-  it('founders are young adults (age >= their own maturityAge) with 85% of a full stomach, for any body size', () => {
+  it('founders are adults (maturityAge ≤ age ≤ half their lifespan) with 85% of a full stomach, for any body size', () => {
     const sim = makeSim();
     const p = land(sim);
     for (const size of [0, 0.5, 1]) applyIntervention(sim, { kind: 'spawn', x: p.x, y: p.y, count: 40, radius: 60, template: { size, spread: 0.02 } });
@@ -246,7 +246,7 @@ describe('spawn', () => {
     for (const a of sim.state.agents) {
       expect(isAdult(a)).toBe(true);
       expect(a.age).toBeGreaterThanOrEqual(a.traits.maturityAge);
-      expect(a.age).toBeLessThanOrEqual(Math.ceil(a.traits.maturityAge * 1.2));
+      expect(a.age).toBeLessThanOrEqual(Math.max(a.traits.maturityAge, Math.floor(a.traits.longevity * 0.5)) + 1);
       expect(a.food).toBeCloseTo(a.traits.maxFood * 0.85, 6);
       expect(a.health).toBe(a.traits.maxHealth);
     }

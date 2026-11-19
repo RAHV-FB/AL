@@ -200,7 +200,7 @@ export function createAnalyticsPanel(container: HTMLElement): AnalyticsPanel {
   const tBirths = tile('Births / day', C.aqua, 'Births per day over the last day');
   const tDeaths = tile('Deaths / day', C.red, 'Deaths per day over the last day');
   const tHealth = tile('Avg health', C.green, 'Mean health as a fraction of each agent\'s maximum');
-  const tFood = tile('Food', C.yellow, 'Total edible plant food in the world. "Supports ≈ N" is the carrying capacity: how many average agents the current regrowth (soil fertility, season, disasters, regrowth setting) could feed indefinitely.');
+  const tFood = tile('Food', C.yellow, 'Total edible plant food in the world. "Supports ≤ N" is an upper bound on the carrying capacity: how many average agents the current regrowth (soil fertility, season, disasters, regrowth setting) could feed if every tile were harvested optimally. Real populations level off well below it, because births need a well-fed body and lush land nearby.');
   const tTribes = tile('Tribes', C.violet, 'Tribes with at least one living member');
   const tGen = tile('Max generation', C.orange, 'Highest generation among living agents');
   const tInf = tile('Infected', C.magenta, 'Agents currently carrying a disease');
@@ -367,7 +367,7 @@ export function createAnalyticsPanel(container: HTMLElement): AnalyticsPanel {
     } catch {
       /* estimate is informational only */
     }
-    setText(tFood.sub, (last ? `fertility ${formatPct(last.avgFertility)}` : '') + (Number.isFinite(cap) ? ` · supports ≈${formatNum(Math.round(cap))}` : ''));
+    setText(tFood.sub, (last ? `fertility ${formatPct(last.avgFertility)}` : '') + (Number.isFinite(cap) ? ` · supports ≤${formatNum(Math.round(cap))}` : ''));
     setText(tTribes.value, String(sum.tribes));
     let big = '';
     if (last && last.tribePops.length) {

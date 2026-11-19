@@ -330,11 +330,12 @@ function spawn(sim: Simulation, iv: SpawnSpec): void {
     if (!p) continue;
     const genes = randomGenes(sim.rng, iv.template);
     const traits = expressTraits(genes);
-    // founders are young adults: at or a little past their OWN maturity age (700–1100 ticks by body size)
+    // founders are adults of mixed ages: uniformly between their OWN maturity age (700–1100 ticks by body
+    // size) and half their lifespan, so the founding cohort does not die of old age all at once
     const maturity = Math.max(0, Math.ceil(num(traits.maturityAge, 600)));
-    let age = Math.round(maturity * (1 + 0.2 * sim.rng.next()));
     const longevity = num(traits.longevity, Infinity);
-    if (age > longevity * 0.5) age = Math.max(maturity, Math.floor(longevity * 0.5)); // never juveniles
+    const oldest = Number.isFinite(longevity) ? Math.max(maturity, Math.floor(longevity * 0.5)) : maturity * 2;
+    const age = Math.round(maturity + sim.rng.next() * (oldest - maturity)); // never juveniles
     const food = Math.max(0, num(traits.maxFood, 100)) * 0.85;
     const a = createAgent(sim, { x: p.x, y: p.y, genes, age, food });
     sim.addAgent(a);

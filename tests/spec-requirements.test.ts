@@ -95,7 +95,9 @@ describe('requirements: agents, evolution, environment', () => {
 
   it('selection visibly shifts the gene pool under pressure (emergent; recorded for the Genetics chart)', () => {
     const sim = Simulation.create({ scenario: findScenario('fittest')!, seed: 42 });
-    sim.run(6 * sim.config.dayLength);
+    // founders now have mixed ages (no synchronized die-off), so selection needs a little longer to show:
+    // measured on seeds 42 / 7, the largest functional gene-mean shift is ≈0.07 on day 6 and 0.13–0.15 on day 10
+    sim.run(10 * sim.config.dayLength);
     const samples = sim.state.stats.samples;
     const first = samples[0];
     const last = samples[samples.length - 1];
@@ -111,7 +113,7 @@ describe('requirements: agents, evolution, environment', () => {
         bestGene = GENES[i];
       }
     }
-    expect(best, `largest shift of a functional gene mean in 6 days (${bestGene})`).toBeGreaterThanOrEqual(0.08);
+    expect(best, `largest shift of a functional gene mean in 10 days (${bestGene})`).toBeGreaterThanOrEqual(0.1);
     expect(last.geneHist).toHaveLength(GENE_COUNT * HIST_BINS);
   }, 120_000);
 });
