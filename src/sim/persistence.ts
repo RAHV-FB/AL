@@ -702,6 +702,7 @@ function sanitizeWorld(raw: unknown, r: Repairs): WorldState {
   raw.climateMod = climateMod;
   raw.territory = territory; // values checked once tribe ids are known
   raw.terrainVersion = int(r, 'world.terrainVersion', raw.terrainVersion ?? 0, 0, 0, Number.MAX_SAFE_INTEGER);
+  raw.navVersion = int(r, 'world.navVersion', raw.navVersion ?? 0, 0, 0, Number.MAX_SAFE_INTEGER);
   return raw as unknown as WorldState;
 }
 
@@ -771,6 +772,22 @@ function memorySpot(r: Repairs, field: string, e: unknown): Obj | null {
 }
 
 /** Pass 2: sanitise every field of a living agent in place (unknown extension fields are kept). */
+/** Field order of a live agent (lifecycle.createAgent). Unknown extra fields are kept, after these. */
+const AGENT_KEYS = [
+  'id', 'name', 'alive', 'generation', 'parents', 'birthTick', 'age', 'x', 'y', 'vx', 'vy', 'heading', 'genes', 'traits',
+  'health', 'food', 'energy', 'carried', 'action', 'actionTicks', 'targetX', 'targetY', 'targetId', 'decisionCooldown',
+  'utilities', 'thought', 'reproCooldown', 'offspring', 'children', 'tribeId', 'relationships', 'role', 'skills',
+  'infection', 'virulence', 'immuneTicks', 'memory', 'history', 'stats', 'deathTick', 'deathCause', 'lastAttackerId',
+  'fear', 'sinceMeal', 'route', 'trek', 'diseaseHp',
+] as const;
+
+function canonicalAgent(a: Obj): Obj {
+  const out: Obj = {};
+  for (const k of AGENT_KEYS) out[k] = a[k];
+  for (const k of Object.keys(a)) if (!(k in out)) out[k] = a[k];
+  return out;
+}
+
 function sanitizeAgent(a: Obj, refs: Refs, r: Repairs): void {
   a.name = str(r, 'agent.name', a.name, 'Nameless', 40);
   if (a.alive !== true) {
@@ -891,7 +908,7 @@ function sanitizeAgent(a: Obj, refs: Refs, r: Repairs): void {
   if (a.diseaseHp !== undefined) {
     if (!isFiniteNum(a.diseaseHp) || (a.infection as number) <= 0) {
       r.fix('agent.diseaseHp');
-      delete a.diseaseHp;
+      a.diseaseHp = undefined;
     } else a.diseaseHp = num(r, 'agent.diseaseHp', a.diseaseHp, 0, 0, traits.maxHealth);
   }
   // steering.ts: planned route (kept exactly when valid, so a loaded run follows the same waypoints)
@@ -912,16 +929,17 @@ function sanitizeAgent(a: Obj, refs: Refs, r: Repairs): void {
       (rt.pts.length === 0 ? rt.i === 0 : rt.i <= rt.pts.length - 2) &&
       isInt(rt.t) &&
       rt.t >= 0 &&
-      rt.t <= refs.tick + ROUTE.failRetry + ROUTE.directRecheck &&
+      rt.t <= refs.tick + 2 * ROUTE.failRetry + ROUTE.directRecheck &&
       isInt(rt.v) &&
       (rt.fail === undefined || typeof rt.fail === 'boolean') &&
       (rt.b === undefined || (isFiniteNum(rt.b) && rt.b >= 0)) &&
       (rt.bt === undefined || (isInt(rt.bt) && rt.bt >= 0 && rt.bt <= refs.tick)) &&
       (rt.p === undefined || (isInt(rt.p) && rt.p >= 1 && rt.p <= ROUTE.maxPartial)) &&
-      Object.keys(rt).every((k) => ['gx', 'gy', 'pts', 'i', 't', 'v', 'fail', 'b', 'bt', 'p'].includes(k));
+      (rt.wait === undefined || typeof rt.wait === 'boolean') &&
+      Object.keys(rt).every((k) => ['gx', 'gy', 'pts', 'i', 't', 'v', 'fail', 'b', 'bt', 'p', 'wait'].includes(k));
     if (!valid) {
       r.fix('agent.route');
-      delete a.route; // steering simply plans again
+      a.route = undefined; // steering simply plans again
     }
   }
   // brain.ts: a migrant's trek destination
@@ -937,7 +955,7 @@ function sanitizeAgent(a: Obj, refs: Refs, r: Repairs): void {
       Object.keys(tk).every((k) => k === 'x' || k === 'y' || k === 'until');
     if (!ok) {
       r.fix('agent.trek');
-      delete a.trek;
+      a.trek = undefined;
     }
   }
 }
@@ -1150,6 +1168,9 @@ function sanitizeState(raw: Obj, r: Repairs): SimState {
 
   // --- pass 2: fields & references
   for (const a of agents) sanitizeAgent(a, refs, r);
+  // rebuild every agent with the canonical field order (the live createAgent shape; JSON drops undefined
+  // fields), so a loaded simulation keeps one hidden class per agent and runs as fast as a fresh one
+  for (let k = 0; k < agents.length; k++) agents[k] = canonicalAgent(agents[k]);
   for (const t of tribes) sanitizeTribe(t, refs, r);
   for (const l of lineage) sanitizeLineage(l, refs, r);
   let badTerr = 0;

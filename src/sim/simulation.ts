@@ -559,7 +559,7 @@ export class Simulation {
       mix(rt ? 1 : 0);
       if (rt) {
         mix(rt.gx); mix(rt.gy); mix(rt.i); mix(rt.t); mix(rt.v); mix(rt.fail ? 1 : 0); mix(rt.pts.length);
-        mix(opt(rt.b)); mix(opt(rt.bt)); mix(opt(rt.p));
+        mix(opt(rt.b)); mix(opt(rt.bt)); mix(opt(rt.p)); mix(rt.wait ? 1 : 0);
         for (const p of rt.pts) mix(p);
       }
       const tk = a.trek;

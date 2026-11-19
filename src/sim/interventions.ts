@@ -463,8 +463,10 @@ function paintTerrain(sim: Simulation, x: number, y: number, r: number, terrain:
   const info = TERRAIN_INFO[terrain];
   const radius = brushRadius(sim, r);
   let changed = 0;
+  let navChanged = false;
   forTilesInRadius(sim, x, y, radius, (i) => {
     if (w.terrain[i] === terrain) return;
+    if (TERRAIN_INFO[w.terrain[i] as TerrainType].passable !== info.passable) navChanged = true;
     w.terrain[i] = terrain;
     const base = info.maxFood > 0 ? defaultFertility(terrain) : 0;
     w.baseFertility[i] = base;
@@ -476,6 +478,7 @@ function paintTerrain(sim: Simulation, x: number, y: number, r: number, terrain:
   });
   if (changed === 0) return;
   w.terrainVersion++;
+  if (navChanged) w.navVersion = (w.navVersion ?? 0) + 1;
 
   // agents (and camps) left on impassable ground move to the nearest open tile
   const ts = w.tileSize;

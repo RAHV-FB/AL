@@ -186,6 +186,10 @@ export function moveToward(sim: Simulation, a: Agent, tx: number, ty: number, fa
     return true;
   }
   const wp = routeWaypoint(sim, a, tx, ty, d);
+  if (wp === -2) {
+    halt(a); // a route is being planned (search budget spent this tick)
+    return false;
+  }
   if (wp >= 0) {
     const r = a.route as AgentRoute;
     const wx = r.pts[wp] - a.x;
@@ -206,7 +210,7 @@ export function moveToward(sim: Simulation, a: Agent, tx: number, ty: number, fa
  * no route.
  */
 function makeRoute(sim: Simulation, a: Agent, tx: number, ty: number, tick: number, force = false, partial = 0): AgentRoute {
-  const v = sim.state.world.terrainVersion;
+  const v = sim.state.world.navVersion ?? 0;
   if (!force && clearPath(sim, a.x, a.y, tx, ty)) return { gx: tx, gy: ty, pts: [], i: 0, t: tick + ROUTE.directRecheck, v, b: 1e9, bt: tick };
   const res = planRoute(sim, a.x, a.y, tx, ty);
   if ((res.status === 'ok' || (res.status === 'partial' && partial < ROUTE.maxPartial)) && res.pts.length >= 2) {
@@ -214,8 +218,22 @@ function makeRoute(sim: Simulation, a: Agent, tx: number, ty: number, tick: numb
     if (res.status === 'partial') r.p = partial + 1;
     return r;
   }
-  const retry = res.status === 'budget' ? ROUTE.budgetRetry + (a.id % 4) : ROUTE.failRetry;
-  return { gx: tx, gy: ty, pts: [], i: 0, t: tick + retry, v, fail: true };
+  // this tick's search budget is spent: wait (standing still) and try again shortly
+  if (res.status === 'budget') return { gx: tx, gy: ty, pts: [], i: 0, t: tick + ROUTE.budgetRetry + (a.id % 4), v, wait: true };
+  // no way (or a maze too large even for a chain of partial routes): give up for a while
+  return { gx: tx, gy: ty, pts: [], i: 0, t: tick + (res.status === 'partial' ? 2 * ROUTE.failRetry : ROUTE.failRetry), v, fail: true };
+}
+
+/** True when every remaining leg of a waypoint route (from the agent's position) is still walkable. */
+function legsClear(sim: Simulation, a: Agent, r: AgentRoute): boolean {
+  let px = a.x;
+  let py = a.y;
+  for (let k = r.i; k + 1 < r.pts.length; k += 2) {
+    if (!lineClear(sim, px, py, r.pts[k], r.pts[k + 1])) return false;
+    px = r.pts[k];
+    py = r.pts[k + 1];
+  }
+  return true;
 }
 
 /** Track progress (best distance `b` and the tick `bt` it last improved by ≥ 0.5); true when stalled. */
@@ -239,17 +257,24 @@ function routeWaypoint(sim: Simulation, a: Agent, tx: number, ty: number, d: num
   const world = sim.state.world;
   const ts = world.tileSize;
   const tick = sim.state.tick;
+  const nv = world.navVersion ?? 0;
   let r = a.route;
-  const fresh =
-    r !== undefined &&
-    r.v === world.terrainVersion &&
-    Math.abs(r.gx - tx) <= Math.max(ts * ROUTE.goalTolTiles, d * 0.1) &&
-    Math.abs(r.gy - ty) <= Math.max(ts * ROUTE.goalTolTiles, d * 0.1);
+  const tol = Math.max(ts * ROUTE.goalTolTiles, d * 0.1);
+  let fresh = r !== undefined && Math.abs(r.gx - tx) <= tol && Math.abs(r.gy - ty) <= tol;
+  if (fresh && r!.v !== nv) {
+    // walkability changed somewhere (a wall painted, a crater): keep a route whose remaining legs are all
+    // still clear; a straight-line verdict is re-checked on its own schedule; anything else re-plans
+    if (r!.pts.length > 0 ? legsClear(sim, a, r!) : !r!.fail) r!.v = nv;
+    else fresh = false;
+  }
   // close to the goal: steer straight only when nothing is in the way (a thin wall can still separate us)
   if (d < ts * ROUTE.minDistTiles && !(fresh && r!.pts.length > 0) && clearPath(sim, a.x, a.y, tx, ty)) return -1;
   if (!fresh) r = undefined;
   else if (r!.pts.length === 0) {
-    if (r!.fail) {
+    if (r!.wait) {
+      if (tick < r!.t) return -2; // waiting for search budget: stand still rather than press into the bank
+      r = undefined;
+    } else if (r!.fail) {
       if (tick < r!.t) return -1; // no route yet: wall-follow until the retry
       r = undefined;
     } else {
@@ -265,7 +290,7 @@ function routeWaypoint(sim: Simulation, a: Agent, tx: number, ty: number, d: num
   if (!r) {
     r = makeRoute(sim, a, tx, ty, tick);
     a.route = r;
-    if (r.pts.length === 0) return -1;
+    if (r.pts.length === 0) return r.wait ? -2 : -1;
   }
   const pts = r.pts;
   const last = pts.length - 2;

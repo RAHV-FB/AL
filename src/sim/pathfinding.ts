@@ -25,10 +25,12 @@ import type { TerrainType, WorldState } from './types';
 import { TERRAIN_INFO } from './constants';
 
 export const NAV = {
-  /** A* node expansions available per tick, shared by all agents. */
-  tickBudget: 30000,
-  /** Expansions allowed for one query (a cross-map route rarely needs more than a few thousand). */
-  queryBudget: 14000,
+  /** A* node expansions available per tick, shared by all agents (≈ 2–3 ms at most). */
+  tickBudget: 12000,
+  /** Expansions allowed for one query (natural cross-map routes need ≤ ~8,000; mazes chain partial routes). */
+  queryBudget: 10000,
+  /** A search is only started when the tick has ≈ this many expansions per tile of octile distance left. */
+  expansionsPerTile: 25,
   /** Weight on the heuristic (1 = optimal A*; higher = fewer expansions, slightly longer routes). */
   heuristicWeight: 1.35,
   /** Waypoints kept per route; a longer route is re-planned when the agent reaches its last kept waypoint. */
@@ -372,7 +374,11 @@ export function planRoute(sim: Simulation, x0: number, y0: number, x1: number, y
 
   const left = navBudgetLeft(sim);
   const limit = Math.min(NAV.queryBudget, left);
-  if (limit < 64) return { status: 'budget', pts: [], expanded: 0 };
+  // do not start a search the tick cannot finish (it would be wasted): estimate the need from the distance
+  const sdx = Math.abs((start % nav.w) - (goal % nav.w));
+  const sdy = Math.abs(Math.floor(start / nav.w) - Math.floor(goal / nav.w));
+  const need = Math.min(NAV.queryBudget, 64 + NAV.expansionsPerTile * (Math.max(sdx, sdy) + (SQRT2 - 1) * Math.min(sdx, sdy)));
+  if (left < need) return { status: 'budget', pts: [], expanded: 0 };
 
   const w = nav.w;
   const gTx = goal % w;

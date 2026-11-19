@@ -244,6 +244,8 @@ export interface AgentRoute {
   bt?: number;
   /** Consecutive partial routes (search capped, e.g. in a maze); absent = a complete route. */
   p?: number;
+  /** Waiting for search budget (pts empty): stand still until tick t, then plan. */
+  wait?: boolean;
 }
 
 export interface LineageRecord {
@@ -301,6 +303,11 @@ export interface WorldState {
   territory: Int16Array;
   /** Incremented whenever terrain changes (renderer re-caches). */
   terrainVersion: number;
+  /**
+   * Incremented only when the passability of some tile changes (land ↔ water/wall). Planned routes are
+   * checked against it: repainting grass as sand does not disturb anyone's route. (Optional: 0 when absent.)
+   */
+  navVersion?: number;
 }
 
 export interface EnvState {

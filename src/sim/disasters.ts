@@ -18,10 +18,10 @@
  * loading a save) yields identical values; module state is only a cache key.
  */
 import type { Simulation } from './simulation';
-import { LIMITS } from './constants';
+import { LIMITS, TERRAIN_INFO } from './constants';
 import { tileCapacity } from './ecology';
 import { infect } from './disease';
-import { DISASTER_KINDS, TERRAIN, type Agent, type Disaster, type DisasterKind } from './types';
+import { DISASTER_KINDS, TERRAIN, type Agent, type Disaster, type DisasterKind, type TerrainType } from './types';
 
 /** Human-readable explanations (shown in the UI). */
 export const DISASTER_INFO: Record<DisasterKind, { label: string; icon: string; help: string }> = {
@@ -397,6 +397,7 @@ function meteorImpact(sim: Simulation, d: Disaster): [number, number] {
 
   // Crater: rock core, sand rim, scorched surroundings. Water is left as water.
   let changed = false;
+  let navChanged = false; // a wall blasted into rock/sand becomes walkable
   const core = r * 0.3;
   const rim = r * 0.55;
   forEachTile(sim, d.x, d.y, r, (i, dist) => {
@@ -406,12 +407,14 @@ function meteorImpact(sim: Simulation, d: Disaster): [number, number] {
       w.food[i] = 0;
       if (dist <= core) {
         if (!wet && t !== TERRAIN.Rock) {
+          if (!TERRAIN_INFO[t as TerrainType].passable) navChanged = true;
           w.terrain[i] = TERRAIN.Rock;
           changed = true;
         }
         w.fertility[i] *= 0.1;
       } else {
         if (!wet && t !== TERRAIN.Rock && t !== TERRAIN.Sand) {
+          if (!TERRAIN_INFO[t as TerrainType].passable) navChanged = true;
           w.terrain[i] = TERRAIN.Sand;
           changed = true;
         }
@@ -428,12 +431,14 @@ function meteorImpact(sim: Simulation, d: Disaster): [number, number] {
   if (ci >= 0) {
     const t = w.terrain[ci];
     if (t !== TERRAIN.DeepWater && t !== TERRAIN.Water && t !== TERRAIN.Rock) {
+      if (!TERRAIN_INFO[t as TerrainType].passable) navChanged = true;
       w.terrain[ci] = TERRAIN.Rock;
       changed = true;
     }
     w.food[ci] = 0;
   }
   if (changed) w.terrainVersion++;
+  if (navChanged) w.navVersion = (w.navVersion ?? 0) + 1;
   return [victims.length, injured];
 }
 

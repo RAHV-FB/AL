@@ -481,7 +481,9 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
         const rt = a.route;
         let nav = '';
         if (a.trek) nav = `Migrating to greener land — trek ends in ${(Math.max(0, a.trek.until - s2.state.tick) / dl).toFixed(1)} days`;
-        if (rt && !rt.fail && rt.pts.length > 0) {
+        const moving = a.vx !== 0 || a.vy !== 0;
+        if (rt && rt.wait) nav = `${nav ? nav + ' · ' : ''}Working out a route…`;
+        else if (rt && !rt.fail && rt.pts.length > 0 && moving) {
           const left = Math.max(0, (rt.pts.length - rt.i) / 2);
           let len = 0;
           let px = a.x;

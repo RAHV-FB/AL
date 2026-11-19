@@ -522,7 +522,8 @@ export class Renderer {
     }
     // planned route (around a river via a ford, round a lake or wall): the remaining waypoints, then the goal
     const rt = a.route;
-    if (view.showTrails && rt && !rt.fail && rt.pts.length >= 2 && rt.i < rt.pts.length) {
+    // (only while the agent is actually on the move: a route left over after arriving is not shown)
+    if (view.showTrails && rt && !rt.fail && rt.pts.length >= 2 && rt.i < rt.pts.length && (a.vx !== 0 || a.vy !== 0)) {
       ctx.strokeStyle = 'rgba(255,214,120,0.85)';
       ctx.lineWidth = 1.6 * px;
       ctx.lineJoin = 'round';

@@ -707,6 +707,22 @@ function perceive(sim: Simulation, a: Agent, b: Agent, pw: number): void {
 }
 
 // ------------------------------------------------------------------ explore target
+/** True when (x,y) lies in an active meteor zone, or a plague zone this agent could still catch (as in think()). */
+function inDangerZone(sim: Simulation, a: Agent, x: number, y: number): boolean {
+  const ds = sim.state.disasters;
+  for (let i = 0; i < ds.length; i++) {
+    const d = ds[i];
+    if (!d.active || !(d.radius > 0)) continue;
+    if (d.kind !== 'meteor' && d.kind !== 'plague') continue;
+    if (d.kind === 'plague' && (a.infection > 0 || a.immuneTicks > 0)) continue;
+    const dx = x - d.x;
+    const dy = y - d.y;
+    const R = d.radius * 1.15 + 10;
+    if (dx * dx + dy * dy < R * R) return true;
+  }
+  return false;
+}
+
 /**
  * How lush the land around (x,y) looks: mean standing food over ±4 tiles (every 2nd tile, 25 reads) relative
  * to a well-stocked grassland tile, 0 (bare) .. 1 (lush), up to 1.5 for forest. Absolute food, not the
@@ -774,6 +790,7 @@ function pickExploreTarget(sim: Simulation, a: Agent, tribe: Tribe | undefined, 
       sc += (1 - soc) * Math.min(1, dh / 500) * 0.5 - ((1 - 0.8 * migrate) * soc * Math.max(0, dh - 350)) / 400;
     }
     sc -= dangerAt(a, tx, ty, tick) * 2;
+    if (inDangerZone(sim, a, tx, ty)) sc -= 2; // a plague or meteor zone is no place to go
     // lush-looking land (the standing food around the spot, coarsely sampled) draws the eye — mildly for a
     // scout, strongly for the hungry
     sc += (0.25 + 1.4 * need + 1.5 * migrate) * lushness(sim, tx, ty);
@@ -1197,7 +1214,9 @@ export function think(sim: Simulation, a: Agent): void {
       hunger < 0.3 ||
       tdx * tdx + tdy * tdy < 40 * 40 ||
       lushness(sim, a.x, a.y) > 0.45 ||
-      !sameRegion(sim, a.x, a.y, trek.x, trek.y) // terrain changed: the destination is cut off
+      !sameRegion(sim, a.x, a.y, trek.x, trek.y) || // terrain changed: the destination is cut off
+      inDangerZone(sim, a, trek.x, trek.y) || // a plague or meteor struck there
+      (a.route !== undefined && a.route.fail === true && a.route.gx === trek.x && a.route.gy === trek.y) // no way found
     ) {
       a.trek = undefined;
       trek = undefined;
@@ -1612,6 +1631,7 @@ export function think(sim: Simulation, a: Agent): void {
       a.targetY = exY;
       const dir = compass(exX - a.x, exY - a.y);
       const detour = !clearPath(sim, a.x, a.y, exX, exY) && sameRegion(sim, a.x, a.y, exX, exY) ? ' (the long way round, by a ford or pass)' : '';
+      if (detour && a.route && !a.route.fail && a.route.pts.length === 0) a.route = undefined; // plan the detour now
       thought =
         trek
           ? `${hl} (${pct(hunger)}%) — still trekking to greener land to the ${dir}`
@@ -1671,7 +1691,7 @@ export function think(sim: Simulation, a: Agent): void {
   a.action = action;
   a.thought = thought;
   // a planned route only serves a move toward a goal; drop it once the agent eats, rests, flees or wanders
-  if (a.route && (action === 'eat' || action === 'rest' || action === 'idle' || action === 'flee' || action === 'wander')) a.route = undefined;
+  if (a.route && (action === 'eat' || action === 'rest' || action === 'idle' || action === 'flee' || (action === 'wander' && a.targetId === NONE))) a.route = undefined;
 
   const ut = a.utilities;
   for (let k = 0; k < N_ACTIONS; k++) ut[ACTIONS[k]] = Math.round(U[k] * 1000) / 1000;
@@ -1839,6 +1859,7 @@ function actForage(sim: Simulation, a: Agent): void {
   const ti = sim.tileIndex(tx, ty);
   const onTarget = ti >= 0 && sim.tileIndex(a.x, a.y) === ti;
   if ((onTarget && here >= 0.3) || (here >= 2 && hunger > 0.35)) {
+    a.route = undefined;
     a.action = 'eat';
     a.actionTicks = 0;
     a.targetX = a.x;
@@ -2020,6 +2041,7 @@ function actCamp(sim: Simulation, a: Agent): void {
     if (a.actionTicks > 1500) a.decisionCooldown = 0;
     return;
   }
+  a.route = undefined; // at camp
   halt(a);
   if (kind === 'deposit') {
     const got = a.carried > 0 ? depositFood(sim, a) : 0;
@@ -2101,6 +2123,11 @@ function actWander(sim: Simulation, a: Agent): void {
       const ex = m.x - a.x;
       const ey = m.y - a.y;
       const d = Math.sqrt(ex * ex + ey * ey);
+      if (d > 18 && (a.route ? a.route.pts.length > 0 : !clearPath(sim, a.x, a.y, m.x, m.y)) && sameRegion(sim, a.x, a.y, m.x, m.y)) {
+        // she crossed at a ford (or went round a wall): follow her route instead of pressing into the bank
+        moveToward(sim, a, m.x, m.y, 0.5 + 0.4 * Math.min(1, (d - 18) / 60), 18);
+        return;
+      }
       if (d > 18) {
         const w = Math.min(1.5, (d - 18) / 40) * 1.5;
         dx += (ex / d) * w;

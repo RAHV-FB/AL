@@ -34,6 +34,7 @@ export function createEmptyWorld(width: number, height: number, tileSize: number
     climateMod: new Float32Array(n).fill(1),
     territory: new Int16Array(n).fill(-1),
     terrainVersion: 0,
+    navVersion: 0,
   };
 }
 

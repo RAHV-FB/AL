@@ -6,6 +6,7 @@ import { moveToward } from '../src/sim/steering';
 import { createAgent } from '../src/sim/lifecycle';
 import { randomGenes } from '../src/sim/genetics';
 import { deserializeState, serializeSim } from '../src/sim/persistence';
+import { applyIntervention } from '../src/sim/interventions';
 import { TERRAIN, type Agent, type TerrainType } from '../src/sim/types';
 
 /**
@@ -410,4 +411,78 @@ describe('route following: review regressions', () => {
     b.step();
     expect(navBudgetLeft(a)).toBe(navBudgetLeft(b));
   });
+});
+
+describe('route planning: performance regressions', () => {
+  it('every agent keeps one object shape (same keys, same order) — fresh, after routing and migrating, and after a load', () => {
+    const sim = Simulation.create({ scenario: getScenario('plague-island'), seed: 42 });
+    sim.run(2500);
+    const shapes = new Set(sim.state.agents.map((a) => Object.keys(a).join(',')));
+    expect(sim.state.agents.some((a) => a.route !== undefined)).toBe(true);
+    expect(shapes.size).toBe(1);
+    const loaded = Simulation.fromState(deserializeState(serializeSim(sim)));
+    const loadedShapes = new Set(loaded.state.agents.map((a) => Object.keys(a).join(',')));
+    expect([...loadedShapes]).toEqual([...shapes]);
+  }, 120_000);
+
+  it('repainting land as other land keeps everyone’s routes; only a change of walkability is checked', () => {
+    const sim = riverWorld();
+    const a = addAgent(sim, tileCentre(70, 20).x, tileCentre(70, 20).y);
+    const goal = tileCentre(130, 20);
+    for (let t = 0; t < 20; t++) {
+      moveToward(sim, a, goal.x, goal.y, 1, 3);
+      sim.state.tick++;
+    }
+    const before = a.route!;
+    expect(before.pts.length).toBeGreaterThan(0);
+    const nav0 = sim.state.world.navVersion ?? 0;
+    // (applied directly: stepping the sim would also run this agent's own brain)
+    applyIntervention(sim, { kind: 'paintTerrain', x: 30 * TS, y: 110 * TS, radius: 5 * TS, terrain: TERRAIN.Sand }); // grass → sand far away
+    expect(sim.state.world.navVersion ?? 0).toBe(nav0);
+    moveToward(sim, a, goal.x, goal.y, 1, 3);
+    expect(a.route).toBe(before); // same object: not re-planned
+    applyIntervention(sim, { kind: 'paintTerrain', x: 30 * TS, y: 110 * TS, radius: 3 * TS, terrain: TERRAIN.Wall }); // walkability changes, off-route
+    expect(sim.state.world.navVersion ?? 0).toBe(nav0 + 1);
+    moveToward(sim, a, goal.x, goal.y, 1, 3);
+    expect(a.route!.pts).toEqual(before.pts); // its legs were re-checked and are still clear
+  });
+
+  it('starving migrants cross on several seeds, and few starve on the way', () => {
+    for (const seed of [3, 11, 29]) {
+      const sc = { ...getScenario('eden'), populations: [], scheduled: [] };
+      const sim = Simulation.create({ scenario: sc, seed, config: { disasterRate: 0 } });
+      const w = sim.state.world;
+      for (let ty = 0; ty < w.height; ty++) {
+        for (let tx = 0; tx < w.width; tx++) {
+          const i = ty * w.width + tx;
+          const river = tx >= 95 && tx <= 104;
+          w.terrain[i] = river ? (ty >= 60 && ty <= 62 ? TERRAIN.Water : TERRAIN.DeepWater) : TERRAIN.Grass;
+          const west = tx < 95;
+          w.fertility[i] = w.baseFertility[i] = river ? 0 : west ? 0.01 : 1;
+          w.food[i] = river || west ? 0 : 10;
+        }
+      }
+      w.terrainVersion++;
+      w.navVersion = (w.navVersion ?? 0) + 1;
+      const band: Agent[] = [];
+      for (let k = 0; k < 12; k++) {
+        const p = tileCentre(40 + (k % 4) * 2, 22 + Math.floor(k / 4) * 2);
+        const a = addAgent(sim, p.x, p.y);
+        a.food = a.traits.maxFood * 0.45;
+        band.push(a);
+      }
+      const crossed = new Set<number>();
+      for (let t = 0; t < 3000; t++) {
+        sim.step();
+        for (const a of band) {
+          if (a.alive && a.x > 105 * TS) crossed.add(a.id);
+          if (a.trek) expect(a.trek.x, 'every trek heads for the lush far bank').toBeGreaterThan(95 * TS);
+        }
+      }
+      const dead = band.filter((a) => !a.alive && !crossed.has(a.id)).length;
+      console.log(`[route] seed ${seed}: ${crossed.size}/12 crossed, ${dead} starved before crossing`);
+      expect(crossed.size, `seed ${seed}`).toBeGreaterThanOrEqual(8);
+      expect(dead, `seed ${seed}`).toBeLessThanOrEqual(4);
+    }
+  }, 180_000);
 });

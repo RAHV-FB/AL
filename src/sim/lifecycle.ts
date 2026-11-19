@@ -123,6 +123,11 @@ export function createAgent(sim: Simulation, o: CreateAgentOpts): Agent {
     lastAttackerId: NONE,
     fear: 0,
     sinceMeal: 0,
+    // optional extension fields are declared up front so every agent shares one shape (one V8 hidden class):
+    // adding them later makes every agent-touching hot path polymorphic and markedly slower
+    route: undefined,
+    trek: undefined,
+    diseaseHp: undefined,
   };
 }
 
