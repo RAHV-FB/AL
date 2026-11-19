@@ -3,20 +3,24 @@
  * Batched agent drawing. Visible agents are counting-sorted into colour buckets (one per tribe,
  * then hue buckets for agents without a tribe), so at far zoom the whole population costs two
  * fills per bucket: a darker outline disc and the body. From DETAIL_ZOOM on, every agent gets its
- * own outline (so a crowd stays a pile of distinct bodies) and a few marks: a heading notch, a dot
- * while carrying food and a thin health arc while hurt. The screen pass adds an action glyph and
- * outlined labels. No glows, gradients or additive blending.
+ * own outline (so a crowd stays a pile of distinct bodies) and a few marks: a heading notch in the
+ * outline colour, a dot while carrying food and a thin health arc while clearly hurt. The screen
+ * pass adds an action glyph and outlined labels placed where they do not collide.
+ * No glows, gradients or additive blending.
  */
 import type { Simulation } from '../sim/simulation';
 import type { ActionKind, Agent } from '../sim/types';
 import { HUE_BUCKETS, PAL, bucketPalette, hueBucket, tribeColor, tribeShade } from './colors';
 
 const TAU = Math.PI * 2;
+const NO_DASH: number[] = [];
 const FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 
 /** CSS px per world unit from which agents get detail marks, action glyphs and labels. */
 export const DETAIL_ZOOM = 2.5;
-/** CSS px per world unit from which the action is written under each name. */
+/** CSS px per world unit from which names are written (while fewer than LABEL_MAX_AGENTS are on screen). */
+export const NAME_ZOOM = 3.5;
+/** CSS px per world unit from which the action is written under each name (names then show in any crowd). */
 export const ACTION_LABEL_ZOOM = 6;
 /** Names are written while fewer agents than this are on screen (and always from ACTION_LABEL_ZOOM on). */
 export const LABEL_MAX_AGENTS = 120;
@@ -209,7 +213,7 @@ export class AgentPainter {
     const px = 1 / zoom;
     const detail = zoom >= DETAIL_ZOOM;
     ctx.globalAlpha = 1;
-    ctx.setLineDash([]);
+    ctx.setLineDash(NO_DASH);
 
     if (!detail) {
       // far and mid zoom: per bucket, a darker outline disc then the body
@@ -240,29 +244,30 @@ export class AgentPainter {
         ctx.fill();
       }
     } else {
-      // heading notches, under the bodies so only the tip shows
-      ctx.fillStyle = PAL.ink;
-      ctx.beginPath();
-      for (let k = 0; k < n; k++) {
-        const a = agents[vis[k]];
-        const r = rad[k];
-        const hd = Number.isFinite(a.heading) ? a.heading : 0;
-        const c = Math.cos(hd);
-        const s = Math.sin(hd);
-        const bx = a.x + c * r * 0.7;
-        const by = a.y + s * r * 0.7;
-        const w = r * 0.42;
-        ctx.moveTo(a.x + c * r * 1.48, a.y + s * r * 1.48);
-        ctx.lineTo(bx - s * w, by + c * w);
-        ctx.lineTo(bx + s * w, by - c * w);
-        ctx.closePath();
-      }
-      ctx.fill();
-      // bodies one by one so overlapping agents stay distinct
       for (let b = 0; b < this.nb; b++) {
         const s = counts[b];
         const e = counts[b + 1];
         if (e <= s) continue;
+        // heading notches in the outline colour, under the bodies so only the tip shows
+        ctx.fillStyle = this.lines[b];
+        ctx.beginPath();
+        for (let j = s; j < e; j++) {
+          const k = order[j];
+          const a = agents[vis[k]];
+          const r = rad[k];
+          const hd = Number.isFinite(a.heading) ? a.heading : 0;
+          const c = Math.cos(hd);
+          const sn = Math.sin(hd);
+          const bx = a.x + c * r * 0.7;
+          const by = a.y + sn * r * 0.7;
+          const w = r * 0.42;
+          ctx.moveTo(a.x + c * r * 1.46, a.y + sn * r * 1.46);
+          ctx.lineTo(bx - sn * w, by + c * w);
+          ctx.lineTo(bx + sn * w, by - c * w);
+          ctx.closePath();
+        }
+        ctx.fill();
+        // bodies one by one so overlapping agents stay distinct
         ctx.fillStyle = this.fills[b];
         ctx.strokeStyle = this.lines[b];
         for (let j = s; j < e; j++) {
@@ -368,8 +373,9 @@ export class AgentPainter {
   }
 
   /**
-   * Screen-space pass (ctx in CSS px; camX/camY/zoom/vw/vh describe the camera): action glyphs and
-   * labels at close zoom, and the selected agent's label at every zoom.
+   * Screen-space pass (ctx in CSS px; camX/camY/zoom/vw/vh describe the camera): action glyphs and labels
+   * at close zoom, in the places left free (see beginLabels, reserve, drawSelectedName). `showLabels` false
+   * writes no names.
    */
   drawScreen(
     ctx: CanvasRenderingContext2D,
@@ -389,22 +395,12 @@ export class AgentPainter {
     const boxes = this.boxes;
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
-    ctx.setLineDash([]);
+    ctx.setLineDash(NO_DASH);
     ctx.globalAlpha = 1;
-    // the selected agent is always named
-    const sel = selId >= 0 ? sim.getAgent(selId) : undefined;
-    if (sel) {
-      const sx = (sel.x - camX) * zoom + hx;
-      const sy = (sel.y - camY) * zoom + hy;
-      if (sx > -80 && sx < vw + 80 && sy > -40 && sy < vh + 40) {
-        const rs = Math.max(1.6, agentRadius(sel) * zoom);
-        this.drawSelectedLabel(ctx, sel, sx, sy + rs + 7, zoom >= 1.4);
-      }
-    }
     const n = this.visN;
     if (!n || zoom < DETAIL_ZOOM) return;
     if (n < 700) this.drawGlyphs(ctx, agents, zoom, camX, camY, vw, vh, night < 0.5);
-    const names = showLabels && (this.onScreen < LABEL_MAX_AGENTS || zoom >= ACTION_LABEL_ZOOM);
+    const names = showLabels && ((zoom >= NAME_ZOOM && this.onScreen < LABEL_MAX_AGENTS) || zoom >= ACTION_LABEL_ZOOM);
     if (!names) return;
     const withAction = zoom >= ACTION_LABEL_ZOOM;
     ctx.font = `500 11px ${FONT}`;
@@ -460,6 +456,22 @@ export class AgentPainter {
     ctx.textBaseline = 'alphabetic';
   }
 
+  /**
+   * Name (and from zoom 1.4 the action) of the selected agent, at every zoom while names are on (screen
+   * space). Call it before the other labels: its place is taken first.
+   */
+  drawSelectedName(ctx: CanvasRenderingContext2D, sim: Simulation, zoom: number, camX: number, camY: number, vw: number, vh: number, showLabels: boolean, selId: number): void {
+    const sel = selId >= 0 && showLabels ? sim.getAgent(selId) : undefined;
+    if (!sel) return;
+    const sx = (sel.x - camX) * zoom + vw / 2;
+    const sy = (sel.y - camY) * zoom + vh / 2;
+    if (sx < -80 || sx > vw + 80 || sy < -40 || sy > vh + 40) return;
+    const rs = Math.max(1.6, agentRadius(sel) * zoom);
+    ctx.lineJoin = 'round';
+    ctx.globalAlpha = 1;
+    this.drawSelectedLabel(ctx, sel, sx, sy + rs * 1.1 + 8, zoom >= 1.4);
+  }
+
   private drawSelectedLabel(ctx: CanvasRenderingContext2D, a: Agent, sx: number, ty: number, withAction: boolean): void {
     const name = a.name || `Agent ${a.id}`;
     const act = withAction ? actionText(a) : null;
@@ -494,7 +506,6 @@ export class AgentPainter {
   private drawGlyphs(ctx: CanvasRenderingContext2D, agents: Agent[], zoom: number, camX: number, camY: number, vw: number, vh: number, restMarks: boolean): void {
     const hx = vw / 2;
     const hy = vh / 2;
-    const s = Math.min(8, 4.6 + zoom * 0.3);
     let eat: Path2D | null = null;
     let rest: Path2D | null = null;
     let fight: Path2D | null = null;
@@ -508,6 +519,8 @@ export class AgentPainter {
       const sy = (a.y - camY) * zoom + hy;
       if (sx < -20 || sx > vw + 20 || sy < -20 || sy > vh + 20) continue;
       const rs = this.rad[k] * zoom;
+      // glyph half-size grows a little with the body, within 4.6 to 11 px
+      const s = Math.min(11, Math.max(4.6, rs * 0.3));
       const gx = sx + rs * 0.74 + s * 0.9;
       const gy = sy - rs * 0.74 - s * 0.9;
       switch (act) {
@@ -545,11 +558,11 @@ export class AgentPainter {
           const hd = Number.isFinite(a.heading) ? a.heading : 0;
           const c = Math.cos(hd);
           const sn = Math.sin(hd);
-          for (let i = -1; i <= 1; i++) {
-            const off = i * Math.max(2.6, rs * 0.45);
+          for (let i = -1; i <= 1; i += 2) {
+            const off = i * Math.max(2.2, rs * 0.32);
             const bx = sx - c * (rs + 3) - sn * off;
             const by = sy - sn * (rs + 3) + c * off;
-            const len = i === 0 ? s * 1.5 : s * 1.05;
+            const len = s * 1.2;
             p.moveTo(bx, by);
             p.lineTo(bx - c * len, by - sn * len);
           }

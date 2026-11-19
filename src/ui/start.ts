@@ -4,6 +4,7 @@ import { DEFAULT_CONFIG } from '../sim/config';
 import { SCENARIOS } from '../sim/presets';
 import type { ScenarioDef } from '../sim/types';
 import { fill, h, icon } from './dom';
+import { plainText } from './analytics';
 
 export interface StartHandlers {
   /** The selection or seed changed: regenerate the preview (seed undefined = experiment default). */
@@ -43,18 +44,22 @@ export function parseSeed(text: string): number | undefined {
 export function buildStartScreen(handlers: StartHandlers): StartScreen {
   let selected: ScenarioDef = SCENARIOS[0];
   const rows = new Map<string, HTMLButtonElement>();
+  const entries = new Map<string, HTMLElement>();
   const list = h('div', { class: 'st-list', role: 'listbox', 'aria-label': 'Experiments' });
   for (const sc of SCENARIOS) {
     const b = h(
       'button',
       { type: 'button', class: 'st-item', role: 'option', 'aria-selected': 'false', onclick: () => pick(sc) },
       h('span', { class: 'st-item-name' }, sc.name),
-      h('span', { class: 'st-item-tag' }, sc.tagline),
+      h('span', { class: 'st-item-tag' }, plainText(sc.tagline)),
     );
     rows.set(sc.id, b);
-    list.append(b);
+    const entry = h('div', { class: 'st-entry' }, b);
+    entries.set(sc.id, entry);
+    list.append(entry);
   }
 
+  // details of the selected experiment open under its row
   const detail = h('div', { class: 'st-detail', 'aria-live': 'polite' });
   const seedInput = h('input', { type: 'text', inputmode: 'numeric', class: 'text seed-input', maxlength: 10, 'aria-label': 'Seed', id: 'st-seed', autocomplete: 'off', spellcheck: 'false' });
   const seedNote = h('p', { class: 'st-note' });
@@ -119,10 +124,9 @@ export function buildStartScreen(handlers: StartHandlers): StartScreen {
     const look = (sc.lookFor ?? []).slice(0, 4);
     fill(
       detail,
-      h('h2', { class: 'st-name' }, sc.name),
-      sc.description ? h('p', { class: 'st-desc' }, sc.description) : null,
+      sc.description ? h('p', { class: 'st-desc' }, plainText(sc.description)) : null,
       look.length ? h('h3', null, 'What to watch for') : null,
-      look.length ? h('ul', { class: 'st-look' }, ...look.map((l) => h('li', null, l))) : null,
+      look.length ? h('ul', { class: 'st-look' }, ...look.map((l) => h('li', null, plainText(l)))) : null,
     );
     seedInput.placeholder = `${defaultSeedOf(sc)} (default)`;
   };
@@ -133,8 +137,11 @@ export function buildStartScreen(handlers: StartHandlers): StartScreen {
       const on = id === sc.id;
       b.classList.toggle('on', on);
       b.setAttribute('aria-selected', String(on));
+      entries.get(id)?.classList.toggle('on', on);
     }
     paintDetail();
+    entries.get(sc.id)?.append(detail);
+    window.setTimeout(() => entries.get(sc.id)?.scrollIntoView({ block: 'nearest' }), 0);
     if (notify) {
       window.clearTimeout(seedTimer);
       const v = readSeed();
@@ -163,7 +170,7 @@ export function buildStartScreen(handlers: StartHandlers): StartScreen {
       h('div', { class: 'st-brand' }, icon('logo', 22), h('h1', null, 'Artificial Life')),
       h('p', { class: 'st-lead' }, 'A simulated world where creatures with genes and needs forage, raise families, form tribes, fight and evolve.'),
     ),
-    h('div', { class: 'st-scroll' }, h('h3', { class: 'st-label' }, 'Experiments'), list, detail),
+    h('div', { class: 'st-scroll' }, h('h3', { class: 'st-label' }, 'Experiments'), list),
     h(
       'div',
       { class: 'st-foot' },
@@ -188,7 +195,6 @@ export function buildStartScreen(handlers: StartHandlers): StartScreen {
       paintSeedNote();
       pick(sc, false);
       backBtn.style.display = canGoBack ? '' : 'none';
-      window.setTimeout(() => rows.get(sc.id)?.scrollIntoView({ block: 'nearest' }), 0);
     },
     get selected() {
       return selected;

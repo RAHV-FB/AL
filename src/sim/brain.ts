@@ -19,7 +19,10 @@
  *      or drive it off a patch I need when food is scarce; chase it off my tribe's land near camp;
  *      tribal war or a personal feud; join a friend's fight) is weighed by the odds (combat power incl.
  *      the band backing it vs. my allies) against my boldness (aggression gene × aggressionBias, combat
- *      skill, health), then by temperament. Tribes at war send bold members to raid the enemy camp.
+ *      skill, health), then by temperament. Tribes at war send bold members to raid the enemy camp: a raid is
+ *      valued by the walking distance of the route there (walkDistance, across a ford if need be), and a raider
+ *      that sets out commits to a raid trek (Agent.trek kind 'raid'): it keeps marching through detours, sleeps
+ *      where it is at night, and turns for home with the loot, or when hurt or the war is over (continuingRaid).
  *   5. a utility for every ActionKind (traits × config biases × skills × role × tribe logistics),
  *      small rng noise + hysteresis, argmax → action (choices whose target cannot be walked to are
  *      dropped), target, readable thought, a.utilities, a.decisionCooldown, smoothed a.fear.
@@ -96,6 +99,8 @@ export const RAID_TREK_TICKS = 2400;
 const RAID_GIVE_UP_HP = 0.45;
 /** Extra utility that keeps a raider on the march once it has set out. */
 const RAID_COMMIT = 0.25;
+/** A raider on the march only finds out that the enemy store is empty from this close to the camp. */
+const RAID_SEE_STORE = 100;
 /** Genetic distance (0..1) below which another agent looks like "one of us" (hostility toward it fades). */
 const ALIKE_DIST = 0.3;
 /** Distance a fleeing agent aims for (its escape point must be open ground). */
@@ -294,6 +299,16 @@ function liveTribe(sim: Simulation, a: Agent): Tribe | undefined {
 function onRaid(b: Agent): boolean {
   const tk = b.trek;
   return tk !== undefined && tk.kind === 'raid';
+}
+
+/**
+ * Which leg of a raid the agent is on (for the inspector): 'out' to the camp of the enemy tribe a.trek.tribe,
+ * 'home' back to its own camp (with loot, or after giving up), or null when it is not on a raid.
+ */
+export function raidLeg(a: Agent): 'out' | 'home' | null {
+  const tk = a.trek;
+  if (tk === undefined || tk.kind !== 'raid') return null;
+  return tk.tribe === a.tribeId ? 'home' : 'out';
 }
 
 /** "the Varn-kin", but scenario names such as "The Wolf Pack" are used as they are. */
@@ -838,7 +853,7 @@ function computeWalkField(sim: Simulation, src: number, out: Float32Array): void
 }
 
 /** Walking distance (world units) from (x,y) to the camp of tribe t by the best route; Infinity when out of reach. */
-function walkDistance(sim: Simulation, t: Tribe, x: number, y: number): number {
+export function walkDistance(sim: Simulation, t: Tribe, x: number, y: number): number {
   const at = sim.tileIndex(x, y);
   if (at < 0) return Infinity;
   const w = sim.state.world;
@@ -1002,8 +1017,9 @@ function targetReachable(sim: Simulation, a: Agent, k: number, tribe: Tribe | un
 
 /**
  * The tribe whose camp this raider is heading for, or null once the raid is over. A raid trek has two legs.
- * Out (trek.tribe is the enemy): the march goes on until the raider is hurt or loaded, the war ends, the enemy
- * store is empty, the camp is cut off or no way there is found, or the trek runs out; then it turns for home.
+ * Out (trek.tribe is the enemy): the march goes on until the raider is hurt or loaded, the war ends, it comes
+ * close enough to see that the enemy store is empty, the camp is cut off or no way there is found, or the trek
+ * runs out; then it turns for home.
  * Home (trek.tribe is the raider's own tribe; plunder starts this leg with the loot): the raider walks back until
  * it is near camp, the store there has no room for its load, the way is lost or the trek runs out. Members away
  * on a raid, either way, do not drag the camp after them (social.ts). The trek point follows the camp it names.
@@ -1028,13 +1044,16 @@ function continuingRaid(
       hp < RAID_GIVE_UP_HP ||
       a.carried >= cap * 0.5 ||
       !((tribe.relations[et.id] ?? 0) < SOCIAL_TUNING.warHostile) ||
-      !(et.stockpile > 0.5) ||
       !Number.isFinite(et.homeX) ||
       !Number.isFinite(et.homeY);
     if (!over) {
       const e = et as Tribe;
       const rt = a.route;
+      const ex = e.homeX - a.x;
+      const ey = e.homeY - a.y;
       over =
+        // an empty store is only found out on arrival (the store may fill again while the raiders are on the way)
+        (!(e.stockpile > 0.5) && ex * ex + ey * ey < RAID_SEE_STORE * RAID_SEE_STORE) ||
         !sameRegion(sim, a.x, a.y, e.homeX, e.homeY) ||
         (rt !== undefined && rt.fail === true && Math.abs(rt.gx - e.homeX) < 40 && Math.abs(rt.gy - e.homeY) < 40);
       if (!over) {
@@ -1487,12 +1506,13 @@ export function think(sim: Simulation, a: Agent): void {
       if (!(rel < SOCIAL_TUNING.warHostile)) continue;
       const et = sim.getTribe(Number(key));
       if (!et || et === tribe || et.extinctTick !== -1) continue;
-      // nothing to plunder (raidStockpile takes > 0.5): a raider sent to an empty store re-chose the raid
-      // every tick on arrival and stood rooted in the enemy camp
-      if (!(et.stockpile > 0.5)) continue;
       const dx = et.homeX - a.x;
       const dy = et.homeY - a.y;
-      if (!(dx * dx + dy * dy < RAID_RANGE * RAID_RANGE)) continue; // the walk is never shorter than the line
+      const d2 = dx * dx + dy * dy;
+      // nothing to plunder (raidStockpile takes > 0.5): a raider sent to an empty store re-chose the raid every
+      // tick on arrival and stood rooted in the enemy camp. A raider already on the march only finds out there.
+      if (!(et.stockpile > 0.5) && (et !== raidTrek || d2 < RAID_SEE_STORE * RAID_SEE_STORE)) continue;
+      if (!(d2 < RAID_RANGE * RAID_RANGE)) continue; // the walk is never shorter than the line
       const d = walkDistance(sim, et, a.x, a.y);
       if (!(d < RAID_RANGE)) continue;
       const v = (-rel * (0.35 + 0.65 * clamp01(et.stockpile / 80))) / (1 + d / 400);
@@ -1513,9 +1533,11 @@ export function think(sim: Simulation, a: Agent): void {
           Number.isFinite(a.targetX) &&
           Number.isFinite(a.targetY) &&
           (a.targetX - raidTarget.homeX) * (a.targetX - raidTarget.homeX) + (a.targetY - raidTarget.homeY) * (a.targetY - raidTarget.homeY) < 40 * 40);
+      // a parent with a young child close by is less keen to leave for days (some of the tribe stays home)
       const raidU =
         prowl +
-        0.9 * rv * Math.min(1.5, aggEff) * (role === 'warrior' ? 1.3 : 1) * (0.7 + 0.1 * Math.min(3, P.allyN)) * (stockLow ? 1.3 : 1) * (0.7 + 0.6 * hunger) +
+        0.9 * rv * Math.min(1.5, aggEff) * (role === 'warrior' ? 1.3 : 1) * (0.7 + 0.1 * Math.min(3, P.allyN)) * (stockLow ? 1.3 : 1) * (0.7 + 0.6 * hunger) *
+          (kids.length > 0 && !onTheMarch ? 0.5 : 1) +
         (onTheMarch ? RAID_COMMIT : 0);
       if (raidU > U[I_EXPLORE]) U[I_EXPLORE] = raidU;
       else raidTarget = null;
@@ -1701,9 +1723,9 @@ export function think(sim: Simulation, a: Agent): void {
       a.targetX = fX;
       a.targetY = fY;
       const terr = terrainName(sim, fX, fY);
-      if (gatherDrive > foodDrive && tribe) thought = `Gathering food for ${theName(tribe)} stockpile at a ${terr} patch`;
+      if (gatherDrive > foodDrive && tribe) thought = `Gathering food for the stockpile at a ${terr} patch`;
       else
-        thought = `${hl} (${pct(hunger)}%) — ${hunger >= 0.7 ? 'racing to' : 'heading to'} ${fFromMemory ? 'remembered ' : ''}${terr} patch${
+        thought = `${hl} (${pct(hunger)}%), ${hunger >= 0.7 ? 'hurrying' : 'heading'} to a ${fFromMemory ? 'remembered ' : ''}${terr} patch${
           fDist > 60 ? ` ${Math.round(fDist)} away` : ''
         }`;
       break;
@@ -1714,7 +1736,7 @@ export function think(sim: Simulation, a: Agent): void {
       const terr = terrainName(sim, a.x, a.y);
       thought =
         hunger < 0.1 && tribe
-          ? `Full — gathering food for the tribe (${Math.round(a.carried)}/${Math.round(cap)})`
+          ? `Full, gathering food for the tribe (${Math.round(a.carried)}/${Math.round(cap)})`
           : `Eating at a ${terr} patch (${hl.toLowerCase()}, ${pct(hunger)}%)`;
       if (hereFood >= 4) rememberFood(a, a.x, a.y, hereFood, tick);
       break;
@@ -1724,11 +1746,13 @@ export function think(sim: Simulation, a: Agent): void {
       else if (sick > 0) thought = 'Feeling sick, resting to recover';
       else if (hp < 0.5) thought = `Wounded (${pct(hp)}% health), resting`;
       else if (night > 0.5)
-        thought = raidTrek
-          ? `Night, sleeping on the way to raid ${theName(raidTrek)}`
-          : tribe && campDist < 60
-            ? 'Night, sleeping at camp'
-            : 'Night, sleeping';
+        thought = homeward
+          ? 'Night, sleeping on the way home from a raid'
+          : raidTrek
+            ? `Night, sleeping on the way to raid ${theName(raidTrek)}`
+            : tribe && campDist < 60
+              ? 'Night, sleeping at camp'
+              : 'Night, sleeping';
       else if (chill > 0.5) thought = 'Cold, huddling to save energy';
       else thought = `Tired (energy ${pct(a.energy)}%), resting`;
       break;
@@ -1776,11 +1800,11 @@ export function think(sim: Simulation, a: Agent): void {
       if (P.threat) {
         a.targetId = P.threat.id;
         const ratio = combatPower(P.threat) / P.myPow;
-        thought = `${fear > 0.6 ? 'Terrified' : 'Afraid'} of ${P.threat.name}${P.threat.id === a.lastAttackerId ? ' (attacked me)' : ''}${
-          ratio > 1.5 ? ', far stronger' : ''
-        } — fleeing${towardCamp ? ' toward camp' : ''}`;
+        thought = `${fear > 0.6 ? 'Terrified, fleeing' : 'Fleeing'}${towardCamp ? ' back to camp' : ''} from ${P.threat.name}${
+          ratio > 1.5 ? ' (much stronger)' : ''
+        }${P.threat.id === a.lastAttackerId ? ', who attacked me' : ''}`;
       } else {
-        thought = `Fleeing the ${zoneKind === 'plague' ? 'plague zone' : zoneKind === 'meteor' ? 'meteor strike' : 'danger'}`;
+        thought = zoneKind === 'plague' ? 'Fleeing the plague zone' : zoneKind === 'meteor' ? 'Fleeing the meteor strike' : 'Fleeing danger';
       }
       break;
     }
@@ -1793,11 +1817,11 @@ export function think(sim: Simulation, a: Agent): void {
       else if (attackWhy === 2) thought = `Defending ${defendChild ? 'my child ' : ''}${defended ? defended.name : 'a friend'} from ${t.name}`;
       else if (attackWhy === 3)
         thought =
-          tt && tribe && (tribe.relations[tt.id] ?? 0) < SOCIAL_TUNING.warHostile ? `At war — attacking ${t.name}${of}` : `Settling a score with ${t.name}`;
+          tt && tribe && (tribe.relations[tt.id] ?? 0) < SOCIAL_TUNING.warHostile ? `At war, attacking ${t.name}${of}` : `Settling a score with ${t.name}`;
       else if (attackWhy === 5) thought = `Driving ${t.name}${of} off our land`;
-      else if (attackWhy === 6) thought = `${hl} — fighting ${t.name}${of} for a scarce food patch`;
+      else if (attackWhy === 6) thought = `${hl}, fighting ${t.name}${of} over a scarce food patch`;
       else if (attackWhy === 7) thought = `Joining the fight against ${t.name}${of}`;
-      else thought = t.carried > 1 ? `${hl} and aggressive — robbing ${t.name}${of} of their food` : `${hl} and aggressive — hunting ${t.name}${of}`;
+      else thought = t.carried > 1 ? `${hl} and aggressive, robbing ${t.name}${of} of their food` : `${hl} and aggressive, hunting ${t.name}${of}`;
       break;
     }
     case I_SHARE: {
@@ -1863,7 +1887,7 @@ export function think(sim: Simulation, a: Agent): void {
       const tb = tribe as Tribe;
       a.targetX = tb.homeX;
       a.targetY = tb.homeY;
-      thought = `${hl} (${pct(hunger)}%) — taking food from ${theName(tb)} stockpile (${Math.round(tb.stockpile)})`;
+      thought = `${hl} (${pct(hunger)}%), taking food from the stockpile of ${theName(tb)} (${Math.round(tb.stockpile)} stored)`;
       break;
     }
     case I_EXPLORE: {
@@ -1895,7 +1919,7 @@ export function think(sim: Simulation, a: Agent): void {
         exY = prevTY;
       } else if (!pickExploreTarget(sim, a, tribe, soc, tick, migrateDrive)) {
         action = 'wander';
-        thought = 'Restless — wandering';
+        thought = 'Restless, wandering';
         break;
       }
       // a migrant commits to the destination it picked — if it really looks like greener land
@@ -1903,20 +1927,20 @@ export function think(sim: Simulation, a: Agent): void {
       a.targetX = exX;
       a.targetY = exY;
       const dir = compass(exX - a.x, exY - a.y);
-      const detour = !clearPath(sim, a.x, a.y, exX, exY) && sameRegion(sim, a.x, a.y, exX, exY) ? ' (the long way round, by a ford or pass)' : '';
+      const detour = !clearPath(sim, a.x, a.y, exX, exY) && sameRegion(sim, a.x, a.y, exX, exY) ? ', the long way round by a ford or pass' : '';
       if (detour && a.route && !a.route.fail && a.route.pts.length === 0) a.route = undefined; // plan the detour now
       thought =
         trek
-          ? `${hl} (${pct(hunger)}%) — still trekking to greener land to the ${dir}`
+          ? `${hl} (${pct(hunger)}%), still trekking ${dir} to greener land`
           : a.trek
-          ? `${hl} (${pct(hunger)}%) and the land here is grazed bare — moving on to greener land to the ${dir}`
-          : migrateDrive > 0.3
-          ? `${hl} (${pct(hunger)}%) and the land here is grazed bare — searching ${dir} for greener land`
-          : !haveFoodTarget && hunger > 0.25
-          ? `${hl} (${pct(hunger)}%), no food in sight — searching ${dir}`
-          : prowl > 0.12
-            ? `Prowling ${dir} in search of prey`
-            : `Restless — exploring to the ${dir}`;
+            ? `${hl} (${pct(hunger)}%) and the land here is grazed bare, moving ${dir} to greener land`
+            : migrateDrive > 0.3
+              ? `${hl} (${pct(hunger)}%) and the land here is grazed bare, searching ${dir} for greener land`
+              : !haveFoodTarget && hunger > 0.25
+                ? `${hl} (${pct(hunger)}%) with no food in sight, searching ${dir}`
+                : prowl > 0.12
+                  ? `Prowling ${dir} for prey`
+                  : `Restless, exploring ${dir}`;
       thought += detour;
       break;
     }
@@ -1957,7 +1981,7 @@ export function think(sim: Simulation, a: Agent): void {
         ay += (dy / d) * mem[i].value;
       }
       if (ax !== 0 || ay !== 0) a.heading = Math.atan2(ay, ax);
-      thought = 'Uneasy — avoiding a dangerous place';
+      thought = 'Uneasy, avoiding a dangerous place';
     }
   }
 
@@ -2086,7 +2110,7 @@ function actEat(sim: Simulation, a: Agent): void {
       a.targetX = fX;
       a.targetY = fY;
       a.actionTicks = 0;
-      a.thought = 'Patch grazed bare — moving to the next one';
+      a.thought = 'Patch grazed bare, moving to the next one';
       return;
     }
     forgetFoodNear(a, a.x, a.y);
@@ -2138,7 +2162,7 @@ function actForage(sim: Simulation, a: Agent): void {
     a.actionTicks = 0;
     a.targetX = a.x;
     a.targetY = a.y;
-    a.thought = onTarget ? `Arrived — eating at a ${terrainName(sim, a.x, a.y)} patch` : 'Grabbing a bite on the way';
+    a.thought = onTarget ? `Arrived, eating at a ${terrainName(sim, a.x, a.y)} patch` : 'Grabbing a bite on the way';
     actEat(sim, a);
     return;
   }
@@ -2341,7 +2365,7 @@ function actCamp(sim: Simulation, a: Agent): void {
     if (sim.config.dayNight && sim.state.env.daylight < 0.35) {
       a.action = 'rest';
       a.actionTicks = 0;
-      a.thought = 'Home at camp — sleeping';
+      a.thought = 'Home at camp, sleeping';
     } else a.decisionCooldown = 0;
   }
 }

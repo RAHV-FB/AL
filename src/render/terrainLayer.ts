@@ -41,10 +41,18 @@ const LEVELS = [16, 32, 64, 128];
 const CHUNK_PX = 512;
 const DIRECT_FROM = 128;
 /** Per-frame time for repainting cached canvases and painting new chunks (ms). */
-const BUDGET_MS = 4;
+const BUDGET_MS = 3;
+/**
+ * Per-frame pixel budget for the same work, in 512x512 canvas equivalents. The browser rasterises
+ * canvas drawing later (when the canvas is drawn), so the time budget alone does not see that cost.
+ */
+const BUDGET_AREA = 1.25;
+const AREA_UNIT = CHUNK_PX * CHUNK_PX;
 const CACHE_LIMIT = 160 * 1024 * 1024;
 const HALF_PI = Math.PI / 2;
 const KEY_VALID = 1 << 24;
+/** Key bits that change only with terrain edits: type, elevation band, corner and shore masks. */
+const KEY_STATIC = 7 | (7 << 8) | (15 << 11) | (15 << 15);
 
 const DEEP = TERRAIN.DeepWater;
 const WATER = TERRAIN.Water;
@@ -108,12 +116,12 @@ const SEASONS: SeasonPal[] = [
     shrub: [104, 118, 70],
   },
   {
-    grass: [128, 126, 82],
-    grassBare: [144, 126, 94],
-    forest: [86, 90, 60],
-    forestBare: [108, 96, 72],
-    tuft: [112, 108, 66],
-    tuftLight: [158, 146, 100],
+    grass: [120, 124, 86],
+    grassBare: [140, 124, 96],
+    forest: [80, 88, 62],
+    forestBare: [106, 96, 74],
+    tuft: [104, 108, 70],
+    tuftLight: [150, 148, 106],
     crown: [122, 106, 66],
     crownShade: [78, 68, 46],
     shrub: [120, 112, 72],
@@ -140,7 +148,7 @@ const C_ROCK_HIGH: RGB = [156, 151, 142];
 const C_WALL: RGB = [98, 92, 84];
 const C_DRY: RGB = [150, 133, 98];
 
-const CSS_SHORE = 'rgba(160,190,204,0.8)';
+const CSS_SHORE = 'rgba(178,204,216,0.9)';
 const CSS_SAND_DARK = 'rgb(160,143,104)';
 const CSS_SAND_LIGHT = 'rgb(206,192,154)';
 const CSS_DESERT_DARK = 'rgb(140,118,84)';
@@ -189,6 +197,48 @@ for (let p = 0; p < 16; p++) {
   PERMS.push(Uint8Array.from(a));
 }
 const TREE_SLOTS = [0.3, 0.3, 0.7, 0.38, 0.42, 0.72];
+// grass blades as [base dx, tip dx, tip dy] in units of the tuft height (the centre blade is drawn lighter)
+const BLADES = [-0.12, -0.58, -0.82, 0.12, 0.6, -0.76];
+const BLADES_FINE = [-0.14, -0.64, -0.66, -0.06, -0.3, -0.98, 0.06, 0.34, -0.94, 0.14, 0.68, -0.62];
+
+/** Tile detail drawn by paintDetail: terrain, ground keys (food level) and corner masks of a tile grid. */
+interface TileSrc {
+  terr: Uint8Array;
+  gkey: Uint16Array;
+  corner: Uint8Array;
+  W: number;
+  H: number;
+}
+
+// Sprite atlas: the detail of an interior tile (no rounded corners) is pre-drawn once per level and
+// season palette for every terrain from sand to rock, food level 0..7 and SPRITE_VARIANTS layouts.
+const SPRITE_VARIANTS = 4;
+const SPRITE_COLS = 8 * SPRITE_VARIANTS;
+const SPRITE_ROWS = ROCK - SAND + 1;
+const SPRITE_SRC: TileSrc = (() => {
+  const n = SPRITE_COLS * SPRITE_ROWS;
+  const terr = new Uint8Array(n);
+  const gkey = new Uint16Array(n);
+  for (let r = 0; r < SPRITE_ROWS; r++) {
+    for (let c = 0; c < SPRITE_COLS; c++) {
+      const t = SAND + r;
+      const q = (c / SPRITE_VARIANTS) | 0;
+      terr[r * SPRITE_COLS + c] = t;
+      gkey[r * SPRITE_COLS + c] = t | (q << 3);
+    }
+  }
+  return { terr, gkey, corner: new Uint8Array(n), W: SPRITE_COLS, H: SPRITE_ROWS };
+})();
+
+/**
+ * Sprites of one level, one small canvas per sprite: drawing from a canvas that was just written
+ * makes the browser copy all of it, so one large shared atlas would be copied for every new sprite.
+ */
+interface Atlas {
+  cells: (HTMLCanvasElement | undefined)[];
+  /** Palette version each sprite was drawn with (-1 = empty). Sprites are drawn when first needed. */
+  cellPal: Int32Array;
+}
 
 // ------------------------------------------------------------------ cached canvases
 
@@ -253,6 +303,9 @@ export class TerrainLayer {
   private overview: Surface | null = null;
   private ovL = PX;
   private chunks = new Map<number, Surface>();
+  private atlases = new Map<number, Atlas>();
+  private list3 = new Int32Array(1024);
+  private one = new Int32Array(1);
   private bytes = 0;
   private pool: HTMLCanvasElement[] = [];
   // scratch
@@ -263,6 +316,10 @@ export class TerrainLayer {
   private cuts = new Float64Array(1024);
   private frame = 0;
   private deadline = 0;
+  /** Painted area this frame, in AREA_UNIT. */
+  private area = 0;
+  private ovSynced = 0;
+  private areaBudget = BUDGET_AREA;
   /** Sim tick of the last vegetation update (-1 = never). */
   vegTick = -1;
   /** Bumped whenever the overview's pixels change (the minimap redraws its thumbnail). */
@@ -328,7 +385,7 @@ export class TerrainLayer {
     this.computeStatic(world);
     this.computeKeys(world, this.cap);
     if (fresh) {
-      this.ensurePalette(undefined, true);
+      if (this.palKey < 0) this.ensurePalette(undefined, true);
       this.paintFull(this.overview!);
     }
     return true;
@@ -462,10 +519,10 @@ export class TerrainLayer {
         break;
       case SAND:
         mix(C_SAND, C_SAND, 0, out);
-        break;
+        return out;
       case DESERT:
         mix(C_DESERT, C_DESERT, 0, out);
-        break;
+        return out;
       case ROCK:
         mix(C_ROCK, C_ROCK_HIGH, b / 7, out);
         return out;
@@ -479,7 +536,7 @@ export class TerrainLayer {
       out[1] += (C_DRY[1] - out[1]) * k;
       out[2] += (C_DRY[2] - out[2]) * k;
     }
-    const br = 0.95 + b * 0.014;
+    const br = 0.965 + b * 0.01;
     out[0] *= br;
     out[1] *= br;
     out[2] *= br;
@@ -501,12 +558,12 @@ export class TerrainLayer {
     const prog = env ? Math.max(0, Math.min(1, env.seasonProgress || 0)) : 0;
     let blend = (prog - 0.7) / 0.3;
     blend = blend < 0 ? 0 : blend > 1 ? 1 : blend * blend * (3 - 2 * blend);
-    const step = Math.round(blend * 4);
+    const step = Math.round(blend * 2);
     const key = season * 8 + step;
     if (!force && key === this.palKey) return false;
     this.palKey = key;
     this.palVer++;
-    this.pal = step === 0 ? SEASONS[season] : mixPal(SEASONS[season], SEASONS[(season + 1) & 3], step / 4);
+    this.pal = step === 0 ? SEASONS[season] : mixPal(SEASONS[season], SEASONS[(season + 1) & 3], step / 2);
     this.cssCache.fill(undefined);
     const p = this.pal;
     this.tuftCss = css(p.tuft);
@@ -541,18 +598,19 @@ export class TerrainLayer {
     this.vegTick = tick;
     this.cap = cap;
     this.computeKeys(world, cap);
-    if (palChanged && this.overview) {
-      // the overview must stay complete (minimap, fallback): repaint it now
-      this.paintFull(this.overview);
-    }
   }
 
   // ---------------------------------------------------------------- painting
 
   /** Repaint a whole surface. */
+  private budgetLeft(): boolean {
+    return this.area < this.areaBudget && performance.now() < this.deadline;
+  }
+
   private paintFull(s: Surface): void {
     const ctx = s.ctx;
     const L = s.L;
+    this.area += (s.tw * s.th * L * L) / AREA_UNIT;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
@@ -602,12 +660,12 @@ export class TerrainLayer {
    */
   private syncSurface(s: Surface, force: boolean): boolean {
     if (s.pal !== this.palVer) {
-      if (!force && s.pal >= 0 && performance.now() > this.deadline) return false;
+      if (!force && s.pal >= 0 && !this.budgetLeft()) return false;
       this.paintFull(s);
       return true;
     }
     if (s.ver === this.keysVer) return true;
-    if (!force && performance.now() > this.deadline) return false;
+    if (!force && !this.budgetLeft()) return false;
     const W = this.W;
     const H = this.H;
     const keys = this.keys;
@@ -622,13 +680,17 @@ export class TerrainLayer {
     const sv = ++this.stampVal;
     let list = this.scratch(64);
     let n = 0;
+    // at most `cap` changed tiles per call; the rest are found again on the next call
+    const cap = s === this.overview ? (force ? 2400 : 600) : 1 << 30;
+    let changed = 0;
+    let incomplete = false;
     const add = (i: number, x: number, y: number) => {
       if (x < x0 || x >= x1 || y < y0 || y >= y1 || stamp[i] === sv) return;
       stamp[i] = sv;
       if (n >= list.length) list = this.growScratch(n * 2);
       list[n++] = i;
     };
-    for (let yy = -1; yy <= s.th; yy++) {
+    for (let yy = -1; yy <= s.th && !incomplete; yy++) {
       const y = y0 + yy;
       if (y < 0 || y >= H) continue;
       const row = y * W;
@@ -638,17 +700,34 @@ export class TerrainLayer {
         if (x < 0 || x >= W) continue;
         const i = row + x;
         const k = keys[i];
-        if (sk[srow + xx] === k) continue;
+        const was = sk[srow + xx];
+        if (was === k) continue;
+        if (changed >= cap) {
+          incomplete = true;
+          break;
+        }
+        changed++;
         sk[srow + xx] = k;
         add(i, x, y);
-        // neighbours whose rounded corners are filled with this tile's colour
-        if (x > 0 && corner[i - 1] & 10) add(i - 1, x - 1, y);
-        if (x < W - 1 && corner[i + 1] & 5) add(i + 1, x + 1, y);
+        if ((was ^ k) & KEY_STATIC) {
+          // a terrain edit: neighbours' shore lines and wall outlines depend on this tile too
+          for (let dy = -1; dy <= 1; dy++) {
+            for (let dx = -1; dx <= 1; dx++) {
+              const nx = x + dx;
+              const ny = y + dy;
+              if ((dx || dy) && nx >= 0 && ny >= 0 && nx < W && ny < H) add(ny * W + nx, nx, ny);
+            }
+          }
+        } else {
+          // food or dryness: neighbours whose rounded corners are filled with this tile's colour
+          if (x > 0 && corner[i - 1] & 10) add(i - 1, x - 1, y);
+          if (x < W - 1 && corner[i + 1] & 5) add(i + 1, x + 1, y);
+        }
       }
     }
-    s.ver = this.keysVer;
+    if (!incomplete) s.ver = this.keysVer;
     if (n === 0) return true;
-    if (n > Math.min(1200, s.tw * s.th * 0.35)) {
+    if (n > s.tw * s.th * 0.35) {
       this.paintFull(s);
       return true;
     }
@@ -660,6 +739,7 @@ export class TerrainLayer {
   private paintDirty(s: Surface, list: Int32Array, n: number): void {
     const ctx = s.ctx;
     const L = s.L;
+    this.area += (n * L * L) / AREA_UNIT;
     const W = this.W;
     const H = this.H;
     ctx.save();
@@ -723,6 +803,35 @@ export class TerrainLayer {
     const terr = this.world!.terrain;
     const corner = this.corner;
     const gkey = this.gkey;
+    // ---- detail of interior tiles from the sprite atlas (cached levels); the rest is drawn as vectors below
+    let vlist = list;
+    let vn = n;
+    if (S >= 12 && S <= DIRECT_FROM && S === Math.round(S)) {
+      const atlas = this.atlas(S);
+      const cellPal = atlas.cellPal;
+      const pv = this.palVer;
+      if (this.list3.length < n) this.list3 = new Int32Array(Math.max(n, this.list3.length * 2));
+      vlist = this.list3;
+      vn = 0;
+      for (let k = 0; k < n; k++) {
+        const i = list[k];
+        const t = terr[i];
+        if (t < SAND || t > ROCK || corner[i]) {
+          vlist[vn++] = i;
+          continue;
+        }
+        const q = (gkey[i] >> 3) & 7;
+        if (t === GRASS && q === 0) continue;
+        const x = i % W;
+        const y = (i - x) / W;
+        const v = (hash3(x, y, 5) * SPRITE_VARIANTS) | 0;
+        const col = q * SPRITE_VARIANTS + v;
+        const row = t - SAND;
+        const cell = row * SPRITE_COLS + col;
+        if (cellPal[cell] !== pv) this.paintSprite(atlas, S, cell);
+        ctx.drawImage(atlas.cells[cell]!, x, y, 1, 1);
+      }
+    }
     // ---- rounded corners, batched by fill colour
     let nc = 0;
     let cuts = this.cuts;
@@ -844,7 +953,7 @@ export class TerrainLayer {
         }
       }
       if (any) {
-        const lw = Math.max(0.9, Math.min(2.2, S * 0.045));
+        const lw = Math.max(1, Math.min(3, S * 0.055));
         ctx.lineWidth = lw / S;
         ctx.lineCap = 'round';
         ctx.lineJoin = 'round';
@@ -853,15 +962,45 @@ export class TerrainLayer {
       }
     }
     if (S < 12) return;
-    this.paintDetail(ctx, list, n, S);
+    this.paintDetail(ctx, vlist, vn, S, { terr, gkey, corner, W, H: this.H });
+  }
+
+  /** The sprites for L px per tile (each drawn on demand by paintSprite). */
+  private atlas(L: number): Atlas {
+    let a = this.atlases.get(L);
+    if (!a) {
+      a = { cells: new Array(SPRITE_COLS * SPRITE_ROWS), cellPal: new Int32Array(SPRITE_COLS * SPRITE_ROWS).fill(-1) };
+      this.atlases.set(L, a);
+    }
+    return a;
+  }
+
+  /** Draw one sprite with the current palette. */
+  private paintSprite(a: Atlas, L: number, cell: number): void {
+    let c = a.cells[cell];
+    if (!c) {
+      c = makeCanvas(L, L);
+      a.cells[cell] = c;
+    }
+    const ctx = c.getContext('2d')!;
+    const col = cell % SPRITE_COLS;
+    const row = (cell - col) / SPRITE_COLS;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, L, L);
+    // sprite tile (col, row) of SPRITE_SRC maps onto this canvas
+    ctx.setTransform(L, 0, 0, L, -col * L, -row * L);
+    this.one[0] = cell;
+    this.paintDetail(ctx, this.one, 1, L, SPRITE_SRC);
+    a.cellPal[cell] = this.palVer;
+    this.area += (L * L) / AREA_UNIT;
   }
 
   /** Plants, tree crowns, stones, speckles and wall blocks (S >= 12 device px per tile). */
-  private paintDetail(ctx: CanvasRenderingContext2D, list: Int32Array, n: number, S: number): void {
-    const W = this.W;
-    const terr = this.world!.terrain;
-    const corner = this.corner;
-    const gkey = this.gkey;
+  private paintDetail(ctx: CanvasRenderingContext2D, list: Int32Array, n: number, S: number, src: TileSrc): void {
+    const W = src.W;
+    const terr = src.terr;
+    const corner = src.corner;
+    const gkey = src.gkey;
     const lod = S < 28 ? 1 : S < 80 ? 2 : 3;
     const px = 1 / S;
     // is (u,v) with radius r clear of the tile's rounded-off corners?
@@ -999,7 +1138,7 @@ export class TerrainLayer {
           const y = (i - x) / W;
           const m = corner[i];
           const perm = PERMS[(hash3(x, y, 3) * 16) | 0];
-          const sz = 0.1 + q * 0.012;
+          const sz = 0.11 + q * 0.014;
           for (let j = 0; j < q; j++) {
             const c = perm[j];
             const cu = c % 3;
@@ -1014,19 +1153,20 @@ export class TerrainLayer {
               continue;
             }
             const h = sz * (0.9 + hash3(x, y, 90 + j) * 0.3);
-            const bu = Math.min(1 - h * 0.62, Math.max(h * 0.62, u));
+            const bu = Math.min(1 - h * 0.72 - 0.02, Math.max(h * 0.72 + 0.02, u));
             const bv = Math.min(0.97, Math.max(h * 1.15, v));
-            if (!clear(m, bu, bv - h * 0.5, h * 0.65)) continue;
+            if (!clear(m, bu, bv - h * 0.5, h * 0.7)) continue;
             const bx = x + bu;
             const by = y + bv;
             if (light) {
               ctx.moveTo(bx, by);
-              ctx.lineTo(bx + h * 0.06, by - h * 1.1);
-            } else {
-              ctx.moveTo(bx - h * 0.12, by);
-              ctx.lineTo(bx - h * 0.58, by - h * 0.82);
-              ctx.moveTo(bx + h * 0.12, by);
-              ctx.lineTo(bx + h * 0.6, by - h * 0.76);
+              ctx.lineTo(bx + h * 0.06, by - h * 1.12);
+              continue;
+            }
+            const bl = lod === 3 ? BLADES_FINE : BLADES;
+            for (let b = 0; b < bl.length; b += 3) {
+              ctx.moveTo(bx + bl[b] * h, by);
+              ctx.lineTo(bx + bl[b + 1] * h, by + bl[b + 2] * h);
             }
           }
         }
@@ -1037,7 +1177,7 @@ export class TerrainLayer {
         ctx.fill();
       } else {
         ctx.lineCap = 'round';
-        ctx.lineWidth = Math.max(1.1 * px, lod === 2 ? 0.026 : 0.02);
+        ctx.lineWidth = Math.max(1.2 * px, lod === 2 ? 0.03 : 0.022);
         ctx.strokeStyle = this.tuftCss;
         tuftPass(false);
         ctx.stroke();
@@ -1061,12 +1201,14 @@ export class TerrainLayer {
           const y = (i - x) / W;
           const m = corner[i];
           const cnt = q === 0 ? 1 : q <= 2 ? 2 : 3;
+          const slot = (hash3(x, y, 150) * 3) | 0;
           for (let j = 0; j < cnt; j++) {
-            let rr = (0.15 + Math.min(q, 6) * 0.019) * (0.9 + hash3(x, y, 120 + j) * 0.2);
+            const sj = (slot + j) % 3;
+            let rr = (0.14 + Math.min(q, 6) * 0.02) * (0.82 + hash3(x, y, 120 + j) * 0.36);
             if (pass === 1) rr *= 0.94;
             const lim = rr * 1.1 + 0.03;
-            let u = TREE_SLOTS[j * 2] + (hash3(x, y, 130 + j) - 0.5) * 0.14;
-            let v = TREE_SLOTS[j * 2 + 1] + (hash3(x, y, 140 + j) - 0.5) * 0.14;
+            let u = TREE_SLOTS[sj * 2] + (hash3(x, y, 130 + j) - 0.5) * 0.22;
+            let v = TREE_SLOTS[sj * 2 + 1] + (hash3(x, y, 140 + j) - 0.5) * 0.22;
             u = Math.min(1 - lim - 0.04, Math.max(lim, u));
             v = Math.min(1 - lim - 0.05, Math.max(lim, v));
             if (!clear(m, u, v, rr * 0.8)) continue;
@@ -1075,12 +1217,21 @@ export class TerrainLayer {
             ctx.moveTo(cx + rr, cy);
             ctx.arc(cx, cy, rr, 0, Math.PI * 2);
             if (lod >= 2) {
-              const r1 = rr * 0.62;
-              const r2 = rr * 0.58;
-              ctx.moveTo(cx - rr * 0.45 + r1, cy + rr * 0.25);
-              ctx.arc(cx - rr * 0.45, cy + rr * 0.25, r1, 0, Math.PI * 2);
-              ctx.moveTo(cx + rr * 0.42 + r2, cy + rr * 0.3);
-              ctx.arc(cx + rr * 0.42, cy + rr * 0.3, r2, 0, Math.PI * 2);
+              // two smaller lobes at varied angles give each crown its own outline
+              const a1 = hash3(x, y, 160 + j) * Math.PI * 2;
+              const a2 = a1 + 1.9 + hash3(x, y, 170 + j) * 1.4;
+              const r1 = rr * (0.52 + hash3(x, y, 180 + j) * 0.14);
+              const r2 = rr * (0.5 + hash3(x, y, 190 + j) * 0.14);
+              const d1 = rr - r1 * 0.75;
+              const d2 = rr - r2 * 0.75;
+              const l1x = cx + Math.cos(a1) * d1;
+              const l1y = cy + Math.sin(a1) * d1;
+              const l2x = cx + Math.cos(a2) * d2;
+              const l2y = cy + Math.sin(a2) * d2;
+              ctx.moveTo(l1x + r1, l1y);
+              ctx.arc(l1x, l1y, r1, 0, Math.PI * 2);
+              ctx.moveTo(l2x + r2, l2y);
+              ctx.arc(l2x, l2y, r2, 0, Math.PI * 2);
             }
           }
         }
@@ -1112,7 +1263,7 @@ export class TerrainLayer {
           ctx.moveTo(x + 1 - e, y);
           ctx.lineTo(x + 1 - e, y + 1);
         }
-        if (y + 1 >= this.H || terr[i + W] !== WALL) {
+        if (y + 1 >= src.H || terr[i + W] !== WALL) {
           ctx.moveTo(x, y + 1 - e);
           ctx.lineTo(x + 1, y + 1 - e);
         }
@@ -1204,6 +1355,9 @@ export class TerrainLayer {
     const ts = worldW / W;
     const S = a * ts;
     this.deadline = performance.now() + BUDGET_MS;
+    this.area = 0;
+    // larger screens get a proportionally larger area budget (up to 2.5x)
+    this.areaBudget = BUDGET_AREA * Math.max(1, Math.min(2.5, (ctx.canvas.width * ctx.canvas.height) / 1e6));
     let x0: number;
     let y0: number;
     let x1: number;
@@ -1226,25 +1380,30 @@ export class TerrainLayer {
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
 
-    if (S <= ov.L || tx1 <= tx0 || ty1 <= ty0) {
+    // On high-density screens (2 device px per CSS px) a cached canvas may be enlarged up to 1.25x:
+    // each texel then still covers less than one CSS pixel, and far fewer chunks are needed.
+    const dpr = view && view.zoom > 0 ? a / view.zoom : 1;
+    const mag = dpr >= 1.5 ? 1.25 : 1;
+    if (S <= ov.L * mag || tx1 <= tx0 || ty1 <= ty0) {
       this.lastLevel = 0;
       this.syncSurface(ov, true);
-      ctx.imageSmoothingEnabled = S < ov.L;
+      // exactly 1:1 stays nearest (no half-texel blending); smaller or slightly larger is filtered
+      ctx.imageSmoothingEnabled = Math.abs(S / ov.L - 1) > 0.01;
       ctx.imageSmoothingQuality = S < ov.L * 0.5 ? 'medium' : 'low';
       ctx.drawImage(ov.canvas, 0, 0, worldW, worldH);
+      ctx.imageSmoothingEnabled = true;
       return;
     }
-    // keep the overview (minimap, fallback) reasonably fresh while zoomed in
-    if (this.frame % 10 === 0) this.syncSurface(ov, false);
 
-    if (S > DIRECT_FROM) {
+    if (S > DIRECT_FROM * mag) {
       this.lastLevel = -1;
       this.drawDirect(ctx, tf, ts, tx0, ty0, tx1, ty1, S);
+      this.refreshOverview(ov);
       return;
     }
     let L = LEVELS[LEVELS.length - 1];
     for (const l of LEVELS) {
-      if (l >= S) {
+      if (l * mag >= S) {
         L = l;
         break;
       }
@@ -1265,13 +1424,15 @@ export class TerrainLayer {
     for (const c of todo) {
       c.used = this.frame;
       if (c.pal < 0) {
-        if (first || performance.now() < this.deadline) {
+        if (first || this.budgetLeft()) {
           this.paintFull(c);
           first = false;
         }
       } else this.syncSurface(c, false);
     }
+    this.refreshOverview(ov);
     // draw at whole device pixels so neighbouring chunks meet without seams
+    const oneToOne = Math.abs(S / L - 1) <= 0.01;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     for (const c of todo) {
       const dx0 = Math.round(tf.e + a * c.tx0 * ts);
@@ -1279,7 +1440,7 @@ export class TerrainLayer {
       const dx1 = Math.round(tf.e + a * (c.tx0 + c.tw) * ts);
       const dy1 = Math.round(tf.f + d * (c.ty0 + c.th) * ts);
       if (c.pal >= 0) {
-        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingEnabled = oneToOne === false;
         ctx.imageSmoothingQuality = 'low';
         ctx.drawImage(c.canvas, 0, 0, c.canvas.width, c.canvas.height, dx0, dy0, dx1 - dx0, dy1 - dy0);
         continue;
@@ -1297,7 +1458,16 @@ export class TerrainLayer {
       }
     }
     ctx.setTransform(tf);
+    ctx.imageSmoothingEnabled = true;
     this.evict();
+  }
+
+  /** Keep the overview (minimap thumbnail, fallback) fresh while zoomed in, on frames with little other work. */
+  private refreshOverview(ov: Surface): void {
+    if (this.frame - this.ovSynced < 10) return;
+    if (this.area >= 0.25 && this.frame - this.ovSynced <= 240) return;
+    this.ovSynced = this.frame;
+    this.syncSurface(ov, true);
   }
 
   /** Close zoom: ground texels for the visible tiles, then corners, shore and detail as vectors. */
@@ -1325,6 +1495,7 @@ export class TerrainLayer {
     }
     this.paintShapes(ctx, list, k, S, sl, sn);
     ctx.setTransform(tf);
+    ctx.imageSmoothingEnabled = true;
   }
 
   /** Thumbnail draw (used by the minimap). */

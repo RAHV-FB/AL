@@ -5,11 +5,11 @@ import { SCENARIOS } from '../sim/presets';
 import { DEFAULT_CONFIG } from '../sim/config';
 import { SEASON_NAMES, TERRAIN_INFO } from '../sim/constants';
 import { deserializeState, serializeSim } from '../sim/persistence';
-import type { ActionKind, DeathCause, Intervention, InterventionRecord, ScenarioDef, SimConfig, SimEvent, TerrainType } from '../sim/types';
+import type { DeathCause, Intervention, InterventionRecord, ScenarioDef, SimConfig, SimEvent, TerrainType } from '../sim/types';
 import { Renderer, type OverlayKind, type ViewOptions } from '../render/renderer';
 import type { Camera } from '../render/camera';
-import { createAnalyticsPanel, type AnalyticsPanel } from './analytics';
-import { createInspector, type Inspector, type InspectorHandlers } from './inspector';
+import { createAnalyticsPanel, plainText, type AnalyticsPanel } from './analytics';
+import { createInspector, describeAction, type Inspector, type InspectorHandlers } from './inspector';
 import { createEventLog, type EventLogPanel } from './eventlog';
 import { fill, fmtInt, h, icon, installTooltips, plural, store, Toaster, type ToastOpts } from './dom';
 import { DEFAULT_SETTINGS, Painter, TOOLS, brushColor, brushIntervention, effectiveRadius, toolById, type ToolDef, type ToolId, type ToolSettings } from './tools';
@@ -37,23 +37,6 @@ const ZOOM_COL = 56;
 
 type Tab = 'stats' | 'inspector' | 'events';
 
-const ACTION_LABEL: Record<ActionKind, string> = {
-  idle: 'Idle',
-  wander: 'Wandering',
-  explore: 'Exploring',
-  forage: 'Looking for food',
-  eat: 'Eating',
-  rest: 'Resting',
-  flee: 'Running away',
-  attack: 'Fighting',
-  share: 'Sharing food',
-  mate: 'Courting',
-  socialize: 'Socializing',
-  gohome: 'Heading home',
-  deposit: 'Storing food at camp',
-  withdraw: 'Taking food from camp',
-};
-
 const DEATH_LABEL: Record<DeathCause, string> = {
   starvation: 'starved',
   old_age: 'died of old age',
@@ -64,6 +47,8 @@ const DEATH_LABEL: Record<DeathCause, string> = {
 };
 
 const errMsg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
+/** An error message as one sentence (exactly one final period). */
+const sentence = (msg: string): string => `${msg.trim().replace(/[.\s]+$/, '')}.`;
 
 interface DragState {
   kind: 'pan' | 'paint' | 'click' | 'minimap';
@@ -95,6 +80,8 @@ export class App {
   readonly designer: PopulationDesigner;
   readonly toaster: Toaster;
   readonly supportsMinimap: boolean;
+  /** Every experiment, in start screen order (for scripts). */
+  readonly scenarios: readonly ScenarioDef[] = SCENARIOS;
   tool: ToolDef = TOOLS[0];
   running = false;
   speedIdx = 2;
@@ -788,7 +775,7 @@ export class App {
 
   private showEvent(ev: SimEvent): void {
     this.lastEventToast = performance.now();
-    this.toaster.show(ev.message, {
+    this.toaster.show(plainText(ev.message), {
       kind: ev.severity === 'good' ? 'good' : 'major',
       timeout: 5500,
       onClick: () => {
@@ -833,10 +820,12 @@ export class App {
   private maybeShowHint(): void {
     if (store.get('hint') === 'done') return;
     this.el.hint.classList.add('show');
+    this.stage.classList.add('hint-on');
   }
 
   private dismissHint(): void {
     this.el.hint.classList.remove('show');
+    this.stage.classList.remove('hint-on');
     store.set('hint', 'done');
   }
 
@@ -973,7 +962,7 @@ export class App {
     this.simError = true;
     this.running = false;
     this.updateTransport();
-    this.toaster.show(`${errMsg(err)}. The run is paused: press play to try again, or restart.`, { kind: 'error', title: 'Simulation error.', timeout: 12000 });
+    this.toaster.show(`${sentence(errMsg(err))} The run is paused: press play to try again, or restart.`, { kind: 'error', title: 'Simulation error.', timeout: 12000 });
   }
 
   // ============================================================== selection & camera
@@ -1614,8 +1603,10 @@ export class App {
       const tribe = sim.getTribe(a.tribeId);
       const days = a.age / Math.max(1, sim.config.dayLength);
       const age = days < 1 ? 'less than a day old' : `${days < 10 ? days.toFixed(1) : Math.round(days)} days old`;
-      const doing = ACTION_LABEL[a.action] ?? a.action;
-      const thought = a.thought ? (a.thought.length > 80 ? a.thought.slice(0, 78).trimEnd() + '...' : a.thought) : '';
+      // the same sentence and thought text as the Agent tab
+      const doing = describeAction(sim, a);
+      const said = a.thought ? plainText(a.thought) : '';
+      const thought = said.length > 80 ? `${said.slice(0, 78).trimEnd()}...` : said;
       key = `a|${a.id}|${doing}|${thought}|${age}|${tribe?.id ?? -1}`;
       build = () =>
         fill(
@@ -1650,21 +1641,26 @@ export class App {
       this.hoverKey = '';
       return;
     }
+    const fresh = key !== this.hoverKey || !card.classList.contains('show');
     if (key !== this.hoverKey) {
       this.hoverKey = key;
       build();
     }
     card.classList.add('show');
+    if (fresh) this.hoverSize = { w: card.offsetWidth, h: card.offsetHeight };
     this.placeHoverCard();
   }
+
+  /** Size of the hover card, measured when its content changes (not every frame). */
+  private hoverSize = { w: 0, h: 0 };
 
   private placeHoverCard(): void {
     const card = this.el.hover;
     if (!card.classList.contains('show')) return;
     const vw = this.camera.viewW;
     const vh = this.camera.viewH;
-    const w = card.offsetWidth;
-    const hh = card.offsetHeight;
+    const w = this.hoverSize.w;
+    const hh = this.hoverSize.h;
     let x = this.pointer.x + 16;
     let y = this.pointer.y + 18;
     if (x + w > vw - 8) x = this.pointer.x - w - 12;

@@ -128,7 +128,7 @@ export const GENE_DESCRIPTIONS: Record<GeneName, string> = {
   longevity: 'Maximum lifespan. It costs extra food to sustain.',
   immunity: 'Resistance to disease. It costs extra food to sustain.',
   efficiency: 'Food gained per bite.',
-  hue: 'Colour only. It drifts at random, so it traces family lines.',
+  hue: 'Color only. It drifts at random, so it traces family lines.',
 };
 
 /** Tribe colour used everywhere (map bodies, territory, charts, swatches). */
@@ -190,6 +190,19 @@ function roundAbout(v: number): number {
   if (!(v > 0)) return 0;
   const mag = Math.pow(10, Math.max(0, Math.floor(Math.log10(v)) - 1));
   return Math.round(v / mag) * mag;
+}
+
+/** Standing plant food on the map and the most it can hold now (sum of tile capacities). */
+export function landFood(sim: Simulation): { food: number; capacity: number } {
+  const w = sim.state.world;
+  let food = 0;
+  let capacity = 0;
+  for (let i = 0; i < w.food.length; i++) {
+    const f = w.food[i];
+    if (f > 0) food += f;
+    capacity += tileCapacity(sim, i);
+  }
+  return { food, capacity };
 }
 
 /** Living agents per tribe (from the agents themselves, so the numbers match the population). */
@@ -391,15 +404,12 @@ export function describeNow(sim: Simulation): string[] {
     add(1, 1, `${text}.`);
   }
 
+  // the hard population cap (a setting): births and spawns stop there, whatever the food
+  const maxAgents = s.config.maxAgents;
+  if (maxAgents > 0 && pop >= maxAgents) add(0.5, 1.5, `The population has reached the cap of ${fmtInt(maxAgents)} set for this world, so no more can be born.`);
+
   // 3. food against what the land can hold, and how many its regrowth could feed
-  const w = s.world;
-  let food = 0;
-  let cap = 0;
-  for (let i = 0; i < w.food.length; i++) {
-    const f = w.food[i];
-    if (f > 0) food += f;
-    cap += tileCapacity(sim, i);
-  }
+  const { food, capacity: cap } = landFood(sim);
   if (cap > 0 && Number.isFinite(food)) {
     let text = `Food stands at ${Math.round((100 * food) / cap)}% of what the land can hold`;
     let feed = NaN;
@@ -428,7 +438,8 @@ export function describeNow(sim: Simulation): string[] {
     if (wars.length === 1) add(3, 2, `${pair(wars[0])} are at war.`);
     else if (wars.length === 2) add(3, 2, `${pair(wars[0])} are at war, and so are ${pair(wars[1])}.`);
     else if (wars.length > 2) add(3, 2, `${wars.length} pairs of tribes are at war, among them ${pair(wars[0])}.`);
-    else if (alliances.length) add(3, 7, `No tribes are at war; ${pair(alliances[0])} are allies.`);
+    else if (alliances.length === 1) add(3, 7, `No tribes are at war; ${pair(alliances[0])} are allies.`);
+    else if (alliances.length > 1) add(3, 7, `No tribes are at war; ${alliances.length} pairs are allies, among them ${pair(alliances[0])}.`);
     else add(3, 7, 'No tribes are at war.');
   }
 
@@ -441,15 +452,13 @@ export function describeNow(sim: Simulation): string[] {
     } else add(4, 3, `${plural(infected, 'agent')} ${infected === 1 ? 'is' : 'are'} sick.`);
   }
 
-  // 6. disasters under way (meteor strikes are instant: the event log reports them)
+  // 6. disasters (and abundance) under way; meteor strikes are instant, the event log reports them
   const active = s.disasters.filter((d) => d.active && d.kind !== 'meteor' && d.startTick <= tick && d.startTick + d.duration > tick);
   if (active.length) {
     active.sort((a, b) => b.intensity - a.intensity || a.id - b.id);
     const what = (d: Disaster) => `${DISASTER_NOUN[d.kind] ?? 'a disaster'}${d.radius <= 0 ? ' across the whole map' : ''}`;
     if (active.length === 1) add(5, 4, `${capFirst(what(active[0]))} is under way (${daysLeftText(active[0], tick, dl)}).`);
-    else if (active.length === 2)
-      add(5, 4, `${capFirst(what(active[0]))} (${daysLeftText(active[0], tick, dl)}) and ${what(active[1])} (${daysLeftText(active[1], tick, dl)}) are under way.`);
-    else add(5, 4, `${active.length} disasters are under way, among them ${what(active[0])} (${daysLeftText(active[0], tick, dl)}).`);
+    else add(5, 4, `${capFirst(listNames(active.map((d) => `${what(d)} (${daysLeftText(d, tick, dl)})`)))} are under way.`);
   }
 
   // 7. the latest major event of the last two days, unless a sentence above already covers it (the war it
@@ -580,7 +589,7 @@ export function createAnalyticsPanel(container: HTMLElement, opts: AnalyticsPane
   keyB.body.append(keys);
   const keyRow = (label: string, title: string, color: string = COLORS.sand): KeyRow => {
     const root = h('div', 'an-key');
-    root.title = title;
+    root.dataset.tip = title;
     const value = h('span', 'an-key-value', '');
     root.append(h('span', 'an-key-label', label), value);
     keys.append(root);
@@ -682,7 +691,7 @@ export function createAnalyticsPanel(container: HTMLElement, opts: AnalyticsPane
   const secBD = section('Births and deaths', 'Births and deaths per day. While births are above deaths, the population grows.', true);
   const bdLegend = h('div', 'an-legend');
   secBD.append(bdLegend);
-  const bdChart = new LineChart(secBD, { height: 110, xFormat: dayFmt, xHoverFormat: dayHover, yFormat: rateFmt, ariaLabel: 'Births and deaths per day' });
+  const bdChart = new LineChart(secBD, { height: 110, xFormat: dayFmt, xHoverFormat: dayHover, ariaLabel: 'Births and deaths per day' });
   renderLegend(bdLegend, [
     { name: 'Births per day', color: COLORS.sage },
     { name: 'Deaths per day', color: COLORS.rust },
@@ -705,14 +714,20 @@ export function createAnalyticsPanel(container: HTMLElement, opts: AnalyticsPane
   const fertChart = new LineChart(sub(secRes, 'Average fertility'), { height: 100, yMin: 0, yMax: 1, yFormat: pctFmt, xFormat: dayFmt, xHoverFormat: dayHover, ariaLabel: 'Average fertility' });
 
   // tribes
-  const secTribes = section('Tribe sizes', 'Members per tribe, stacked, in the tribe colours of the map. Tribes beyond the 8 largest are grouped as other tribes.');
+  const secTribes = section('Tribe sizes', 'Members per tribe, stacked, in the tribe colors of the map. Tribes beyond the 8 largest are grouped as other tribes.');
   const tribeChart = new StackedAreaChart(secTribes, { height: 140, xFormat: dayFmt, xHoverFormat: dayHover, ariaLabel: 'Tribe sizes' });
   const tribeLegend = h('div', 'an-legend');
   secTribes.append(tribeLegend);
 
   // deaths
   const secDeaths = section('Causes of death', 'Deaths per day by cause, stacked. The legend shows the totals since the start.');
-  const deathChart = new StackedAreaChart(secDeaths, { height: 130, xFormat: dayFmt, xHoverFormat: dayHover, yFormat: rateFmt, ariaLabel: 'Deaths by cause' });
+  const deathChart = new StackedAreaChart(secDeaths, {
+    height: 130,
+    xFormat: dayFmt,
+    xHoverFormat: dayHover,
+    emptyText: 'No deaths in this time range',
+    ariaLabel: 'Deaths by cause',
+  });
   const deathLegend = h('div', 'an-legend');
   secDeaths.append(deathLegend);
 
@@ -728,7 +743,7 @@ export function createAnalyticsPanel(container: HTMLElement, opts: AnalyticsPane
   GENES.forEach((g, i) => {
     const b = h('button', 'an-chip', GENE_LABELS[g]);
     b.type = 'button';
-    b.title = GENE_DESCRIPTIONS[g];
+    b.dataset.tip = GENE_DESCRIPTIONS[g];
     b.setAttribute('aria-pressed', String(i === gene));
     b.addEventListener('click', () => selectGene(i));
     chipEls.push(b);
@@ -759,7 +774,7 @@ export function createAnalyticsPanel(container: HTMLElement, opts: AnalyticsPane
   const multis = GENES.map((g, i) => {
     const cell = h('button', 'an-multi-cell');
     cell.type = 'button';
-    cell.title = GENE_DESCRIPTIONS[g];
+    cell.dataset.tip = GENE_DESCRIPTIONS[g];
     const head = h('div', 'an-multi-head');
     const name = h('span', 'an-multi-name', GENE_LABELS[g]);
     const val = h('span', 'an-multi-val', '');
@@ -798,6 +813,10 @@ export function createAnalyticsPanel(container: HTMLElement, opts: AnalyticsPane
     if (sim) update(sim, force);
   }
 
+  let lastSlowT = -Infinity;
+  let landShare = '';
+  let landTitle = '';
+
   function updateNow(s: Simulation): void {
     let lines: string[] = [];
     try {
@@ -815,26 +834,29 @@ export function createAnalyticsPanel(container: HTMLElement, opts: AnalyticsPane
   function updateKeys(s: Simulation): void {
     const sum = currentSummary(s);
     setText(kPop.value, fmtInt(sum.population));
-    kPop.root.title = `Agents alive now, and the recent trend. The highest so far was ${fmtInt(sum.peakPopulation)}, on day ${dayOfTick(s, sum.peakTick)}.`;
+    kPop.root.dataset.tip = `Agents alive now, and the recent trend. The highest so far was ${fmtInt(sum.peakPopulation)}, on day ${dayOfTick(s, sum.peakTick)}.`;
     setText(kBirths.value, rateFmt(sum.birthsPerDay));
-    kBirths.root.title = `Births over the last day. ${fmtInt(sum.totalBirths)} since the start.`;
+    kBirths.root.dataset.tip = `Births over the last day. ${fmtInt(sum.totalBirths)} since the start.`;
     setText(kDeaths.value, rateFmt(sum.deathsPerDay));
-    kDeaths.root.title = `Deaths over the last day. ${fmtInt(sum.totalDeaths)} since the start.`;
+    kDeaths.root.dataset.tip = `Deaths over the last day. ${fmtInt(sum.totalDeaths)} since the start.`;
     setText(kTribes.value, fmtInt(sum.tribes));
     setText(kGen.value, fmtInt(sum.maxGeneration));
-    kGen.root.title = `The highest generation among living agents (average ${sum.meanGeneration.toFixed(1)}). Founders are generation 0.`;
+    kGen.root.dataset.tip = `The highest generation among living agents (average ${sum.meanGeneration.toFixed(1)}). Founders are generation 0.`;
     setText(kInf.value, sum.population && sum.infected ? `${fmtInt(sum.infected)} (${formatPct(sum.infected / sum.population)})` : fmtInt(sum.infected));
     kInf.root.classList.toggle('an-alert', sum.infected > 0 && sum.infected >= sum.population * 0.1);
-    const w = s.state.world;
-    let food = 0;
-    let cap = 0;
-    for (let i = 0; i < w.food.length; i++) {
-      const f = w.food[i];
-      if (f > 0) food += f;
-      cap += tileCapacity(s, i);
-    }
-    setText(kFood.value, cap > 0 ? `${Math.round((100 * food) / cap)}%` : fmtInt(food));
-    kFood.root.title = `Plant food on the map (${formatNum(Math.round(food))} units), as a share of what the land can hold.`;
+    setText(kFood.value, landShare);
+    kFood.root.dataset.tip = landTitle;
+  }
+
+  /** The parts that scan every tile (the sentences and the food share): about once a second. */
+  function updateSlow(s: Simulation, force: boolean): void {
+    const now = typeof performance !== 'undefined' ? performance.now() : 0;
+    if (!force && now - lastSlowT < 900) return;
+    lastSlowT = now;
+    const { food, capacity } = landFood(s);
+    landShare = capacity > 0 ? `${Math.round((100 * food) / capacity)}%` : fmtInt(food);
+    landTitle = `Plant food on the map (${formatNum(Math.round(food))} units), as a share of what the land can hold.`;
+    updateNow(s);
   }
 
   function updateTribes(s: Simulation): void {
@@ -857,7 +879,7 @@ export function createAnalyticsPanel(container: HTMLElement, opts: AnalyticsPane
       setText(row.name, t.name);
       setText(row.count, `${plural(t.members, 'member')}, ${fmtInt(t.stored)} food`);
       setText(row.rel, t.relations);
-      row.el.title = `${t.name}: ${plural(t.members, 'member')}, ${fmtInt(t.stored)} food stored at the camp.${opts.onJump ? ' Click to show the camp on the map.' : ''}`;
+      row.el.dataset.tip = `${t.name}: ${plural(t.members, 'member')}, ${fmtInt(t.stored)} food stored at the camp.${opts.onJump ? ' Click to show the camp on the map.' : ''}`;
       if (triList.children[i] !== row.el) triList.insertBefore(row.el, triList.children[i] ?? null);
     });
     for (const [id, row] of triRows) {
@@ -915,11 +937,12 @@ export function createAnalyticsPanel(container: HTMLElement, opts: AnalyticsPane
       sim = s;
       force = true;
       lastTribeT = -Infinity;
+      lastSlowT = -Infinity;
     }
     const tick = s.state.tick;
     if (!force && tick === lastTick) return;
     lastTick = tick;
-    updateNow(s);
+    updateSlow(s, force);
     updateKeys(s);
     const now = typeof performance !== 'undefined' ? performance.now() : 0;
     if (force || now - lastTribeT > 450) {
@@ -936,7 +959,7 @@ export function createAnalyticsPanel(container: HTMLElement, opts: AnalyticsPane
 
     const dayLen = Math.max(1, s.config.dayLength || 600);
     const interval = Math.max(1, st.sampleInterval);
-    seg.title = n0 ? `${fmtInt(n0)} samples, one every ${interval} ticks` : 'No samples yet';
+    seg.dataset.tip = n0 ? `${fmtInt(n0)} samples, one every ${interval} ticks` : 'No samples yet';
     // rates over the full history, then sliced to the selected range
     const halfDay = dayLen / 2;
     const birthsAll = rollingRate(all, (x) => x.births, halfDay, dayLen, interval);
@@ -1062,9 +1085,11 @@ export function createAnalyticsPanel(container: HTMLElement, opts: AnalyticsPane
     const totals: Record<DeathCause, number> = { starvation: 0, old_age: 0, combat: 0, disease: 0, disaster: 0, removed: 0 };
     for (const sm of all) for (const c of DEATH_CAUSES) totals[c] += sm.deathsByCause[c] ?? 0;
     for (const c of DEATH_CAUSES) totals[c] += st.counters.deathsByCause[c] ?? 0;
+    let anyDeath = false;
+    for (const arr of causeAll) for (let i = start; i < n0 && !anyDeath; i++) if (arr[i] > 0) anyDeath = true;
     deathChart.setData(
       {
-        x,
+        x: anyDeath ? x : new Float64Array(0),
         series: DEATH_CAUSES.map((c, k) => ({ name: CAUSE_LABELS[c], color: CAUSE_COLORS[c], values: causeAll[k].subarray(start) })),
         totalLabel: 'All deaths per day',
       },
@@ -1086,7 +1111,7 @@ export function createAnalyticsPanel(container: HTMLElement, opts: AnalyticsPane
       const d = cur - first;
       setText(m.val, Number.isFinite(cur) ? cur.toFixed(2) : '');
       const change = !Number.isFinite(d) || Math.abs(d) < 0.02 ? 'about the same as at the start' : `${d > 0 ? 'up' : 'down'} ${Math.abs(d).toFixed(2)} since the start`;
-      m.cell.title = `${GENE_DESCRIPTIONS[GENES[g]]} Average now ${Number.isFinite(cur) ? cur.toFixed(2) : 'unknown'}, ${change}.`;
+      m.cell.dataset.tip = `${GENE_DESCRIPTIONS[GENES[g]]} Average now ${Number.isFinite(cur) ? cur.toFixed(2) : 'unknown'}, ${change}.`;
       m.cell.setAttribute('aria-label', `${GENE_LABELS[GENES[g]]}: average ${Number.isFinite(cur) ? cur.toFixed(2) : 'unknown'}, ${change}`);
     }
 

@@ -1,4 +1,4 @@
-// OWNER: map agents engineer. Palette tokens, colour helpers, cached CSS strings and heatmap ramps.
+// OWNER: map agents engineer. Palette tokens, colour helpers, cached CSS strings, ramp tables and a flat panel.
 
 /** Palette tokens shared by the canvas layers (same values as the CSS tokens of the UI). */
 export const PAL = {
@@ -103,53 +103,6 @@ export function makeRamp(stops: [number, number, number, number, number][]): Ram
   }
   return lut;
 }
-
-/** CSS colour string of a ramp at t (legend stops). */
-export function rampColor(r: Ramp, t: number): string {
-  const i = Math.max(0, Math.min(255, Math.round(t * 255))) * 4;
-  return `rgba(${r[i]},${r[i + 1]},${r[i + 2]},${(r[i + 3] / 255).toFixed(3)})`;
-}
-
-// Heatmap ramps for the data overlays, built from the palette (sand, ochre, sage, rust, water).
-// stops: [t, r, g, b, a]
-export const RAMPS = {
-  food: makeRamp([
-    [0, 90, 70, 45, 0],
-    [0.06, 150, 112, 66, 90],
-    [0.35, 200, 180, 120, 135],
-    [0.7, 143, 181, 115, 170],
-    [1, 205, 226, 168, 200],
-  ]),
-  fertility: makeRamp([
-    [0, 160, 86, 60, 180],
-    [0.3, 196, 146, 82, 150],
-    [0.6, 205, 190, 125, 120],
-    [1, 143, 181, 115, 160],
-  ]),
-  density: makeRamp([
-    [0, 60, 50, 35, 0],
-    [0.1, 150, 120, 70, 110],
-    [0.4, 214, 166, 72, 165],
-    [0.7, 207, 91, 69, 195],
-    [1, 240, 222, 196, 225],
-  ]),
-  disease: makeRamp([
-    [0, 80, 80, 30, 0],
-    [0.15, 128, 132, 58, 110],
-    [0.5, 172, 176, 92, 170],
-    [1, 228, 226, 168, 215],
-  ]),
-  climateDown: makeRamp([
-    [0, 207, 91, 69, 0],
-    [0.1, 207, 91, 69, 70],
-    [1, 207, 91, 69, 190],
-  ]),
-  climateUp: makeRamp([
-    [0, 143, 181, 115, 0],
-    [0.1, 143, 181, 115, 70],
-    [1, 165, 205, 135, 190],
-  ]),
-};
 
 /** Plain panel for canvas legends and notes: flat fill, 1px border, 2px radius (screen space). */
 export function flatPanel(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number): void {

@@ -103,7 +103,16 @@ describe('describeNow', () => {
     const drought = lines.find((l) => /drought/.test(l));
     expect(drought, lines.join(' | ')).toBeTruthy();
     expect(drought).toContain('across the whole map');
-    expect(drought).toMatch(/\d+ days left|about a day left|less than a day left/);
+    expect(drought).toMatch(/drought across the whole map \((\d+ days left|about a day left|less than a day left)\)/);
+  });
+
+  it('says when the population is held at the cap', () => {
+    const sim = Simulation.create({ scenario: scenario('eden'), seed: 4, config: { maxAgents: 100 } });
+    sim.run(30);
+    expect(living(sim)).toBe(100);
+    const lines = describeNow(sim);
+    checkSentences(lines);
+    expect(lines.some((l) => l.includes('reached the cap of 100'))).toBe(true);
   });
 
   it('an empty world says so', () => {

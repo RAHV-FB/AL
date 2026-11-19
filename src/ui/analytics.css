@@ -22,6 +22,8 @@
   --_good: var(--good, #8fb573);
   --_bad: var(--bad, #cf5b45);
   --_warn: var(--warn, #d6a648);
+  /* rust for text, the app's --rust-text (4.5:1 or more on the panel surfaces) */
+  --_bad-text: var(--rust-text, #e2826f);
   color: var(--_text);
   font-size: 12.5px;
   line-height: 1.5;
@@ -58,7 +60,7 @@
   padding: 5px 8px;
   font-size: 11.5px;
   white-space: nowrap;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--pop-shadow, 0 6px 18px rgba(0, 0, 0, 0.35));
   color: var(--_text);
 }
 .an-tip[hidden] {
@@ -264,7 +266,7 @@ details[open] > .insp-sec-title::before {
   white-space: nowrap;
 }
 .an-key.an-alert .an-key-value {
-  color: var(--_bad);
+  color: var(--_bad-text);
 }
 
 /* tribes */
@@ -564,7 +566,7 @@ details[open] > .insp-sec-title::before {
 }
 .insp-btn-bad:hover:not(:disabled) {
   border-color: var(--_bad);
-  color: var(--_bad);
+  color: var(--_bad-text);
 }
 .insp-btn:disabled {
   opacity: 0.45;
@@ -665,7 +667,7 @@ details[open] > .insp-sec-title::before {
   background: var(--_bad);
 }
 .insp-m-hunger.insp-warn .insp-meter-val {
-  color: var(--_bad);
+  color: var(--_bad-text);
 }
 .insp-m-energy .insp-fill {
   background: var(--_water);
@@ -708,7 +710,7 @@ details[open] > .insp-sec-title::before {
   display: none;
 }
 .insp-status-bad {
-  color: var(--_bad);
+  color: var(--_bad-text);
 }
 .insp-status-good {
   color: var(--_good);

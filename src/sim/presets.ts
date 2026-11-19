@@ -68,15 +68,15 @@ export const SCENARIOS: ScenarioDef[] = [
   {
     id: 'eden',
     name: 'Garden of Eden',
-    tagline: 'Endless abundance — how fast can life fill a world?',
+    tagline: 'Plenty of food and no disasters, so the bands grow until the population cap',
     description:
-      'A temperate, fertile world: plants regrow twice as fast and tiles hold 50% more food, metabolism is cheap and there are no random disasters. ' +
-      'Three small, gentle bands start far apart. This tests unconstrained growth: with selection relaxed, what limits a population except space itself?',
+      'Plants regrow twice as fast as normal, each tile holds 50% more food, metabolism is cheap and there are no random disasters. ' +
+      'Three small, gentle bands start far apart. The run shows how a population grows when selection is relaxed, and what finally stops it.',
     lookFor: [
-      'A J-shaped population curve that bends into a plateau as it approaches the population cap',
-      'Bands spreading outward until their territories touch — do they merge, coexist or quarrel?',
-      'Starvation is rare; old age becomes the leading cause of death',
-      'Relaxed selection: gene spread (std-dev) widens over the generations instead of narrowing',
+      'The population rising steeply, then levelling off at the population cap',
+      'Bands spreading out until their territories meet, then sharing or contesting the border',
+      'Few deaths from starvation: old age is the main cause of death',
+      'Gene spread (standard deviation) widening over the generations instead of narrowing, because selection is weak',
     ],
     config: {
       foodRegen: 2,
@@ -99,7 +99,7 @@ export const SCENARIOS: ScenarioDef[] = [
       {
         tick: 4 * DAY,
         intervention: { kind: 'disaster', disaster: 'bloom', x: 800, y: 500, radius: 450, intensity: 0.8, duration: 900 },
-        note: 'Day 4: An endless summer — the garden blooms even more abundantly.',
+        note: 'Day 4: plants bloom across most of the island.',
       },
     ],
   },
@@ -108,16 +108,16 @@ export const SCENARIOS: ScenarioDef[] = [
   {
     id: 'fittest',
     name: 'Survival of the Fittest',
-    tagline: 'Scarcity, hardship and conflict — only the best-adapted survive',
+    tagline: 'Scarce food and a harsh climate put strong selection on varied loners',
     description:
-      'Food is scarce and slow to regrow, deserts are widespread, metabolism is costly and agents are quick to fight. ' +
-      'Four unaffiliated groups start with highly varied random genomes and a raised mutation rate, then face a dry season, a frost and an epidemic. ' +
-      'This tests natural selection under strong pressure: which trait combinations win, and does cooperation emerge anyway?',
+      'Food is scarce and slow to regrow, deserts are widespread, metabolism is costly and agents fight readily. ' +
+      'Four groups of loners start with widely varied genomes and a raised mutation rate. A dry season comes on day 3, a frost on day 7 and a plague on day 10. ' +
+      'The run shows which trait combinations come through strong selection, and whether the loners still band together.',
     lookFor: [
-      'An early crash as poorly adapted genomes starve, then a smaller but tougher population',
-      'Gene means shifting quickly — survivors get faster and leaner (speed up, metabolism down) while efficiency and fertility creep up',
-      'Frequent fights over food, and the combat share of deaths climbing during the drought',
-      'Whether tribes still form spontaneously when everyone starts as a loner',
+      'A short boom, then a starvation crash that leaves a smaller population',
+      'Gene means shifting fast: survivors get faster and leaner (speed up, metabolism down) while efficiency and fertility rise',
+      'Frequent fights over food, with more combat deaths during the drought',
+      'Whether tribes form at all when everyone starts as a loner',
     ],
     config: {
       foodRegen: 0.55,
@@ -143,17 +143,17 @@ export const SCENARIOS: ScenarioDef[] = [
       {
         tick: 3 * DAY,
         intervention: { kind: 'disaster', disaster: 'drought', x: 800, y: 500, radius: 0, intensity: 0.5, duration: 2 * DAY },
-        note: 'Day 3: The dry season — plant growth falters everywhere. Only efficient foragers will make it.',
+        note: 'Day 3: a dry season slows plant growth everywhere. Efficient foragers cope best.',
       },
       {
         tick: 7 * DAY,
         intervention: { kind: 'disaster', disaster: 'coldsnap', x: 800, y: 500, radius: 0, intensity: 0.6, duration: 1.5 * DAY },
-        note: 'Day 7: A hard frost. Large, well-fed bodies have the edge now.',
+        note: 'Day 7: a hard frost. Large, well-fed bodies resist the cold best.',
       },
       {
         tick: 10 * DAY,
         intervention: { kind: 'disaster', disaster: 'plague', x: 800, y: 500, radius: 260, intensity: 0.6, duration: 400 },
-        note: 'Day 10: Disease emerges in the crowded centre — immunity is put to the test.',
+        note: 'Day 10: a plague breaks out in the crowded centre of the island.',
       },
     ],
   },
@@ -162,15 +162,16 @@ export const SCENARIOS: ScenarioDef[] = [
   {
     id: 'two-civs',
     name: 'Two Civilizations',
-    tagline: 'Peaceful foragers and warlike raiders, divided by a river',
+    tagline: 'Peaceful foragers and warlike raiders, old enemies on either side of a river',
     description:
-      'A river with a few fords splits the world. In the west live the Verdant Foragers — gentle, cooperative and efficient; in the east the Crimson Raiders — big, fast and aggressive. ' +
-      'Later a harvest blooms in the west and drought strikes the east. This tests whether cooperation or aggression wins the competition for territory and resources.',
+      'A river with three fords splits the island. The Verdant Foragers in the west are gentle and gather food well; the Crimson Raiders in the east are big and aggressive. ' +
+      'The two peoples start at war. Raiding parties cross the fords, sleep out on the march, plunder the foragers\' stockpile and carry the loot home. ' +
+      'A harvest ripens in the west on day 5 and a drought hits the east on day 9.',
     lookFor: [
-      'Raiding parties crossing the fords once the eastern drought bites (day 9)',
-      'Territory overlays shifting along the river as the tribes push against each other',
-      'Combat deaths spiking where the two peoples meet; inter-tribe relations sliding toward war',
-      'Which strategy grows faster: the foragers\' food stockpiles or the raiders\' plunder',
+      'Raiding parties crossing the fords to the foragers\' camps and carrying the loot home',
+      'Combat deaths where the raiders reach the foragers, and the war deepening with every raid',
+      'The foragers\' stockpile shrinking with each raid, and loot arriving at the raiders\' camp',
+      'Which people grows faster: the foragers who gather food or the raiders who take it',
     ],
     config: {
       foodRegen: 1,
@@ -193,12 +194,12 @@ export const SCENARIOS: ScenarioDef[] = [
       {
         tick: 5 * DAY,
         intervention: { kind: 'disaster', disaster: 'bloom', x: 430, y: 500, radius: 260, intensity: 0.8, duration: 2 * DAY },
-        note: 'Day 5: A bumper harvest ripens in the western valleys — across the river, the raiders take notice.',
+        note: 'Day 5: a bumper harvest ripens in the western valleys.',
       },
       {
         tick: 9 * DAY,
         intervention: { kind: 'disaster', disaster: 'drought', x: 1180, y: 500, radius: 340, intensity: 0.75, duration: 4 * DAY },
-        note: 'Day 9: Drought scorches the eastern plains. The raiders must cross the fords — or starve.',
+        note: 'Day 9: a drought hits the eastern plains, where the raiders live.',
       },
     ],
   },
@@ -207,15 +208,15 @@ export const SCENARIOS: ScenarioDef[] = [
   {
     id: 'evolab',
     name: 'Evolution Laboratory',
-    tagline: 'Fast mutation, shifting climates and the origin of species',
+    tagline: 'Fast mutation and regional climate shifts, with mates that must be genetically similar',
     description:
-      'Mutation is three times faster and larger than normal, and mates must be genetically similar, so isolated groups can drift into separate species. ' +
-      'Every two days the climate shifts in a different quadrant — drought in the north-west, cold in the north-east, abundance in the south-west, drought in the south-east — in a repeating 8-day cycle. ' +
-      'This tests local adaptation and speciation under a changing, patchy environment.',
+      'Mutations are about three times as frequent as normal and larger, and mates must be genetically similar, so isolated groups can drift apart into separate species. ' +
+      'Every two days the climate shifts in another quadrant, in an 8-day cycle: drought in the north-west, cold in the north-east, a bloom in the south-west, then drought in the south-east. ' +
+      'A mountain range with passes divides east from west.',
     lookFor: [
-      'Colour clusters (the neutral hue gene) separating by region — the signature of reproductive isolation',
-      'Gene histograms becoming bimodal as regional populations adapt to their own climate cycle',
-      'Populations migrating away from each stressed quadrant and back again when it recovers',
+      'Colour clusters (the neutral hue gene) separating by region, a sign of reproductive isolation',
+      'Gene histograms with two peaks as regional populations adapt to their own climate',
+      'Populations moving away from each stressed quadrant and back again when it recovers',
       'Mountain passes acting as bottlenecks between the eastern and western gene pools',
     ],
     config: {
@@ -242,25 +243,25 @@ export const SCENARIOS: ScenarioDef[] = [
         tick: 2 * DAY,
         repeat: 8 * DAY,
         intervention: { kind: 'disaster', disaster: 'drought', x: 400, y: 260, radius: 420, intensity: 0.85, duration: 1100 },
-        note: 'Climate shift: drought grips the north-west.',
+        note: 'Climate shift: drought in the north-west.',
       },
       {
         tick: 4 * DAY,
         repeat: 8 * DAY,
         intervention: { kind: 'disaster', disaster: 'coldsnap', x: 1200, y: 260, radius: 420, intensity: 0.8, duration: 1100 },
-        note: 'Climate shift: a cold snap sweeps the north-east.',
+        note: 'Climate shift: a cold snap in the north-east.',
       },
       {
         tick: 6 * DAY,
         repeat: 8 * DAY,
         intervention: { kind: 'disaster', disaster: 'bloom', x: 400, y: 740, radius: 420, intensity: 0.8, duration: 1100 },
-        note: 'Climate shift: abundance blooms in the south-west.',
+        note: 'Climate shift: plants bloom in the south-west.',
       },
       {
         tick: 8 * DAY,
         repeat: 8 * DAY,
         intervention: { kind: 'disaster', disaster: 'drought', x: 1200, y: 740, radius: 420, intensity: 0.85, duration: 1100 },
-        note: 'Climate shift: drought moves to the south-east.',
+        note: 'Climate shift: drought in the south-east.',
       },
     ],
   },
@@ -269,16 +270,16 @@ export const SCENARIOS: ScenarioDef[] = [
   {
     id: 'collapse',
     name: 'Civilization Collapse',
-    tagline: 'A golden age, an overshoot — and then the rains fail',
+    tagline: 'One big tribe outgrows its land, then a long drought starts',
     description:
-      'One large, prolific tribe starts in a lush, stable world and overgrazing is on, so stripped land loses fertility. ' +
-      'On day 8 a long global drought begins and blight hits the heartland, on day 10 a cold snap follows, and the rains only return on day 14, far to the north-east. ' +
-      'This tests overshoot and collapse: does the population crash below its old level, and can survivors migrate and recover?',
+      'One large, fast-breeding tribe starts on lush land with overgrazing on, so land grazed bare loses fertility. ' +
+      'On day 8 a long drought starts across the whole island and blight hits the heartland. A cold snap follows on day 10, and on day 14 rain returns, but only in the far north-east. ' +
+      'The run shows overshoot and collapse, and whether the survivors move and recover.',
     lookFor: [
-      'Boom: rapid growth while food is plentiful, then births slowing as the land around the camps is grazed down',
-      'Bust: starvation deaths spiking after day 8, stockpiles draining, the tribe splintering or turning on itself',
-      'Survivors clustering on the last fertile patches; recovery (or not) after the rains return on day 14',
-      'Selection during the crash: which genomes come through the famine (compare the gene charts before and after)',
+      'Rapid growth while food is plentiful, then fewer births as the land around the camps is grazed down',
+      'Starvation deaths rising after day 8 as the stockpiles drain, and the tribe splitting up',
+      'Survivors gathering on the last fertile patches, and whether they recover after the rain returns on day 14',
+      'Which genomes come through the famine (compare the gene charts before and after)',
     ],
     config: {
       foodRegen: 1.4,
@@ -298,22 +299,22 @@ export const SCENARIOS: ScenarioDef[] = [
       {
         tick: 8 * DAY,
         intervention: { kind: 'disaster', disaster: 'drought', x: 800, y: 500, radius: 0, intensity: 0.85, duration: 6 * DAY },
-        note: 'Day 8: The Great Drought — the rains fail across the entire world.',
+        note: 'Day 8: the rain fails across the whole island.',
       },
       {
         tick: 8 * DAY + 60,
         intervention: { kind: 'disaster', disaster: 'blight', x: 800, y: 500, radius: 300, intensity: 0.9, duration: 3 * DAY },
-        note: 'Blight sweeps through the heartland, rotting the overworked fields.',
+        note: 'Blight destroys food and soil fertility in the heartland.',
       },
       {
         tick: 10 * DAY,
         intervention: { kind: 'disaster', disaster: 'coldsnap', x: 800, y: 500, radius: 0, intensity: 0.8, duration: 2.5 * DAY },
-        note: 'Day 10: A bitter cold snap arrives while the granaries are empty.',
+        note: 'Day 10: a cold snap across the island.',
       },
       {
         tick: 14 * DAY,
         intervention: { kind: 'disaster', disaster: 'bloom', x: 1250, y: 280, radius: 300, intensity: 0.8, duration: 2 * DAY },
-        note: 'Day 14: The rains return — but only in the far north-east. Will the survivors find it?',
+        note: 'Day 14: rain returns, but only in the far north-east.',
       },
     ],
   },
@@ -322,15 +323,16 @@ export const SCENARIOS: ScenarioDef[] = [
   {
     id: 'plague-island',
     name: 'Plague Island',
-    tagline: 'A crowded archipelago meets a deadly epidemic',
+    tagline: 'Crowded islands with weak immune systems and two outbreaks of plague',
     description:
-      'Five sociable island tribes with weak immune systems live packed together on an archipelago. On day 3 plague breaks out in the central harbour, and on day 10 a second strain arrives by sea in the south-east. ' +
-      'This tests epidemic dynamics: how social contact spreads disease, whether water acts as a quarantine, and how fast immunity evolves.',
+      'Five sociable tribes with weak immune systems live crowded together on an archipelago, and disease is 1.5 times as virulent as normal. ' +
+      'Plague breaks out in the central harbour on day 3, and a second strain appears in the south-east on day 10. ' +
+      'The run shows how contact spreads disease, whether water works as a quarantine and how fast immunity evolves.',
     lookFor: [
-      'The infected count rising and falling in waves — compare islands reached early with isolated ones',
-      'Disease deaths concentrated in dense, social clusters; loners and remote islands surviving',
-      'Mean immunity climbing in the generations after each outbreak (and sociability possibly dipping)',
-      'Recovered agents with acquired immunity shielding their tribe from the second strain',
+      'The infected count rising and falling in waves; compare islands reached early with isolated ones',
+      'Disease deaths concentrated in dense, sociable clusters, while loners and remote islands do better',
+      'Mean immunity rising in the generations after each outbreak, and perhaps sociability falling',
+      'Recovered agents, immune for a while, slowing the second strain in their tribe',
     ],
     config: {
       diseaseVirulence: 1.5,
@@ -356,12 +358,12 @@ export const SCENARIOS: ScenarioDef[] = [
       {
         tick: 3 * DAY,
         intervention: { kind: 'disaster', disaster: 'plague', x: 800, y: 500, radius: 140, intensity: 0.9, duration: 300 },
-        note: 'Day 3: Plague breaks out in the crowded central harbour!',
+        note: 'Day 3: plague breaks out in the crowded central harbour.',
       },
       {
         tick: 10 * DAY,
         intervention: { kind: 'disaster', disaster: 'plague', x: 1170, y: 690, radius: 140, intensity: 0.8, duration: 300 },
-        note: 'Day 10: A new strain arrives by sea in the south-east.',
+        note: 'Day 10: a second plague strain appears in the south-east.',
       },
     ],
   },
@@ -370,15 +372,15 @@ export const SCENARIOS: ScenarioDef[] = [
   {
     id: 'predators',
     name: 'Wolves Among Sheep',
-    tagline: 'A few giant raiders stalk a land of peaceful foragers',
+    tagline: 'A dozen giant raiders among two hundred peaceful foragers',
     description:
-      'Two hundred small, peaceful foragers share a modestly fertile land with a pack of twelve giant, fast, aggressive raiders who are poor at gathering plants; a second pack appears on day 6. ' +
-      'This tests predator–prey dynamics between agents: once the land fills up and food runs short, hunger turns the raiders into hunters — do the foragers survive through numbers, speed and vigilance?',
+      'Two hundred small, peaceful foragers share the land with a pack of twelve giant, aggressive raiders who are poor at gathering plants. A second pack of ten appears on day 6. ' +
+      'Once food runs short, hungry raiders hunt the foragers, and the run shows whether numbers and speed keep the foragers alive.',
     lookFor: [
-      'Raids beginning as plant food grows scarce (watch the fights counter climb from around day 5)',
-      'Raider numbers lagging behind forager numbers in boom-and-bust cycles (Lotka–Volterra style)',
+      'Attacks starting as plant food grows scarce (the fights count climbs from around day 5)',
+      'Raider numbers rising and falling behind forager numbers, as in predator and prey cycles',
       'Foragers evolving higher speed and perception, or banding tightly together for safety',
-      'Raiders starving when prey is scarce or well defended — aggression is costly without victims',
+      'Raiders starving when prey is scarce or well defended',
     ],
     config: {
       aggressionBias: 1.8,
@@ -401,7 +403,7 @@ export const SCENARIOS: ScenarioDef[] = [
       {
         tick: 6 * DAY,
         intervention: { kind: 'spawn', x: 320, y: 760, count: 10, radius: 40, template: PREDATOR, tribe: 'new', tribeName: 'The Second Pack' },
-        note: 'Day 6: A second raider pack emerges from the south-western wilds.',
+        note: 'Day 6: a second pack of ten raiders appears in the south-west.',
       },
     ],
   },

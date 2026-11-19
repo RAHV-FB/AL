@@ -220,9 +220,10 @@ export interface Agent {
    * ends or expires at tick `until`. Every trek object has all five keys, in this order.
    * - kind 'migrate' (tribe NONE): hungry on land grazed bare, the agent heads for greener land at (x,y) until it
    *   arrives, finds lush land or is fed.
-   * - kind 'raid': the agent marches on the camp of tribe `tribe` (x,y follow the camp) to plunder its stockpile,
-   *   crossing fords on its route and sleeping where it stops at night. It gives up when hurt, loaded, when the
-   *   war ends or the enemy store is empty.
+   * - kind 'raid': the agent heads for the camp of tribe `tribe` (x,y follow the camp), crossing fords on its route
+   *   and sleeping where it stops at night. Out to an enemy camp it plunders the stockpile; once loaded, hurt, the
+   *   war over or the store empty it turns for home, and `tribe` becomes its own tribe (brain.raidLeg tells the
+   *   two legs apart). The way home ends near camp.
    * Saves made before `kind` existed hold migrations only (kind and tribe absent).
    */
   trek?: { x: number; y: number; until: number; kind?: 'migrate' | 'raid'; tribe?: TribeId };

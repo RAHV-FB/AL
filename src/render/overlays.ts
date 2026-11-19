@@ -1,19 +1,68 @@
-// OWNER: Rendering agent.
+// OWNER: map ground engineer (terrainLayer.ts, camera.ts, minimap.ts, overlays.ts).
 /**
- * Data overlays drawn semi-transparently over the world:
- *   food, fertility, climate  → 1 px/tile image (smoothed)
- *   density, disease          → coarse agent bins, blurred
- *   territory                 → tribe-hued fill + vector border lines per tribe
- * Rebuilt at a low cadence (and only when the sim tick advanced); drawing is a single blit.
+ * Data overlays drawn over the ground, one value per tile, never blurred:
+ *   food, fertility, climate  per-tile colour from flat ramps
+ *   density, disease          agents counted per tile and spread over the neighbouring tiles
+ *   territory                 the owning tribe's colour per tile plus crisp border lines
+ * Every overlay is a 1 texel per tile image drawn without smoothing, so tiles stay sharp at any
+ * zoom. Rebuilt at a low cadence (and only when the sim tick advanced); drawing is a single blit.
  */
 import type { Simulation } from '../sim/simulation';
 import { TERRAIN, type Tribe } from '../sim/types';
-import { RAMPS, hslToRgb, hueColor, type Ramp } from './colors';
+import { hslToRgb, hueColor, makeRamp, type Ramp } from './colors';
 import type { OverlayKind } from './renderer';
 
-const GRID_CELL = 16; // world units per density/disease bin
 /** Width of the overlay legend panel (CSS px). */
-export const LEGEND_WIDTH = 178;
+export const LEGEND_WIDTH = 184;
+
+const FONT = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+const C_PANEL = '#1c1b18';
+const C_BORDER = '#3e3b34';
+const C_TEXT = '#e8e3d8';
+const C_MUTED = '#aba596';
+
+// Flat ramps (no neon). stops: [t, r, g, b, a]
+const RAMP = {
+  // bare earth to deep green
+  food: makeRamp([
+    [0, 222, 208, 168, 220],
+    [0.3, 200, 184, 120, 215],
+    [0.55, 150, 166, 92, 215],
+    [0.8, 86, 130, 70, 222],
+    [1, 38, 90, 50, 232],
+  ]),
+  // sand to moss
+  fertility: makeRamp([
+    [0, 222, 196, 140, 215],
+    [0.5, 180, 172, 106, 210],
+    [1, 92, 124, 70, 215],
+  ]),
+  // transparent to ochre to rust
+  density: makeRamp([
+    [0, 214, 166, 72, 0],
+    [0.12, 214, 166, 72, 90],
+    [0.5, 212, 140, 64, 160],
+    [1, 207, 91, 69, 210],
+  ]),
+  // muted yellow-green
+  disease: makeRamp([
+    [0, 178, 182, 102, 0],
+    [0.15, 178, 182, 102, 95],
+    [0.6, 160, 170, 76, 165],
+    [1, 138, 154, 58, 215],
+  ]),
+  // rust where growth is suppressed, green where it is boosted
+  climateDown: makeRamp([
+    [0, 207, 91, 69, 0],
+    [0.1, 207, 91, 69, 70],
+    [1, 190, 70, 52, 190],
+  ]),
+  climateUp: makeRamp([
+    [0, 120, 168, 96, 0],
+    [0.1, 120, 168, 96, 70],
+    [1, 84, 150, 78, 190],
+  ]),
+};
 
 function canvas(w: number, h: number): HTMLCanvasElement {
   const c = document.createElement('canvas');
@@ -31,38 +80,28 @@ interface LegendSpec {
 }
 
 const LEGENDS: Record<Exclude<OverlayKind, 'none' | 'territory'>, LegendSpec> = {
-  food: { title: 'Food', ramp: RAMPS.food, lo: 'bare', hi: 'abundant' },
-  fertility: { title: 'Soil fertility', ramp: RAMPS.fertility, lo: 'degraded', hi: 'fertile' },
-  density: { title: 'Population density', ramp: RAMPS.density, lo: 'empty', hi: 'crowded' },
-  disease: { title: 'Disease', ramp: RAMPS.disease, lo: 'healthy', hi: 'outbreak', note: 'glowing = infected' },
-  climate: { title: 'Climate effect on regrowth', ramp: null, lo: 'suppressed', hi: 'boosted' },
+  food: { title: 'Food', ramp: RAMP.food, lo: 'bare', hi: 'abundant' },
+  fertility: { title: 'Soil fertility', ramp: RAMP.fertility, lo: 'degraded', hi: 'fertile' },
+  density: { title: 'Population density', ramp: RAMP.density, lo: 'empty', hi: 'crowded' },
+  disease: { title: 'Disease', ramp: RAMP.disease, lo: 'healthy', hi: 'outbreak', note: 'Ringed agents are infected' },
+  climate: { title: 'Climate effect on regrowth', ramp: null, lo: 'slower', hi: 'faster' },
 };
 
 export class OverlayLayer {
   private tileC = canvas(1, 1);
   private tileCtx = this.tileC.getContext('2d')!;
   private tileImg: ImageData | null = null;
-  private gridC = canvas(1, 1);
-  private gridCtx = this.gridC.getContext('2d')!;
-  private gridImg: ImageData | null = null;
   private grid = new Float32Array(0);
   private tmp = new Float32Array(0);
-  private gw = 0;
-  private gh = 0;
   private kind: OverlayKind = 'none';
   private lastFrame = -1e9;
   private lastTick = -1;
   private lastSim: Simulation | null = null;
-  /** Grid layer (density/disease) vs tile layer. */
-  private usingGrid = false;
   // territory
   private borders = new Map<number, Path2D>();
   private territorySig = -1;
   private tribeTiles = new Map<number, number>();
   private rgb = [0, 0, 0];
-  private legendBars = new Map<string, HTMLCanvasElement>();
-  /** Max value seen in last density/disease build (for legend). */
-  private gridMax = 0;
 
   /** Rebuild overlay pixels if due. `frame` is the renderer's frame counter. */
   update(sim: Simulation, kind: OverlayKind, frame: number): void {
@@ -86,36 +125,40 @@ export class OverlayLayer {
       this.tileC.height = H;
       this.tileImg = this.tileCtx.createImageData(W, H);
     }
-    if (kind === 'density' || kind === 'disease') {
-      this.buildGrid(sim, kind);
-      this.usingGrid = true;
-      return;
-    }
-    this.usingGrid = false;
-    const d = this.tileImg.data;
-    const N = W * H;
     if (kind === 'territory') {
       this.buildTerritory(sim, changed);
       return;
     }
+    if (kind === 'density' || kind === 'disease') {
+      this.buildDensity(sim, kind);
+      return;
+    }
+    const d = this.tileImg.data;
+    const N = W * H;
+    const terr = world.terrain;
+    const put = (o: number, lut: Ramp, v: number) => {
+      const li = ((v * 255) | 0) * 4;
+      d[o] = lut[li];
+      d[o + 1] = lut[li + 1];
+      d[o + 2] = lut[li + 2];
+      d[o + 3] = lut[li + 3];
+    };
     if (kind === 'food') {
       const food = world.food;
       const cap = 16 * (sim.state.config.foodCapacity || 1);
-      const lut = RAMPS.food;
       for (let i = 0; i < N; i++) {
+        const o = i * 4;
+        const t = terr[i];
+        if (t === TERRAIN.DeepWater || t === TERRAIN.Water || t === TERRAIN.Wall) {
+          d[o + 3] = 0;
+          continue;
+        }
         let v = food[i] / cap;
         v = v > 0 ? Math.sqrt(v > 1 ? 1 : v) : 0;
-        const li = ((v * 255) | 0) * 4;
-        const o = i * 4;
-        d[o] = lut[li];
-        d[o + 1] = lut[li + 1];
-        d[o + 2] = lut[li + 2];
-        d[o + 3] = lut[li + 3];
+        put(o, RAMP.food, v);
       }
     } else if (kind === 'fertility') {
       const fert = world.fertility;
-      const terr = world.terrain;
-      const lut = RAMPS.fertility;
       for (let i = 0; i < N; i++) {
         const o = i * 4;
         const t = terr[i];
@@ -125,16 +168,10 @@ export class OverlayLayer {
         }
         let v = fert[i];
         v = v > 1 ? 1 : v > 0 ? v : 0;
-        const li = ((v * 255) | 0) * 4;
-        d[o] = lut[li];
-        d[o + 1] = lut[li + 1];
-        d[o + 2] = lut[li + 2];
-        d[o + 3] = lut[li + 3];
+        put(o, RAMP.fertility, v);
       }
     } else if (kind === 'climate') {
       const cm = world.climateMod;
-      const down = RAMPS.climateDown;
-      const up = RAMPS.climateUp;
       for (let i = 0; i < N; i++) {
         const o = i * 4;
         const v = cm[i];
@@ -142,35 +179,23 @@ export class OverlayLayer {
           d[o + 3] = 0;
           continue;
         }
-        let li: number;
-        let lut: Ramp;
-        if (v < 1) {
-          lut = down;
-          li = ((Math.min(1, 1 - v) * 255) | 0) * 4;
-        } else {
-          lut = up;
-          li = ((Math.min(1, (v - 1) / 1.5) * 255) | 0) * 4;
-        }
-        d[o] = lut[li];
-        d[o + 1] = lut[li + 1];
-        d[o + 2] = lut[li + 2];
-        d[o + 3] = lut[li + 3];
+        if (v < 1) put(o, RAMP.climateDown, Math.min(1, 1 - v));
+        else put(o, RAMP.climateUp, Math.min(1, (v - 1) / 1.5));
       }
     }
     this.tileCtx.putImageData(this.tileImg, 0, 0);
   }
 
-  private buildGrid(sim: Simulation, kind: OverlayKind): void {
-    const gw = Math.max(1, Math.ceil(sim.worldW / GRID_CELL));
-    const gh = Math.max(1, Math.ceil(sim.worldH / GRID_CELL));
-    if (gw !== this.gw || gh !== this.gh) {
-      this.gw = gw;
-      this.gh = gh;
-      this.grid = new Float32Array(gw * gh);
-      this.tmp = new Float32Array(gw * gh);
-      this.gridC.width = gw;
-      this.gridC.height = gh;
-      this.gridImg = this.gridCtx.createImageData(gw, gh);
+  /** Agents (or infected agents, weighted by virulence) per tile, spread over the neighbouring tiles. */
+  private buildDensity(sim: Simulation, kind: OverlayKind): void {
+    const world = sim.state.world;
+    const W = world.width;
+    const H = world.height;
+    const ts = world.tileSize > 0 ? world.tileSize : 8;
+    const N = W * H;
+    if (this.grid.length !== N) {
+      this.grid = new Float32Array(N);
+      this.tmp = new Float32Array(N);
     }
     const g = this.grid;
     g.fill(0);
@@ -184,37 +209,36 @@ export class OverlayLayer {
         if (!(a.infection > 0)) continue;
         w = 0.6 + (a.virulence || 0.5);
       }
-      let cx = (a.x / GRID_CELL) | 0;
-      let cy = (a.y / GRID_CELL) | 0;
-      cx = cx < 0 ? 0 : cx >= gw ? gw - 1 : cx;
-      cy = cy < 0 ? 0 : cy >= gh ? gh - 1 : cy;
-      g[cy * gw + cx] += w;
+      let cx = (a.x / ts) | 0;
+      let cy = (a.y / ts) | 0;
+      cx = cx < 0 ? 0 : cx >= W ? W - 1 : cx;
+      cy = cy < 0 ? 0 : cy >= H ? H - 1 : cy;
+      g[cy * W + cx] += w;
     }
-    // two separable [1 2 1] blur passes
+    // three separable [1 2 1] passes: a smooth field about two tiles wide
     const t = this.tmp;
-    for (let pass = 0; pass < 2; pass++) {
-      for (let y = 0; y < gh; y++) {
-        const row = y * gw;
-        for (let x = 0; x < gw; x++) {
+    for (let pass = 0; pass < 3; pass++) {
+      for (let y = 0; y < H; y++) {
+        const row = y * W;
+        for (let x = 0; x < W; x++) {
           const l = g[row + (x > 0 ? x - 1 : x)];
-          const r = g[row + (x < gw - 1 ? x + 1 : x)];
+          const r = g[row + (x < W - 1 ? x + 1 : x)];
           t[row + x] = (l + 2 * g[row + x] + r) * 0.25;
         }
       }
-      for (let y = 0; y < gh; y++) {
-        const up = (y > 0 ? y - 1 : y) * gw;
-        const dn = (y < gh - 1 ? y + 1 : y) * gw;
-        const row = y * gw;
-        for (let x = 0; x < gw; x++) g[row + x] = (t[up + x] + 2 * t[row + x] + t[dn + x]) * 0.25;
+      for (let y = 0; y < H; y++) {
+        const up = (y > 0 ? y - 1 : y) * W;
+        const dn = (y < H - 1 ? y + 1 : y) * W;
+        const row = y * W;
+        for (let x = 0; x < W; x++) g[row + x] = (t[up + x] + 2 * t[row + x] + t[dn + x]) * 0.25;
       }
     }
     let max = 0;
-    for (let i = 0; i < g.length; i++) if (g[i] > max) max = g[i];
-    this.gridMax = max;
-    const norm = 1 / Math.max(disease ? 0.35 : 0.9, max);
-    const lut = disease ? RAMPS.disease : RAMPS.density;
-    const d = this.gridImg!.data;
-    for (let i = 0; i < g.length; i++) {
+    for (let i = 0; i < N; i++) if (g[i] > max) max = g[i];
+    const norm = 1 / Math.max(disease ? 0.08 : 0.25, max);
+    const lut = disease ? RAMP.disease : RAMP.density;
+    const d = this.tileImg!.data;
+    for (let i = 0; i < N; i++) {
       let v = g[i] * norm;
       v = v > 1 ? 1 : v;
       if (disease) v = Math.sqrt(v);
@@ -225,7 +249,7 @@ export class OverlayLayer {
       d[o + 2] = lut[li + 2];
       d[o + 3] = lut[li + 3];
     }
-    this.gridCtx.putImageData(this.gridImg!, 0, 0);
+    this.tileCtx.putImageData(this.tileImg!, 0, 0);
   }
 
   private buildTerritory(sim: Simulation, force: boolean): void {
@@ -258,7 +282,8 @@ export class OverlayLayer {
       if (id !== lastId) {
         lastId = id;
         const tr = sim.getTribe(id);
-        hslToRgb(tr ? tr.hue : (id * 137.5) % 360, 0.75, 0.55, this.rgb);
+        // the tribe colour used everywhere: hsl(hue, 45%, 58%)
+        hslToRgb(tr ? tr.hue : (id * 137.5) % 360, 0.45, 0.58, this.rgb);
         lr = this.rgb[0];
         lg = this.rgb[1];
         lb = this.rgb[2];
@@ -266,11 +291,11 @@ export class OverlayLayer {
       d[o] = lr;
       d[o + 1] = lg;
       d[o + 2] = lb;
-      d[o + 3] = 105;
+      d[o + 3] = 92;
     }
     this.tileCtx.putImageData(this.tileImg!, 0, 0);
 
-    // vector borders, merged into runs, one Path2D per tribe
+    // vector borders along tile edges, merged into runs, one Path2D per tribe
     this.borders.clear();
     const ts = world.tileSize;
     const own = (x: number, y: number) => (x < 0 || y < 0 || x >= W || y >= H ? -1 : ter[y * W + x]);
@@ -336,68 +361,31 @@ export class OverlayLayer {
     }
   }
 
-  /** Draw the overlay in world space. */
+  /** Draw the overlay in world space (crisp: one texel per tile, no smoothing). */
   draw(ctx: CanvasRenderingContext2D, sim: Simulation, kind: OverlayKind, zoom: number): void {
     if (kind === 'none' || kind !== this.kind) return;
-    ctx.imageSmoothingEnabled = true;
-    if (this.usingGrid) {
-      ctx.globalAlpha = 0.9;
-      ctx.drawImage(this.gridC, 0, 0, this.gw * GRID_CELL, this.gh * GRID_CELL);
-      ctx.globalAlpha = 1;
-      return;
-    }
-    ctx.globalAlpha = kind === 'territory' ? 1 : 0.88;
+    const smooth = ctx.imageSmoothingEnabled;
+    ctx.imageSmoothingEnabled = false;
+    ctx.globalAlpha = kind === 'territory' ? 1 : 0.9;
     ctx.drawImage(this.tileC, 0, 0, sim.worldW, sim.worldH);
     ctx.globalAlpha = 1;
+    ctx.imageSmoothingEnabled = smooth;
     if (kind === 'territory' && this.borders.size) {
-      ctx.lineJoin = 'round';
-      ctx.lineCap = 'round';
+      const ts = sim.state.world.tileSize || 8;
+      const tilePx = ts * zoom;
+      // 1 px lines from afar, up to 2 px once tiles are large
+      const lw = tilePx < 12 ? 1 : tilePx < 40 ? 1.5 : 2;
+      ctx.lineJoin = 'miter';
+      ctx.lineCap = 'square';
+      ctx.lineWidth = lw / zoom;
       for (const [id, path] of this.borders) {
         const tr = sim.getTribe(id);
         const hue = tr ? tr.hue : (id * 137.5) % 360;
-        ctx.lineWidth = 3.5 / zoom;
-        ctx.strokeStyle = 'rgba(4,8,18,0.55)';
-        ctx.stroke(path);
-        ctx.lineWidth = 1.6 / zoom;
-        ctx.strokeStyle = hueColor(hue, 0.85, 0.66, 0.95);
+        ctx.strokeStyle = hueColor(hue, 0.45, 0.58, 0.95);
         ctx.stroke(path);
       }
+      ctx.lineCap = 'butt';
     }
-  }
-
-  private legendBar(key: string, ramp: Ramp | null): HTMLCanvasElement {
-    let c = this.legendBars.get(key);
-    if (c) return c;
-    c = canvas(128, 1);
-    const cx = c.getContext('2d')!;
-    const img = cx.createImageData(128, 1);
-    for (let i = 0; i < 128; i++) {
-      const t = i / 127;
-      let r: number, g: number, b: number, a: number;
-      if (ramp) {
-        const li = Math.round(t * 255) * 4;
-        r = ramp[li];
-        g = ramp[li + 1];
-        b = ramp[li + 2];
-        a = Math.max(ramp[li + 3], 60);
-      } else {
-        // climate: red ← neutral → green
-        const u = t * 2 - 1;
-        const lut = u < 0 ? RAMPS.climateDown : RAMPS.climateUp;
-        const li = Math.round(Math.abs(u) * 255) * 4;
-        r = lut[li];
-        g = lut[li + 1];
-        b = lut[li + 2];
-        a = Math.max(lut[li + 3], 40);
-      }
-      img.data[i * 4] = r;
-      img.data[i * 4 + 1] = g;
-      img.data[i * 4 + 2] = b;
-      img.data[i * 4 + 3] = a;
-    }
-    cx.putImageData(img, 0, 0);
-    this.legendBars.set(key, c);
-    return c;
   }
 
   /**
@@ -408,88 +396,118 @@ export class OverlayLayer {
     if (kind === 'none') return 0;
     const pad = 10;
     const w = LEGEND_WIDTH;
-    ctx.font = '600 11px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
     ctx.textBaseline = 'alphabetic';
+    ctx.textAlign = 'left';
     if (kind === 'territory') {
       const tribes: Tribe[] = [];
       for (const t of sim.state.tribes) if (t.extinctTick === -1 || (this.tribeTiles.get(t.id) ?? 0) > 0) tribes.push(t);
       tribes.sort((a, b) => (this.tribeTiles.get(b.id) ?? b.territory ?? 0) - (this.tribeTiles.get(a.id) ?? a.territory ?? 0));
       const shown = Math.min(6, tribes.length);
-      const h = pad * 2 + 16 + Math.max(1, shown) * 16 + (tribes.length > shown ? 14 : 0);
+      const rowH = 18;
+      const h = pad * 2 + 16 + Math.max(1, shown) * rowH + (tribes.length > shown ? 16 : 0);
       const x = right - w;
       const y = bottom - h;
-      panel(ctx, x, y, w, h);
-      ctx.fillStyle = '#dbe6ff';
-      ctx.fillText('Tribal territory', x + pad, y + pad + 10);
-      ctx.font = '11px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+      legendPanel(ctx, x, y, w, h);
+      ctx.font = `600 12px ${FONT}`;
+      ctx.fillStyle = C_TEXT;
+      ctx.fillText('Tribal territory', x + pad, y + pad + 11);
+      ctx.font = `12px ${FONT}`;
       if (!shown) {
-        ctx.fillStyle = 'rgba(200,215,240,0.6)';
-        ctx.fillText('No tribes yet', x + pad, y + pad + 30);
+        ctx.fillStyle = C_MUTED;
+        ctx.fillText('No tribes yet', x + pad, y + pad + 32);
       }
       for (let i = 0; i < shown; i++) {
         const t = tribes[i];
-        const yy = y + pad + 26 + i * 16;
-        ctx.fillStyle = hueColor(t.hue, 0.8, 0.6);
-        ctx.fillRect(x + pad, yy - 8, 10, 10);
-        ctx.fillStyle = '#c9d6ee';
+        const yy = y + pad + 32 + i * rowH;
+        ctx.fillStyle = hueColor(t.hue, 0.45, 0.58);
+        ctx.fillRect(x + pad, yy - 9, 10, 10);
+        ctx.fillStyle = C_TEXT;
+        ctx.fillText(clip(t.name, 16), x + pad + 18, yy);
+        ctx.fillStyle = C_MUTED;
         const tiles = this.tribeTiles.get(t.id) ?? t.territory ?? 0;
-        ctx.fillText(clip(t.name, 16), x + pad + 16, yy + 1);
-        ctx.fillStyle = 'rgba(200,215,240,0.6)';
-        const s = `${tiles}`;
-        ctx.fillText(s, x + w - pad - ctx.measureText(s).width, yy + 1);
+        const s = `${tiles} tiles`;
+        ctx.fillText(s, x + w - pad - ctx.measureText(s).width, yy);
       }
       if (tribes.length > shown) {
-        ctx.fillStyle = 'rgba(200,215,240,0.55)';
-        ctx.fillText(`+${tribes.length - shown} more`, x + pad, y + h - pad + 2);
+        ctx.fillStyle = C_MUTED;
+        ctx.fillText(`${tribes.length - shown} more`, x + pad, y + h - pad);
       }
       return h;
     }
     const spec = LEGENDS[kind];
-    const h = spec.note ? 66 : 54;
+    const h = spec.note ? 74 : 58;
     const x = right - w;
     const y = bottom - h;
-    panel(ctx, x, y, w, h);
-    ctx.fillStyle = '#dbe6ff';
-    ctx.fillText(spec.title, x + pad, y + pad + 10);
-    const bar = this.legendBar(kind, spec.ramp);
-    ctx.imageSmoothingEnabled = true;
-    ctx.fillStyle = 'rgba(255,255,255,0.06)';
-    ctx.fillRect(x + pad, y + 26, w - pad * 2, 8);
-    ctx.drawImage(bar, x + pad, y + 26, w - pad * 2, 8);
-    ctx.font = '10px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
-    ctx.fillStyle = 'rgba(200,215,240,0.7)';
-    ctx.fillText(spec.lo, x + pad, y + 46);
-    const hiTxt = kind === 'density' && this.gridMax > 0 ? `${spec.hi}` : spec.hi;
-    ctx.fillText(hiTxt, x + w - pad - ctx.measureText(hiTxt).width, y + 46);
+    legendPanel(ctx, x, y, w, h);
+    ctx.font = `600 12px ${FONT}`;
+    ctx.fillStyle = C_TEXT;
+    ctx.fillText(spec.title, x + pad, y + pad + 11);
+    // the scale as five flat steps
+    const bw = w - pad * 2;
+    const by = y + 28;
+    const steps = 5;
+    for (let s = 0; s < steps; s++) {
+      const t = (s + 0.5) / steps;
+      ctx.fillStyle = stepColor(spec.ramp, t);
+      const sx = x + pad + Math.round((s * bw) / steps);
+      const ex = x + pad + Math.round(((s + 1) * bw) / steps);
+      ctx.fillRect(sx, by, ex - sx, 8);
+    }
+    ctx.font = `11px ${FONT}`;
+    ctx.fillStyle = C_MUTED;
+    ctx.fillText(spec.lo, x + pad, y + 50);
+    ctx.fillText(spec.hi, x + w - pad - ctx.measureText(spec.hi).width, y + 50);
     if (kind === 'climate') {
       const s = 'normal';
-      ctx.fillText(s, x + w / 2 - ctx.measureText(s).width / 2, y + 46);
+      ctx.fillText(s, x + w / 2 - ctx.measureText(s).width / 2, y + 50);
     }
     if (spec.note) {
-      ctx.fillStyle = 'rgba(170,240,140,0.8)';
-      ctx.fillText(spec.note, x + pad, y + 59);
+      ctx.fillStyle = C_MUTED;
+      ctx.fillText(spec.note, x + pad, y + 66);
     }
     return h;
   }
+}
+
+/** Opaque colour of a ramp at t (climate: rust below the middle, green above). */
+function stepColor(ramp: Ramp | null, t: number): string {
+  let lut: Ramp;
+  let v: number;
+  if (ramp) {
+    lut = ramp;
+    v = t;
+  } else {
+    const u = t * 2 - 1;
+    if (Math.abs(u) < 0.25) return '#6e6a5e';
+    lut = u < 0 ? RAMP.climateDown : RAMP.climateUp;
+    v = Math.abs(u);
+  }
+  const li = Math.max(0, Math.min(255, Math.round(v * 255))) * 4;
+  return `rgb(${lut[li]},${lut[li + 1]},${lut[li + 2]})`;
 }
 
 function clip(s: string, n: number): string {
   return s.length > n ? s.slice(0, n - 1) + '…' : s;
 }
 
-/** Rounded translucent panel (screen space). */
-export function panel(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number): void {
+/** Plain panel: flat fill, 1 px border, 2 px radius, no shadow (screen space). */
+function legendPanel(ctx: CanvasRenderingContext2D, x0: number, y0: number, w0: number, h0: number): void {
+  // half-pixel aligned so the 1 px border stays sharp
+  const x = Math.round(x0) + 0.5;
+  const y = Math.round(y0) + 0.5;
+  const w = Math.round(w0) - 1;
+  const h = Math.round(h0) - 1;
+  const r = 2;
   ctx.beginPath();
-  const r = 7;
   ctx.moveTo(x + r, y);
   ctx.arcTo(x + w, y, x + w, y + h, r);
   ctx.arcTo(x + w, y + h, x, y + h, r);
   ctx.arcTo(x, y + h, x, y, r);
   ctx.arcTo(x, y, x + w, y, r);
   ctx.closePath();
-  ctx.fillStyle = 'rgba(7,11,22,0.78)';
+  ctx.fillStyle = C_PANEL;
   ctx.fill();
   ctx.lineWidth = 1;
-  ctx.strokeStyle = 'rgba(140,170,255,0.18)';
+  ctx.strokeStyle = C_BORDER;
   ctx.stroke();
 }

@@ -21,7 +21,9 @@
  * Conflict: combat (attack), theft (steal — loot respects carryCapacity), raids on the stockpile of a
  * tribe at war (raidStockpile). Each incident shifts tribe relations with diminishing returns
  * (hostilitySink) and weighted by tribe size (actWeight), so wars track how often two peoples clash
- * and cool down via relDrift once contact stops.
+ * and cool down via relDrift once contact stops. Old rivals (a scenario's `rivalries`, passed on to daughter
+ * tribes; state.diplomacy.rivals) cool down much more slowly (rivalDrift) until they make peace. Members away
+ * on a raid (brain.ts raid treks) neither pull the camp nor count toward fission.
  *
  * Determinism: randomness only via sim.rng, iteration in array order. The per-simulation cache
  * below only holds scratch buffers and log de-duplication sets — never anything that feeds back

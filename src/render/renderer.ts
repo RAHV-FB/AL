@@ -2,8 +2,8 @@
 /**
  * World renderer (Canvas 2D). Frame order:
  *   ground (terrain layer) → winter frost → night (flat darkening) → data overlay → disasters
- *   → territory edges (close zoom) → selection extras (vision, trail, route) → connections
- *   → agents (batched; detail at close zoom) → partner rings → camps → brush
+ *   → territory edges (close zoom) → selection extras (vision, trail, route) → camps (close zoom)
+ *   → connections → agents (batched; detail at close zoom) → partner rings → camps (far zoom) → brush
  *   → screen pass (camp labels, disaster labels, rings, agent glyphs and labels, tie markers,
  *     whole-map disaster notes, overlay legend, minimap, connections legend).
  * Flat colours only: no gradients, glows, shadows or additive blending.
@@ -13,7 +13,7 @@ import type { Simulation } from '../sim/simulation';
 import type { Agent, EnvState, Tribe } from '../sim/types';
 import { SOCIAL_TUNING } from '../sim/social';
 import { Camera } from './camera';
-import { TerrainLayer } from './terrainLayer';
+import { TerrainLayer, type GroundView } from './terrainLayer';
 import { LEGEND_WIDTH, OverlayLayer } from './overlays';
 import { DisasterFx } from './effects';
 import { AgentPainter, DETAIL_ZOOM, agentRadius, type AgentColorMode } from './agents';
@@ -61,17 +61,6 @@ export interface RenderStats {
   /** Agent labels written last frame. */
   labels: number;
 }
-
-/** Visible world rectangle and zoom (CSS px per world unit), passed to the terrain layer. */
-export interface GroundView {
-  x0: number;
-  y0: number;
-  x1: number;
-  y1: number;
-  zoom: number;
-}
-
-type TerrainDraw = (ctx: CanvasRenderingContext2D, worldW: number, worldH: number, view?: GroundView) => void;
 
 const TAU = Math.PI * 2;
 const TRAIL_N = 240;
@@ -252,7 +241,7 @@ export class Renderer {
     g.x1 = vr.x1;
     g.y1 = vr.y1;
     g.zoom = z;
-    (this.terrain.draw as TerrainDraw).call(this.terrain, ctx, WW, WH, g);
+    this.terrain.draw(ctx, WW, WH, g);
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
     this.drawFrost(ctx, env, WW, WH);
@@ -271,18 +260,22 @@ export class Renderer {
     if (sel) this.drawSelectionWorld(ctx, sel, view, z);
 
     this.painter.collect(sim, z, b.x0, b.y0, b.x1, b.y1, 10, view.colorBy ?? 'tribe');
+    // camps: on the ground under the agents up close, on top of the crowd from afar so they stay visible
+    const campsUnder = z >= DETAIL_ZOOM;
+    if (view.showCamps && campsUnder) this.drawCamps(ctx, sim, z);
     const lines = this.drawConnections(ctx, sim, view, sel, z);
     this.painter.draw(ctx, sim, z, view.overlay === 'disease');
     this.stats.agentsDrawn = this.painter.visN;
     this.stats.connections = lines;
     if (sel && this.tieAgents.length) this.drawPartnerRings(ctx, z);
-    if (view.showCamps) this.drawCamps(ctx, sim, z);
+    if (view.showCamps && !campsUnder) this.drawCamps(ctx, sim, z);
     if (view.brush) this.drawBrush(ctx, view.brush, z);
 
     // ---- screen space (CSS px)
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.globalAlpha = 1;
     this.painter.beginLabels();
+    this.painter.drawSelectedName(ctx, sim, z, cam.x, cam.y, vw, vh, view.showLabels, sel ? sel.id : -1);
     if (view.showCamps) this.drawCampLabels(ctx, sim, z, vw, vh);
     this.fx.drawLabels(ctx, time, this.toSX, this.toSY, z, vw, vh);
     const hov = view.hoverId >= 0 && view.hoverId !== view.selectedId ? sim.getAgent(view.hoverId) : undefined;
@@ -290,8 +283,8 @@ export class Renderer {
     if (sel) this.drawRing(ctx, sel, true);
     this.painter.drawScreen(ctx, sim, z, cam.x, cam.y, vw, vh, view.showLabels, sel ? sel.id : -1, night);
     this.stats.labels = this.painter.labelsDrawn;
-    if (sel && this.tieAgents.length) this.drawTieMarkers(ctx, sel, vw, vh);
     const ins = view.insets ?? NO_INSETS;
+    if (sel && this.tieAgents.length) this.drawTieMarkers(ctx, sel, vw, vh, ins);
     this.fx.drawScreen(ctx, time, vw, vh, ins);
 
     const lr = this.legendRect;
@@ -377,7 +370,7 @@ export class Renderer {
     return Math.max(7 / z, 4.5);
   }
 
-  /** A small hut in the tribe colour at each camp (world space, over the agents). */
+  /** A small hut in the tribe colour at each camp (world space). */
   private drawCamps(ctx: CanvasRenderingContext2D, sim: Simulation, z: number): void {
     const b = this.bounds;
     const px = 1 / z;
@@ -412,7 +405,7 @@ export class Renderer {
     const s = this.campSize(z) * z;
     const order = this.campOrder;
     order.length = 0;
-    for (const t of sim.state.tribes) if (t.extinctTick === -1) order.push(t);
+    for (const t of sim.state.tribes) if (t.extinctTick === -1 && Number.isFinite(t.homeX) && Number.isFinite(t.homeY)) order.push(t);
     order.sort((a, b) => (b.members || 0) - (a.members || 0) || a.id - b.id);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
@@ -507,7 +500,7 @@ export class Renderer {
     for (const [id, v] of segs) {
       if (!v.length) continue;
       const tr = sim.getTribe(id);
-      if (!tr) continue;
+      if (!tr || tr.extinctTick !== -1) continue;
       ctx.strokeStyle = tribeColor(tr.hue);
       ctx.beginPath();
       for (let i = 0; i < v.length; i += 4) {
@@ -584,7 +577,7 @@ export class Renderer {
           count++;
         }
       }
-      const dim = sel ? 0.35 : 1;
+      const dim = sel ? 0.3 : 1;
       if (nf) {
         ctx.globalAlpha = 0.8 * dim;
         ctx.strokeStyle = TIE.family;
@@ -707,27 +700,31 @@ export class Renderer {
     }
   }
 
-  /** Small dots at the screen edge where a tie of the selected agent leaves the view (screen space). */
-  private drawTieMarkers(ctx: CanvasRenderingContext2D, a: Agent, vw: number, vh: number): void {
+  /** Small dots at the edge of the map area where a tie of the selected agent leaves the view (screen space). */
+  private drawTieMarkers(ctx: CanvasRenderingContext2D, a: Agent, vw: number, vh: number, ins: { top: number; right: number; bottom: number; left: number }): void {
     const ax = this.toSX(a.x);
     const ay = this.toSY(a.y);
     const m = 8;
-    if (ax < m || ay < m || ax > vw - m || ay > vh - m) return;
+    const L = ins.left + m;
+    const T = ins.top + m;
+    const R = vw - ins.right - m;
+    const B = vh - ins.bottom - m;
+    if (ax < L || ay < T || ax > R || ay > B) return;
     const ta = this.tieAgents;
     const tk = this.tieKinds;
     for (let i = 0; i < ta.length; i++) {
       const o = ta[i];
       const ox = this.toSX(o.x);
       const oy = this.toSY(o.y);
-      if (ox >= 0 && oy >= 0 && ox <= vw && oy <= vh) continue;
-      // clip the segment a→o to the inset viewport
+      if (ox >= L && oy >= T && ox <= R && oy <= B) continue;
+      // clip the segment a→o to the inset map area
       const dx = ox - ax;
       const dy = oy - ay;
       let t = 1;
-      if (dx > 0) t = Math.min(t, (vw - m - ax) / dx);
-      else if (dx < 0) t = Math.min(t, (m - ax) / dx);
-      if (dy > 0) t = Math.min(t, (vh - m - ay) / dy);
-      else if (dy < 0) t = Math.min(t, (m - ay) / dy);
+      if (dx > 0) t = Math.min(t, (R - ax) / dx);
+      else if (dx < 0) t = Math.min(t, (L - ax) / dx);
+      if (dy > 0) t = Math.min(t, (B - ay) / dy);
+      else if (dy < 0) t = Math.min(t, (T - ay) / dy);
       const ex = ax + dx * t;
       const ey = ay + dy * t;
       ctx.beginPath();

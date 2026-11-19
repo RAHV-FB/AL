@@ -5,7 +5,7 @@ import { DISASTER_INFO } from '../sim/disasters';
 import { DISASTER_KINDS, type DisasterKind } from '../sim/types';
 import type { OverlayKind, ViewOptions } from '../render/renderer';
 import type { App } from './app';
-import { chips, h, icon, slider, toggle, type SliderCtl, type ToggleCtl } from './dom';
+import { chips, h, icon, slider, toggle, type ToggleCtl } from './dom';
 import { TERRAIN_ORDER, choiceHelp, effectiveRadius, terrainColor, type ToolId } from './tools';
 
 export const OVERLAYS: { value: OverlayKind; label: string; tip: string }[] = [
@@ -81,9 +81,11 @@ export function buildToolPanel(app: App): ToolPanel {
     onInput: (v) => app.setRadius(v),
   });
 
-  const choiceLine = h('p', { class: 'tp-note' });
+  // one line about the current choice; each tool has its own element so blocks never share a node
+  const notes: Partial<Record<ToolId, HTMLElement>> = { terrain: h('p', { class: 'tp-note' }), disaster: h('p', { class: 'tp-note' }), remove: h('p', { class: 'tp-note' }) };
   const refreshChoice = () => {
-    choiceLine.textContent = choiceHelp(app.tool, app.settings);
+    const n = notes[app.tool.id];
+    if (n) n.textContent = choiceHelp(app.tool, app.settings);
   };
 
   // --- per-tool blocks
@@ -101,7 +103,7 @@ export function buildToolPanel(app: App): ToolPanel {
     },
     'rows two',
   );
-  blocks.terrain = h('div', null, h('div', { class: 'sub-title' }, 'Terrain'), terrainPick.el);
+  blocks.terrain = h('div', null, h('div', { class: 'sub-title' }, 'Terrain'), terrainPick.el, notes.terrain);
 
   const disasterPick = chips(
     DISASTER_KINDS.map((k) => ({ value: k, label: DISASTER_INFO[k].label, icon: k })),
@@ -128,7 +130,8 @@ export function buildToolPanel(app: App): ToolPanel {
     wholeLabel,
   );
   const wholeNote = h('p', { class: 'tp-note' }, 'A meteor always strikes one spot.');
-  blocks.disaster = h('div', null, h('div', { class: 'sub-title' }, 'Type'), disasterPick.el, intensity.el, duration.el, whole, wholeNote);
+  blocks.disaster = h('div', null, h('div', { class: 'sub-title' }, 'Type'), disasterPick.el, notes.disaster, intensity.el, duration.el);
+  const wholeBlock = h('div', { class: 'tp-whole' }, whole, wholeNote);
   // meteors strike at once (the simulation ignores their duration) and never cover the whole map
   const refreshDisaster = () => {
     const meteor = app.settings.disaster === 'meteor';
@@ -151,10 +154,10 @@ export function buildToolPanel(app: App): ToolPanel {
     refreshChoice();
     const block = blocks[t.id];
     body.replaceChildren();
-    if (t.id === 'terrain' || t.id === 'disaster') body.append(block!, choiceLine);
-    else if (block) body.append(block);
+    if (block) body.append(block);
     if (t.brush) body.append(sizeSlot);
-    if (t.id === 'remove') body.append(choiceLine);
+    if (t.id === 'disaster') body.append(wholeBlock);
+    if (t.id === 'remove') body.append(notes.remove!);
     if (t.id === 'spawn') app.designer.refreshTribes();
     sync();
   };
@@ -250,4 +253,3 @@ export function buildLayersMenu(app: App): LayersMenu {
   };
 }
 
-export type { SliderCtl };

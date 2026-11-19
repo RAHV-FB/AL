@@ -150,15 +150,15 @@ function phenotype(g: GeneName, t: Traits, dayLen: number): string {
     case 'speed':
       return `${t.speed.toFixed(2)} units per tick`;
     case 'size':
-      return `${t.size.toFixed(2)} times`;
+      return `${t.size.toFixed(2)}x`;
     case 'perception':
       return `${Math.round(t.perception)} units`;
     case 'metabolism':
-      return `${t.metabolism.toFixed(2)} times`;
+      return `${t.metabolism.toFixed(2)}x`;
     case 'longevity':
       return `${(t.longevity / dayLen).toFixed(1)} days`;
     case 'efficiency':
-      return `${t.efficiency.toFixed(2)} times`;
+      return `${t.efficiency.toFixed(2)}x`;
     case 'hue':
       return `${Math.round(t.hue)} degrees`;
     default:
@@ -287,7 +287,7 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
     if (el instanceof HTMLButtonElement) {
       el.type = 'button';
       el.addEventListener('click', () => pick(p));
-      el.title = tip ?? (p.alive ? `Select ${p.name} and show it on the map` : `${p.name} is dead. Select to see its record.`);
+      el.dataset.tip = tip ?? (p.alive ? `Select ${p.name} and show it on the map` : `${p.name} is dead. Select to see its record.`);
     }
     el.textContent = p.alive ? p.name : `${p.name} (dead)`;
     return el;
@@ -335,10 +335,10 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
     const bBoost = h('button', 'insp-btn insp-btn-small', 'Bless');
     const bKill = h('button', 'insp-btn insp-btn-small insp-btn-bad', 'Smite');
     for (const b of [bFollow, bShow, bBoost, bKill]) b.type = 'button';
-    bFollow.title = 'Keep the camera on this agent';
-    bShow.title = 'Move the camera to this agent';
-    bBoost.title = 'Fully heal and feed this agent';
-    bKill.title = 'Kill this agent';
+    bFollow.dataset.tip = 'Keep the camera on this agent';
+    bShow.dataset.tip = 'Move the camera to this agent';
+    bBoost.dataset.tip = 'Fully heal and feed this agent';
+    bKill.dataset.tip = 'Kill this agent';
     bFollow.addEventListener('click', () => handlers.onFollow(id));
     bShow.addEventListener('click', () => (handlers.onShowOnMap ? handlers.onShowOnMap(id) : handlers.onSelect(id)));
     bBoost.addEventListener('click', () => handlers.onBoost(id));
@@ -366,7 +366,7 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
     const repro = h('p', 'insp-status');
     const navLine = h('p', 'insp-status');
     navLine.hidden = true;
-    repro.title =
+    repro.dataset.tip =
       'To breed, an agent must be an adult and not too old, past the rest after its last birth, well fed (how full depends on its fertility gene), rested and healthy, with a willing partner nearby.';
     nowB.append(disease, repro, navLine);
 
@@ -409,7 +409,7 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
     traitSec.append(traitTable);
     const traitRows = GENES.map((g) => {
       const row = h('div', 'insp-trait');
-      row.title = GENE_DESCRIPTIONS[g];
+      row.dataset.tip = GENE_DESCRIPTIONS[g];
       const lab = h('span', 'insp-trait-name', GENE_LABELS[g]);
       const track = h('span', 'insp-track insp-track-thin');
       const fill = h('span', 'insp-fill insp-fill-gene');
@@ -454,7 +454,7 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
       const swc = tribe ? tribeColor(tribe.hue) : tribeColor(hue);
       if (sw.style.background !== swc) sw.style.background = swc;
       setText(tribeName, tribe ? tribe.name + (tribe.extinctTick !== -1 ? ' (died out)' : '') : 'No tribe');
-      tribeName.title = tribe ? `${tribe.name}: ${tribe.members} members` : 'Not a member of any tribe';
+      tribeName.dataset.tip = tribe ? `${tribe.name}: ${tribe.members} members` : 'Not a member of any tribe';
       const role = a ? a.role : 'none';
       const birth = a ? a.birthTick : rec ? rec.birthTick : 0;
       const deathTick = a ? a.deathTick : rec ? rec.deathTick : -1;
@@ -475,8 +475,10 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
       }
       for (const b of [bFollow, bShow, bBoost, bKill]) b.disabled = !alive;
 
-      // sections that need a full agent snapshot
-      for (const sec of [nowSec, whySec, relSec]) sec.hidden = !a;
+      // sections that need a full agent snapshot (what it is doing and why only while it lives)
+      nowSec.hidden = !a || !alive;
+      whySec.hidden = !a || !alive;
+      relSec.hidden = !a;
       for (const sec of [traitSec, skillSec, histSec]) (sec.parentElement as HTMLElement).hidden = !a;
       if (a) {
         const tr = a.traits;

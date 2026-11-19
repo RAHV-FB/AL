@@ -24,7 +24,7 @@ export const EVENT_CATEGORIES: { id: EventCategory; label: string; icon: string 
   { id: 'disease', label: 'Disease', icon: 'virus' },
   { id: 'evolution', label: 'Evolution', icon: 'dna' },
   { id: 'environment', label: 'Environment', icon: 'sun' },
-  { id: 'intervention', label: 'Your actions', icon: 'hand' },
+  { id: 'intervention', label: 'Interventions', icon: 'hand' },
   { id: 'record', label: 'Records', icon: 'star' },
 ];
 const CAT = new Map(EVENT_CATEGORIES.map((c) => [c.id, c]));
@@ -135,18 +135,18 @@ export function createEventLog(container: HTMLElement, onJump: (x: number, y: nu
     li.dataset.id = String(ev.id);
     const ic = h('span', 'ev-icon');
     ic.append(safeIcon(c.icon, 15));
-    ic.title = c.label;
+    ic.dataset.tip = c.label;
     const body = h('span', 'ev-body');
     const msg = h('span', 'ev-msg', plainText(ev.message));
     const time = h('span', 'ev-time', clockOfTick(s, ev.tick));
-    time.title = `Tick ${ev.tick}`;
+    time.dataset.tip = `Tick ${ev.tick}`;
     body.append(msg, time);
     li.append(ic, body);
     const hasPos = typeof ev.x === 'number' && typeof ev.y === 'number' && Number.isFinite(ev.x) && Number.isFinite(ev.y);
     if (hasPos || ev.agentId !== undefined) {
       li.classList.add('ev-jump');
       li.tabIndex = 0;
-      li.title = hasPos ? 'Show this place on the map' : 'Show this agent on the map, if it is still alive';
+      li.dataset.tip = hasPos ? 'Show this place on the map' : 'Show this agent on the map, if it is still alive';
       const go = () => {
         if (hasPos) onJump(ev.x as number, ev.y as number);
         else if (sim && ev.agentId !== undefined) {
