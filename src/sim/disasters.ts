@@ -26,7 +26,7 @@ import { DISASTER_KINDS, TERRAIN, type Agent, type Disaster, type DisasterKind, 
 /** Human-readable explanations (shown in the UI). */
 export const DISASTER_INFO: Record<DisasterKind, { label: string; icon: string; help: string }> = {
   drought: { label: 'Drought', icon: '', help: 'Plant regrowth in the area drops by up to 90% while it lasts.' },
-  blight: { label: 'Blight', icon: '', help: 'Destroys the standing food in the area and damages the soil.' },
+  blight: { label: 'Blight', icon: '', help: 'Destroys the standing food in the area and damages the soil. Plant regrowth there drops by up to 60% while it lasts.' },
   bloom: { label: 'Abundance', icon: '', help: 'Fills the area with food, and plants regrow up to three times as fast while it lasts.' },
   plague: { label: 'Plague', icon: '', help: 'Infects agents in the area with a contagious disease.' },
   meteor: { label: 'Meteor', icon: '', help: 'Kills agents at the impact point and scorches the land and food around it.' },
@@ -489,7 +489,7 @@ function logEnd(sim: Simulation, d: Disaster): void {
   const at = { x: d.x, y: d.y };
   switch (d.kind) {
     case 'drought':
-      sim.log('disaster', 'good', 'The drought is over. Plants can regrow.', at);
+      sim.log('disaster', 'good', 'The drought is over. Plant regrowth is back to normal.', at);
       break;
     case 'blight':
       sim.log('disaster', 'good', 'The blight is over. The soil starts to recover.', at);
