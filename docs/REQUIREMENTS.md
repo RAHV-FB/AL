@@ -6,7 +6,7 @@ This audit compares the original product requirements with the code. It was made
 - **Locations:** `file:line` refers to the baseline commit. The function or constant is named as well, so you can still find it after lines move.
 - **Evidence:** the existing tests and `tests/spec-requirements.test.ts` (requirement and README checks).
 
-Summary: 74 requirements traced. 72 are Done, 2 are Partial and none are Missing. (After the 2026-11-19 audit fixes; both Partial items are the single food resource, by design. The gap list at the end records how each gap was closed.)
+Summary: 75 requirements traced. 73 are Done, 2 are Partial and none are Missing. (After the 2026-11-19 audit fixes; both Partial items are the single food resource, by design. The gap list at the end records how each gap was closed.)
 
 ## Platform and engineering
 
@@ -39,6 +39,7 @@ Summary: 74 requirements traced. 72 are Done, 2 are Partial and none are Missing
 | A5 | Life cycle: birth, growth, reproduction, aging, death | Done | `genetics.ts:309` (`reproduce`); `lifecycle.ts:129,140,168` | Juveniles grow from 50% size. Senescence starts at 80% of longevity. Six death causes. |
 | A6 | Relationships | Done | `social.ts:326` (`adjustRelationship`), `:794` (`maintainRelationships`), `:811` (`bond`) | Up to 12 per agent, with affinity −1..1 and kin flags. |
 | A7 | Behaviours: explore, gather, rest, flee, compete, help, reproduce | Done | `brain.ts:1225-1255` (`act`), `:1275-1563` (`act*`) | Gathering includes carrying food to the camp stockpile. |
+| A8 | Navigation: cross rivers at fords and go round obstacles (added on request, 2026-11-19) | Done | `pathfinding.ts` (regions, weighted A*, exact line of sight, partial routes, per-tick budget); `steering.ts` (`moveToward` route following, stall recovery, wait/fail states); `brain.ts` (detour food, camps/raids/exploration by route, migration treks) | `tests/route-planning.test.ts`: 12 of 12 starving migrants cross the only ford on each of 3 seeds (0 without routing); routes survive saves and land→land repaints. |
 
 ## Environment
 
