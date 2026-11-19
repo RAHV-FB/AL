@@ -74,8 +74,6 @@ export class Simulation {
   /** Reusable scratch array for spatial queries inside a single function (do not hold across calls). */
   readonly scratch: Agent[] = [];
 
-  private queue: Intervention[] = [];
-  private replayQueue: InterventionRecord[] = [];
   private pendingBirths: Agent[] = [];
   private stepping = false;
   /** True while step() applies interventions (phase 1, before any agent is processed). */
@@ -121,7 +119,10 @@ export class Simulation {
       lineage: [],
       events: [],
       disasters: [],
-      scheduled: (scenario.scheduled ?? []).map((e) => ({ ...e, intervention: structuredCloneSafe(e.intervention) })),
+      // whole, non-negative ticks: processScheduled() fires an event when its tick equals the clock
+      scheduled: (scenario.scheduled ?? [])
+        .filter((e) => e && Number.isFinite(e.tick))
+        .map((e) => ({ ...e, tick: Math.max(0, Math.round(e.tick)), intervention: structuredCloneSafe(e.intervention) })),
       interventionLog: [],
       stats: createStatsState(),
     };
@@ -133,10 +134,11 @@ export class Simulation {
     if (opts.replay) {
       // step() applies the queue head-first, so it must be in tick order (stable: same-tick entries keep
       // their recorded order); entries without a usable tick would block the queue forever.
-      sim.replayQueue = opts.replay
+      const replay = opts.replay
         .filter((r) => r && typeof r.tick === 'number' && Number.isFinite(r.tick))
         .map((r) => ({ tick: r.tick, intervention: structuredCloneSafe(r.intervention) }))
         .sort((p, q) => p.tick - q.tick);
+      if (replay.length) state.pendingReplay = replay;
     }
     sim.log('environment', 'info', `Experiment "${scenario.name}" started (seed ${config.seed}).`);
     state.rngState = rng.getState(); // spawning the founders used the generator
@@ -173,7 +175,12 @@ export class Simulation {
 
   /** Queue a user intervention; applied (and recorded) at the start of the next tick. */
   enqueue(iv: Intervention): void {
-    this.queue.push(iv);
+    (this.state.pendingQueue ??= []).push(iv);
+  }
+
+  /** Number of "restart & replay" entries still waiting to be applied. */
+  get pendingReplayCount(): number {
+    return this.state.pendingReplay?.length ?? 0;
   }
 
   /** Advance one tick. */
@@ -187,15 +194,17 @@ export class Simulation {
     //    loop and the tribe recount all see them. Deaths are still flushed at the end of the tick.
     this.intervening = true;
     if (s.scheduled.length) this.processScheduled();
-    if (this.replayQueue.length) {
-      while (this.replayQueue.length && this.replayQueue[0].tick <= s.tick) {
-        const r = this.replayQueue.shift()!;
+    const rq = s.pendingReplay;
+    if (rq) {
+      while (rq.length && rq[0].tick <= s.tick) {
+        const r = rq.shift()!;
         this.applyRecorded(r.intervention);
       }
+      if (!rq.length) delete s.pendingReplay;
     }
-    if (this.queue.length) {
-      const q = this.queue;
-      this.queue = [];
+    const q = s.pendingQueue;
+    if (q) {
+      delete s.pendingQueue;
       for (const iv of q) this.applyRecorded(iv);
     }
     this.intervening = false;

@@ -484,6 +484,20 @@ describe('tribe dynamics', () => {
     expect(ts.extinctTick).not.toBe(-1);
   });
 
+  it('a fresh band of ten is not absorbed by a neighbouring tribe it merely tolerates (predators: the day-6 pack stays a pack)', () => {
+    // with assimilation at 12 members / score 1.2, 3–6 of the 10 wolves of the predators preset's day-6
+    // "Second Pack" joined the prey tribes they were hunting within 4 days
+    const sim = makeSim(21);
+    const herd = Array.from({ length: 30 }, (_, i) => spawn(sim, 300 + (i % 6) * 6, 300 + Math.floor(i / 6) * 6, { sociability: 0.8, aggression: 0.05 }));
+    const th = foundTribe(sim, herd[0], herd.slice(1));
+    const pack = Array.from({ length: 10 }, (_, i) => spawn(sim, 302 + (i % 5) * 6, 318 + Math.floor(i / 5) * 6, { sociability: 0.8, aggression: 0.95 }));
+    const tp = foundTribe(sim, pack[0], pack.slice(1));
+    stepSocial(sim, 1500);
+    expect(pack.filter((a) => a.tribeId === th.id)).toEqual([]);
+    expect(tp.extinctTick).toBe(-1);
+    expect(tp.members).toBe(10);
+  });
+
   it('marks extinction when the last member dies and frees the territory', () => {
     const sim = makeSim();
     const a = spawn(sim, 300, 300);

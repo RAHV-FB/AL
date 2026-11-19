@@ -8,6 +8,7 @@ import './analytics.css';
 import type { Simulation } from '../sim/simulation';
 import { GENES, NONE, type ActionKind, type Agent, type AgentId, type GeneName, type LineageRecord, type Traits } from '../sim/types';
 import { CAUSE_LABELS, GENE_DESCRIPTIONS, GENE_LABELS, ROLE_LABELS, dayOfTick, tribeColor } from './analytics';
+import { REPRO, mateFoodThreshold } from '../sim/genetics';
 
 export interface InspectorHandlers {
   onSelect(id: number): void; // select another agent (e.g. click a relative)
@@ -304,7 +305,9 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
     const mEnergy = meter(vit, 'Energy', 'insp-m-energy');
     const mCarried = meter(vit, 'Carried', 'insp-m-carried');
     const disease = h('div', 'insp-status');
-    vit.append(disease);
+    const repro = h('div', 'insp-status');
+    repro.title = 'Reproductive status: breeding needs an adult that is not too old, off cooldown, well fed (threshold depends on the fertility gene), rested and healthy — plus a compatible partner nearby.';
+    vit.append(disease, repro);
 
     // traits
     const traitSec = section(root, 'Genes & traits');
@@ -448,6 +451,22 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
         st += ` · resistance ${Math.round(tr.immunity * 100)}%`;
         setText(disease, st);
         disease.className = `insp-status ${cls}`;
+
+        // reproductive status (mirrors genetics.isFertile, with the first unmet condition spelled out)
+        let rs: string;
+        let rcls = '';
+        if (a.age < tr.maturityAge) rs = `Juvenile — matures in ${((tr.maturityAge - a.age) / dl).toFixed(1)} days`;
+        else if (a.age >= REPRO.maxAgeFrac * tr.longevity) rs = 'Past breeding age';
+        else if (a.reproCooldown > 0) rs = `Recovering from a birth — fertile again in ${(a.reproCooldown / dl).toFixed(1)} days`;
+        else if (a.food < mateFoodThreshold(tr) * tr.maxFood) rs = `Not fertile — needs ${Math.round(mateFoodThreshold(tr) * 100)}% stomach to breed`;
+        else if (a.energy <= REPRO.minEnergy) rs = 'Not fertile — too tired';
+        else if (a.health < REPRO.minHealthFrac * tr.maxHealth) rs = 'Not fertile — too injured or sick';
+        else {
+          rs = 'Fertile — ready to mate';
+          rcls = 'insp-status-good';
+        }
+        setText(repro, `${rs} · ${a.offspring} offspring`);
+        repro.className = `insp-status ${rcls}`;
 
         for (const r of traitRows) {
           const gv = a.genes[GENES.indexOf(r.g)] ?? 0;

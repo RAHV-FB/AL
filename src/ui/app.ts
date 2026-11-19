@@ -115,6 +115,8 @@ export class App {
   private panelErrLogged = false;
   /** Smoothed cost of one simulation tick in ms (see simulate()). */
   private tickCost = 1;
+  /** Content + width the top HUD layout was last fitted for (see fitHud()). */
+  private hudKey = '';
   private lastEventId = 0;
   private unseenEvents = 0;
   private toastQueue: SimEvent[] = [];
@@ -338,9 +340,29 @@ export class App {
     el.toolHud = h('div', { class: 'tool-hud' });
     el.keysHint = h('button', { type: 'button', class: 'keys-hint', onclick: () => this.showHelp(true) }, h('kbd', null, 'H'), ' shortcuts');
     // One row: tool HUD on the left, status pills centred in what is left, so the two never
-    // overlap on a narrow stage (e.g. 1280 px wide with both sidebars open).
-    const hudRow = h('div', { class: 'hud-row' }, el.toolHud, h('div', { class: 'hud-top' }, el.paused, el.follow));
-    this.stage.append(rail, hudRow, el.cursor, el.keysHint);
+    // overlap on a narrow stage (e.g. 1280 px wide with both sidebars open); see fitHud().
+    el.hudTop = h('div', { class: 'hud-top' }, el.paused, el.follow);
+    el.hudRow = h('div', { class: 'hud-row' }, el.toolHud, el.hudTop);
+    this.stage.append(rail, el.hudRow, el.cursor, el.keysHint);
+  }
+
+  /**
+   * Keep the top HUD on one row while it fits. On a stage too narrow for the tool HUD and the
+   * pills side by side (e.g. a 1024 px window with both sidebars) the pills move below the tool
+   * HUD instead of running off the stage edge (which hid the Following pill and its ×).
+   */
+  private fitHud(): void {
+    const row = this.el.hudRow;
+    const pills = this.el.hudTop;
+    if (!row || !pills) return;
+    // measure (a forced layout) only when the HUD's content or the stage width changed
+    const e = this.el;
+    const key = `${e.toolHud.textContent}|${e.paused.style.display}|${e.follow.style.display}|${e.follow.textContent}|${this.camera.viewW}`;
+    if (key === this.hudKey) return;
+    this.hudKey = key;
+    const st = this.stage.classList;
+    st.remove('hud-stack');
+    if (pills.offsetWidth > 0 && pills.getBoundingClientRect().right > row.getBoundingClientRect().right + 0.5) st.add('hud-stack');
   }
 
   private buildHelp(): HTMLElement {
@@ -404,11 +426,22 @@ export class App {
     return true;
   }
 
+  /** True when the loaded save names an experiment this app does not know (restart/replay cannot rebuild it). */
+  private unknownScenario = false;
+
+  private refuseUnknownScenario(action: string): boolean {
+    if (!this.unknownScenario) return false;
+    this.toaster.show(`This save comes from an experiment this version does not know ("${this.sim.state.scenarioId}"), so its starting world cannot be rebuilt. Pick an experiment from the list instead.`, { kind: 'bad', title: `Cannot ${action}`, timeout: 9000 });
+    return true;
+  }
+
   restart(seed: number = this.sim.config.seed): void {
+    if (this.refuseUnknownScenario('restart')) return;
     this.startScenario(this.scenario, { seed });
   }
 
   replay(seed: number = this.sim.config.seed): void {
+    if (this.refuseUnknownScenario('replay')) return;
     const log = this.sim.state.interventionLog.map((r) => ({ tick: r.tick, intervention: r.intervention }));
     if (!log.length) {
       this.toaster.show('You have not made any interventions in this run yet — use the tools, global events or parameters first.', { kind: 'info', title: 'Nothing to replay' });
@@ -428,6 +461,7 @@ export class App {
   private setSim(sim: Simulation, sc: ScenarioDef): void {
     this.sim = sim;
     this.scenario = sc;
+    this.unknownScenario = false;
     this.simError = false;
     this.view.selectedId = -1;
     this.view.hoverId = -1;
@@ -494,8 +528,9 @@ export class App {
       return;
     }
     let sim: Simulation;
+    const warnings: string[] = [];
     try {
-      const state = deserializeState(text);
+      const state = deserializeState(text, { warnings });
       sim = Simulation.fromState(state);
     } catch (err) {
       console.info('Rejected save file:', errMsg(err));
@@ -503,9 +538,18 @@ export class App {
       return;
     }
     const id = sim.state.scenarioId;
-    const sc: ScenarioDef = SCENARIOS.find((s) => s.id === id) ?? { ...SCENARIOS[0], id, name: id ? `Loaded: ${id}` : 'Loaded experiment', tagline: 'Loaded from a save file', description: 'An experiment restored from a save file.', lookFor: [] };
+    const known = SCENARIOS.find((s) => s.id === id);
+    const sc: ScenarioDef = known ?? { ...SCENARIOS[0], id, name: id ? `Loaded: ${id}` : 'Loaded experiment', tagline: 'Loaded from a save file', description: 'An experiment restored from a save file.', lookFor: [] };
     this.setSim(sim, sc);
+    // restart / replay rebuild the world from the scenario definition, which this app does not have
+    this.unknownScenario = !known;
     this.toaster.show(`Resumed at tick ${fmtInt(sim.tick)} with ${fmtInt(sim.state.agents.length)} agents and ${fmtInt(sim.state.interventionLog.length)} recorded interventions.`, { kind: 'good', title: `Loaded "${file.name}"` });
+    if (warnings.length) {
+      console.info('Save file repairs:', warnings);
+      const shown = warnings.slice(0, 4).join(' · ');
+      const more = warnings.length > 4 ? ` (+${warnings.length - 4} more, see console)` : '';
+      this.toaster.show(`${shown}${more}`, { kind: 'bad', title: `Repaired ${fmtInt(warnings.length)} problem${warnings.length === 1 ? '' : 's'} in the save`, timeout: 12000 });
+    }
   }
 
   // ============================================================== interventions
@@ -612,6 +656,7 @@ export class App {
     this.el.play.replaceChildren(icon(this.running ? 'pause' : 'play', 15));
     this.el.play.classList.toggle('is-paused', !this.running);
     this.el.paused.style.display = this.running ? 'none' : '';
+    this.fitHud();
   }
 
   private safeStep(n: number): number {
@@ -663,6 +708,7 @@ export class App {
     const a = this.followId !== -1 ? this.sim.getAgent(this.followId) : undefined;
     this.el.follow.style.display = a ? '' : 'none';
     if (a) this.el.follow.replaceChildren(icon('target', 12), `Following ${a.name}`, icon('x', 11, 'pill-x'));
+    this.fitHud();
   }
 
   fitWorld(): void {
@@ -885,6 +931,7 @@ export class App {
   refreshToolHud(): void {
     this.el.toolHud.replaceChildren(icon(this.tool.icon, 13), h('span', null, this.tool.name));
     if (this.tool.brush) this.el.toolHud.append(h('span', { class: 'muted mono' }, `· ${Math.round(effectiveRadius(this.tool.id, this.settings))} u`));
+    this.fitHud();
   }
 
   private cursorStyle = 'default';
@@ -1013,6 +1060,7 @@ export class App {
     this.renderer.resize();
     cam.x = cx;
     cam.y = cy;
+    this.fitHud();
     this.renderSafe(performance.now());
   }
 

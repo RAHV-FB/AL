@@ -108,9 +108,14 @@ export const SOCIAL_TUNING = {
   joinProb: 0.4,
   /** Nearby-tribe attraction needed to join (neutral member 0.3, friend / kin 1, grudge -2). */
   joinScore: 0.6,
-  /** Members of tribes this small drift into a liked, larger neighbouring tribe. */
-  assimilateBelow: 12,
-  assimilateScore: 1.2,
+  /**
+   * Members of tribes this small drift into a strongly liked, larger neighbouring tribe. Kept at a remnant
+   * size with a real liking (≈ 2 friends, or 7 tolerated neighbours): at 12 / 1.2 a fresh band of 10 (the
+   * predators preset's day-6 "Second Pack") dissolved into the prey tribes it was hunting, with no
+   * measurable effect on how many tribes form.
+   */
+  assimilateBelow: 5,
+  assimilateScore: 2,
   maxFounding: 14,
   /** Spontaneous founding stops at this many living tribes; fission may go up to maxLivingTribes. */
   maxFoundedTribes: 16,

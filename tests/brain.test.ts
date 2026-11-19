@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { Simulation } from '../src/sim/simulation';
 import { SCENARIOS } from '../src/sim/presets';
 import { act, carryCapacity, think } from '../src/sim/brain';
+import { clearPath } from '../src/sim/steering';
 import { createAgent } from '../src/sim/lifecycle';
 import { randomGenes } from '../src/sim/genetics';
 import { foundTribe } from '../src/sim/social';
@@ -199,6 +200,110 @@ describe('brain: decisions', () => {
     expect(a.thought.length).toBeGreaterThan(3);
     expect(a.decisionCooldown).toBeGreaterThanOrEqual(3);
     expect(a.decisionCooldown).toBeLessThanOrEqual(14);
+  });
+});
+
+// ------------------------------------------------------------------ think/act consistency (verifier regressions)
+
+describe('brain: no decision that act() cancels every tick', () => {
+  it('a badly wounded agent under attack breaks off and flees instead of freezing in a fight it cannot carry on', () => {
+    // pre-fix: think chose "Fighting back" below 35% health, actAttack broke off at once (decisionCooldown 0),
+    // so the agent re-thought every tick, never struck and never moved while being hit
+    let attackTicks = 0;
+    for (const aggression of [0.5, 0.8, 1]) {
+      for (let seed = 1; seed <= 3; seed++) {
+        const sim = makeSim(seed);
+        sim.state.world.food.fill(0);
+        const d = spawn(sim, 160, 120, { aggression, size: 0.9 });
+        const att = spawn(sim, 166, 120, { aggression: 0.9, size: 0.05 }); // far weaker: worth fighting when healthy
+        d.health = d.traits.maxHealth * 0.3;
+        d.lastAttackerId = att.id;
+        const d0 = dist(d, att);
+        let thinks = 0;
+        for (let t = 0; t < 40; t++) {
+          att.action = 'attack';
+          att.targetId = d.id;
+          att.decisionCooldown = 1000;
+          sim.spatial.rebuild(sim.state.agents);
+          if (d.decisionCooldown <= 0) {
+            think(sim, d);
+            thinks++;
+          } else d.decisionCooldown--;
+          act(sim, d);
+          if (d.action === 'attack') attackTicks++;
+          sim.state.tick++;
+        }
+        expect(thinks).toBeLessThan(20);
+        expect(dist(d, att)).toBeGreaterThan(d0 + 10);
+      }
+    }
+    expect(attackTicks).toBe(0);
+  });
+
+  it('a raider does not stay rooted in an enemy camp with nothing left to plunder', () => {
+    // pre-fix: the raid on an empty store was re-chosen every tick on arrival ("At war — raiding the camp")
+    for (let seed = 1; seed <= 3; seed++) {
+      const sim = makeSim(seed);
+      sim.state.world.food.fill(0);
+      const r = spawn(sim, 260, 120, { aggression: 1 });
+      const own = foundTribe(sim, r, [], 'Raiders');
+      own.homeX = 40;
+      own.homeY = 120;
+      const e = spawn(sim, 300, 220, { aggression: 0.2 });
+      const enemy = foundTribe(sim, e, [], 'Keepers');
+      enemy.homeX = 260;
+      enemy.homeY = 120;
+      enemy.stockpile = 0;
+      own.relations[enemy.id] = -0.8;
+      enemy.relations[own.id] = -0.8;
+      let thinks = 0;
+      let raiding = 0;
+      for (let t = 0; t < 200; t++) {
+        sim.spatial.rebuild(sim.state.agents);
+        if (r.decisionCooldown <= 0) {
+          think(sim, r);
+          thinks++;
+          if (/raiding/.test(r.thought)) raiding++;
+        } else r.decisionCooldown--;
+        act(sim, r);
+        r.food = r.traits.maxFood * 0.9;
+        r.energy = 1;
+        sim.state.tick++;
+      }
+      expect(raiding).toBe(0);
+      expect(thinks).toBeLessThan(150);
+      expect(r.carried).toBe(0);
+    }
+  });
+
+  it('a one-tile painted wall counts as blocking (agents are not pinned against it); rocks and short stubs do not', () => {
+    const wallColumn = (sim: Simulation, tx: number, ty0: number, ty1: number) => {
+      const w = sim.state.world;
+      for (let ty = ty0; ty <= ty1; ty++) w.terrain[ty * w.width + tx] = TERRAIN.Wall;
+      w.terrainVersion++;
+    };
+    const t = (v: number) => (v + 0.5) * 8; // tile centre (tileSize 8)
+    const probe = makeSim(1);
+    wallColumn(probe, 20, 0, 29); // across the whole map
+    wallColumn(probe, 10, 5, 5); // a single rock
+    wallColumn(probe, 30, 10, 12); // a three-tile stub
+    expect(clearPath(probe, t(23), t(15), t(16), t(15))).toBe(false);
+    expect(clearPath(probe, t(7), t(5), t(13), t(5))).toBe(true);
+    expect(clearPath(probe, t(27), t(11), t(33), t(11))).toBe(true);
+    // pre-fix: a hungry agent kept foraging at the wall toward food it could never reach, in 5/5 seeds
+    for (let seed = 1; seed <= 5; seed++) {
+      const sim = makeSim(seed);
+      wallColumn(sim, 20, 0, 29);
+      sim.state.world.food.fill(0);
+      for (let ty = 5; ty <= 25; ty++) sim.state.world.food[ty * sim.state.world.width + 16] = 14;
+      const a = spawn(sim, t(23), t(15), { perception: 0.8 });
+      a.food = a.traits.maxFood * 0.4;
+      const x0 = a.x;
+      const y0 = a.y;
+      brainTicks(sim, [a], 300);
+      expect(a.action === 'forage' && a.targetX < 20 * 8).toBe(false);
+      expect(Math.hypot(a.x - x0, a.y - y0)).toBeGreaterThan(20);
+    }
   });
 });
 

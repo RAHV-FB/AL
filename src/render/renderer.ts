@@ -225,11 +225,13 @@ export class Renderer {
 
     const sel = view.selectedId >= 0 ? sim.getAgent(view.selectedId) : undefined;
     this.updateTrail(sel);
-    if (sel) this.drawSelectionWorld(ctx, sim, sel, view, z, time);
+    if (sel) this.drawSelectionWorld(ctx, sel, view, z, time);
 
     this.painter.collect(sim, z, b.x0, b.y0, b.x1, b.y1);
     this.painter.draw(ctx, sim, z, night, view.overlay === 'disease', time);
     this.stats.agentsDrawn = this.painter.visN;
+    // over the agent bodies: drawn under them, the lines vanished in a crowd (e.g. a camp at night)
+    if (sel && view.showRelations) this.drawRelations(ctx, sim, sel, z);
     if (view.showCamps) this.drawCampsWorld(ctx, sim, z, time, true);
 
     if (view.brush) this.drawBrush(ctx, view.brush, z, time);
@@ -474,7 +476,8 @@ export class Renderer {
     if (this.trailLen < TRAIL_N) this.trailLen++;
   }
 
-  private drawSelectionWorld(ctx: CanvasRenderingContext2D, sim: Simulation, a: Agent, view: ViewOptions, z: number, time: number): void {
+  /** Vision radius and motion trail of the selected agent (world space, under agents). */
+  private drawSelectionWorld(ctx: CanvasRenderingContext2D, a: Agent, view: ViewOptions, z: number, time: number): void {
     const px = 1 / z;
     if (view.showVision && a.traits && a.traits.perception > 0) {
       const R = a.traits.perception;
@@ -517,45 +520,50 @@ export class Renderer {
       }
       ctx.globalAlpha = 1;
     }
-    if (view.showRelations && a.relationships && a.relationships.length) {
-      ctx.lineCap = 'round';
-      for (const r of a.relationships) {
-        const o = sim.getAgent(r.id);
-        if (!o) continue;
-        const aff = Number.isFinite(r.affinity) ? r.affinity : 0;
-        let col: string;
-        let alpha: number;
-        if (r.kin > 0) {
-          col = '#f2c14e';
-          alpha = 0.55 + 0.35 * Math.max(0, aff);
-        } else if (aff >= 0.12) {
-          col = '#5fe08f';
-          alpha = 0.3 + 0.6 * aff;
-        } else if (aff <= -0.12) {
-          col = '#ff5a5a';
-          alpha = 0.3 + 0.6 * -aff;
-        } else continue;
-        ctx.globalAlpha = Math.min(1, alpha);
-        ctx.strokeStyle = col;
-        ctx.lineWidth = (r.kin > 0 ? 1.8 : 1.4) * px;
-        if (r.kin > 0) {
-          this.dash[0] = 4 * px;
-          this.dash[1] = 3 * px;
-          ctx.setLineDash(this.dash);
-        }
-        ctx.beginPath();
-        ctx.moveTo(a.x, a.y);
-        ctx.lineTo(o.x, o.y);
-        ctx.stroke();
-        if (r.kin > 0) ctx.setLineDash(this.noDash);
-        ctx.fillStyle = col;
-        ctx.beginPath();
-        ctx.arc(o.x, o.y, agentRadius(o) + 2.5 * px, 0, TAU);
-        ctx.lineWidth = 1.4 * px;
-        ctx.stroke();
+  }
+
+  /** Lines (and partner rings) from the selected agent to its kin, friends and enemies (world space, over agents). */
+  private drawRelations(ctx: CanvasRenderingContext2D, sim: Simulation, a: Agent, z: number): void {
+    if (!a.relationships || !a.relationships.length) return;
+    const px = 1 / z;
+    ctx.setLineDash(this.noDash);
+    ctx.lineCap = 'round';
+    for (const r of a.relationships) {
+      const o = sim.getAgent(r.id);
+      if (!o) continue;
+      const aff = Number.isFinite(r.affinity) ? r.affinity : 0;
+      let col: string;
+      let alpha: number;
+      if (r.kin > 0) {
+        col = '#f2c14e';
+        alpha = 0.55 + 0.35 * Math.max(0, aff);
+      } else if (aff >= 0.12) {
+        col = '#5fe08f';
+        alpha = 0.3 + 0.6 * aff;
+      } else if (aff <= -0.12) {
+        col = '#ff5a5a';
+        alpha = 0.3 + 0.6 * -aff;
+      } else continue;
+      ctx.globalAlpha = Math.min(1, alpha);
+      ctx.strokeStyle = col;
+      ctx.lineWidth = (r.kin > 0 ? 1.8 : 1.4) * px;
+      if (r.kin > 0) {
+        this.dash[0] = 4 * px;
+        this.dash[1] = 3 * px;
+        ctx.setLineDash(this.dash);
       }
-      ctx.globalAlpha = 1;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(o.x, o.y);
+      ctx.stroke();
+      if (r.kin > 0) ctx.setLineDash(this.noDash);
+      ctx.fillStyle = col;
+      ctx.beginPath();
+      ctx.arc(o.x, o.y, agentRadius(o) + 2.5 * px, 0, TAU);
+      ctx.lineWidth = 1.4 * px;
+      ctx.stroke();
     }
+    ctx.globalAlpha = 1;
   }
 
   /** Highlight ring, name tag and vitals for the hovered/selected agent (screen space). */

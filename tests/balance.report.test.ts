@@ -9,11 +9,13 @@
  * Columns: pop, births, deaths (total + by cause: starv/old/fight/sick/disas/remov), living tribes,
  * mean generation, avg hunger (1 - food/maxFood), total world food, mean genes speed/size/aggr/social.
  * Deaths by cause are counted by wrapping sim.killAgent, so they never depend on the stats module.
+ * The summary adds the lowest population after the peak (a crash shows up as a deep trough) and the
+ * drift of every gene mean from day 0 to the last day (evolution under the scenario's pressures).
  */
 import { describe, expect, it } from 'vitest';
 import { Simulation } from '../src/sim/simulation';
 import { SCENARIOS } from '../src/sim/presets';
-import { DEATH_CAUSES, G, type DeathCause } from '../src/sim/types';
+import { DEATH_CAUSES, G, GENES, GENE_COUNT, type DeathCause } from '../src/sim/types';
 import { envInt, envStr } from '../scripts/qa-helpers';
 
 const DAYS = envInt('AL_BALANCE_DAYS', 12);
@@ -51,7 +53,16 @@ describe('balance report (informational)', () => {
       const t0 = performance.now();
       let births0 = sim.state.stats.totals.births;
       let peak = sim.state.agents.length;
+      let peakDay = 0;
+      let troughAfterPeak = peak;
+      let troughDay = 0;
       let extinctDay = -1;
+      const geneMeans = (): number[] => {
+        const m = new Array<number>(GENE_COUNT).fill(0);
+        for (const a of sim.state.agents) for (let g = 0; g < GENE_COUNT; g++) m[g] += a.genes[g];
+        return m.map((v) => (sim.state.agents.length ? v / sim.state.agents.length : NaN));
+      };
+      const genes0 = geneMeans();
 
       const row = (day: number, births: number) => {
         const s = sim.state;
@@ -85,7 +96,16 @@ describe('balance report (informational)', () => {
       for (let day = 1; day <= DAYS; day++) {
         for (let t = 0; t < dayLength; t++) {
           sim.step();
-          if (sim.state.agents.length > peak) peak = sim.state.agents.length;
+          const n = sim.state.agents.length;
+          if (n > peak) {
+            peak = n;
+            peakDay = day;
+            troughAfterPeak = n;
+            troughDay = day;
+          } else if (n < troughAfterPeak) {
+            troughAfterPeak = n;
+            troughDay = day;
+          }
         }
         const births = sim.state.stats.totals.births - births0;
         births0 = sim.state.stats.totals.births;
@@ -95,11 +115,14 @@ describe('balance report (informational)', () => {
       const s = sim.state;
       const maxGen = s.agents.reduce((m, a) => Math.max(m, a.generation), 0);
       const secs = (performance.now() - t0) / 1000;
+      const genes1 = geneMeans();
       lines.push(
-        `summary: final pop ${s.agents.length}, peak ${peak}, total births ${s.stats.totals.births}, deaths ${s.stats.totals.deaths}, ` +
+        `summary: final pop ${s.agents.length}, peak ${peak} (day ${peakDay}), lowest after peak ${troughAfterPeak} (day ${troughDay}), ` +
+          `total births ${s.stats.totals.births}, deaths ${s.stats.totals.deaths}, ` +
           `max generation ${maxGen}, tribes ever ${s.nextTribeId - 1}, ` +
           `${extinctDay > 0 ? `EXTINCT on day ${extinctDay}, ` : ''}${secs.toFixed(1)}s (${((secs * 1000) / Math.max(1, s.tick)).toFixed(2)} ms/tick)`,
       );
+      lines.push('gene drift (day 0 → end): ' + GENES.map((g, i) => `${g} ${genes0[i].toFixed(2)}→${genes1[i].toFixed(2)}`).join(', '));
       const recent = s.events.filter((e) => e.severity === 'major').slice(-5);
       if (recent.length) lines.push('last major events: ' + recent.map((e) => `[t${e.tick}] ${e.message}`).join(' | '));
       console.log(lines.join('\n'));

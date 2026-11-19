@@ -7,7 +7,7 @@ import './analytics.css';
 import type { Simulation } from '../sim/simulation';
 import { DEATH_CAUSES, GENE_COUNT, GENES, HIST_BINS, type ActionKind, type DeathCause, type GeneName, type Role, type StatsSample } from '../sim/types';
 import { ROLES, currentSummary } from '../sim/stats';
-import { DAY_START } from '../sim/ecology';
+import { DAY_START, estimateCarryingCapacity } from '../sim/ecology';
 import { BarChart, Heatmap, LineChart, PALETTE, Sparkline, StackedAreaChart, esc, formatNum, formatPct } from './charts';
 
 export interface AnalyticsPanel {
@@ -78,6 +78,15 @@ export function dayOfTick(sim: Simulation, tick: number): number {
   return Math.floor((Math.max(0, tick) + Math.round(DAY_START * dl)) / dl) + 1;
 }
 
+/**
+ * The same calendar as a continuous position for chart x axes ("Day 7.5" = half way through the
+ * clock's Day 7): Math.floor(dayPosOfTick(t)) === dayOfTick(t), so a chart and the event log agree.
+ */
+export function dayPosOfTick(sim: Simulation, tick: number): number {
+  const dl = Math.max(1, Math.round(sim.config.dayLength || 600));
+  return (Math.max(0, tick) + Math.round(DAY_START * dl)) / dl + 1;
+}
+
 export function tribeColor(hue: number): string {
   return `hsl(${Math.round(((hue % 360) + 360) % 360)}, 62%, 56%)`;
 }
@@ -131,7 +140,11 @@ function rollingRate(samples: StatsSample[], get: (s: StatsSample) => number, wi
 }
 
 const dayFmt = (v: number) => `Day ${formatNum(v)}`;
-const dayHover = (v: number) => `Day ${v < 10 ? v.toFixed(2) : v.toFixed(1)}`;
+// truncated, not rounded: "Day 11.0" late on Day 10 would contradict the clock
+const dayHover = (v: number) => {
+  const k = v < 10 ? 100 : 10;
+  return `Day ${(Math.floor(v * k + 1e-6) / k).toFixed(v < 10 ? 2 : 1)}`;
+};
 const pctFmt = (v: number) => `${Math.round(v * 100)}%`;
 const rateFmt = (v: number) => (v < 10 ? v.toFixed(1) : formatNum(Math.round(v)));
 
@@ -187,7 +200,7 @@ export function createAnalyticsPanel(container: HTMLElement): AnalyticsPanel {
   const tBirths = tile('Births / day', C.aqua, 'Births per day over the last day');
   const tDeaths = tile('Deaths / day', C.red, 'Deaths per day over the last day');
   const tHealth = tile('Avg health', C.green, 'Mean health as a fraction of each agent\'s maximum');
-  const tFood = tile('Food', C.yellow, 'Total edible plant food in the world');
+  const tFood = tile('Food', C.yellow, 'Total edible plant food in the world. "Supports ≈ N" is the carrying capacity: how many average agents the current regrowth (soil fertility, season, disasters, regrowth setting) could feed indefinitely.');
   const tTribes = tile('Tribes', C.violet, 'Tribes with at least one living member');
   const tGen = tile('Max generation', C.orange, 'Highest generation among living agents');
   const tInf = tile('Infected', C.magenta, 'Agents currently carrying a disease');
@@ -348,7 +361,13 @@ export function createAnalyticsPanel(container: HTMLElement): AnalyticsPanel {
     setText(tHealth.value, sum.population ? formatPct(sum.avgHealth) : '–');
     setText(tHealth.sub, last ? `hunger ${formatPct(last.avgHunger)}` : '');
     setText(tFood.value, formatNum(Math.round(sum.totalFood)));
-    setText(tFood.sub, last ? `fertility ${formatPct(last.avgFertility)}` : '');
+    let cap = NaN;
+    try {
+      cap = estimateCarryingCapacity(s);
+    } catch {
+      /* estimate is informational only */
+    }
+    setText(tFood.sub, (last ? `fertility ${formatPct(last.avgFertility)}` : '') + (Number.isFinite(cap) ? ` · supports ≈${formatNum(Math.round(cap))}` : ''));
     setText(tTribes.value, String(sum.tribes));
     let big = '';
     if (last && last.tribePops.length) {
@@ -441,7 +460,7 @@ export function createAnalyticsPanel(container: HTMLElement): AnalyticsPanel {
     const samples = start > 0 ? all.slice(start) : all;
     const n = samples.length;
     const x = new Float64Array(n);
-    for (let i = 0; i < n; i++) x[i] = samples[i].tick / dayLen;
+    for (let i = 0; i < n; i++) x[i] = dayPosOfTick(s, samples[i].tick); // the clock's day numbering
     view = { samples, x, key };
     setText(status, n0 ? `${n0} samples · every ${interval} ticks` : 'no samples yet');
 

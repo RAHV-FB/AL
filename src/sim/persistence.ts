@@ -23,9 +23,8 @@
  * Floats are exact (typed arrays as raw bytes, JS numbers via shortest round-trip JSON).
  * The RNG state is captured from `sim.rng` directly, so saving right after Simulation.create()
  * (before any step) is also exact.
- * NOT saved: the Simulation's private, not-yet-applied user-intervention queue (enqueue()d this
- * frame, applied at the start of the next step) and a pending "restart & replay" queue. Interventions
- * already applied are in `state.interventionLog`. If that matters, step once before saving.
+ * Also saved: interventions enqueue()d but not yet applied (state.pendingQueue) and the rest of a
+ * "restart & replay" in progress (state.pendingReplay), so a save taken mid-replay continues it exactly.
  *
  * LOADING treats the file as untrusted input: size limit, friendly JSON errors, format/version check,
  * then every field is validated & sanitised (see sanitizeState). Fatal problems (not a save, wrong
@@ -58,6 +57,7 @@ import {
   type EnvState,
   type EventCategory,
   type Intervention,
+  type InterventionRecord,
   type Role,
   type SimConfig,
   type SimState,
@@ -1042,7 +1042,7 @@ function sanitizeStats(raw: unknown, r: Repairs): StatsState {
 const STATE_KEYS = new Set([
   'version', 'scenarioId', 'config', 'tick', 'rngState', 'nextAgentId', 'nextTribeId', 'nextEventId', 'nextDisasterId',
   'world', 'env', 'agents', 'tribes', 'lineage', 'events', 'disasters', 'scheduled', 'interventionLog', 'stats',
-  'interventionLogDropped',
+  'interventionLogDropped', 'pendingReplay', 'pendingQueue',
 ]);
 
 /** Next free id: the saved counter when it is sane, but always above every id in use. */
@@ -1190,5 +1190,19 @@ function sanitizeState(raw: Obj, r: Repairs): SimState {
   if (dropped !== undefined) state.interventionLogDropped = int(r, 'interventionLogDropped', dropped, 0, 0, Number.MAX_SAFE_INTEGER);
   const trimmed = (Array.isArray(raw.interventionLog) ? raw.interventionLog.length : 0) - LIMITS.interventionLog;
   if (trimmed > 0) state.interventionLogDropped = (state.interventionLogDropped ?? 0) + trimmed;
+  // optional: a "restart & replay" in progress and interventions enqueued but not yet applied
+  if (raw.pendingReplay !== undefined) {
+    const pr = list(r, 'pendingReplay', raw.pendingReplay, LIMITS.interventionLog, true, (e) => {
+      if (!isObj(e) || !isFiniteNum(e.tick) || e.tick < 0) return null;
+      const iv = sanitizeIntervention(e.intervention, refs, r);
+      return iv ? { tick: Math.floor(e.tick), intervention: iv } : null;
+    }) as unknown as InterventionRecord[];
+    pr.sort((p, q) => p.tick - q.tick);
+    if (pr.length) state.pendingReplay = pr;
+  }
+  if (raw.pendingQueue !== undefined) {
+    const pq = list(r, 'pendingQueue', raw.pendingQueue, 1000, true, (e) => sanitizeIntervention(e, refs, r)) as unknown as Intervention[];
+    if (pq.length) state.pendingQueue = pq;
+  }
   return state;
 }

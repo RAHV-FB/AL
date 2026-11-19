@@ -234,7 +234,7 @@ Derived indexes (`agentById`, `tribeById`, `lineageById` and the spatial hash) l
 - **Same seed + same interventions at the same ticks ⇒ the same simulation.** `Simulation.hash()` fingerprints the state, and `tests/determinism.test.ts` checks it at several checkpoints.
 - **Your interventions are recorded** with their ticks in `state.interventionLog`, including parameter changes. **Replay my interventions** recreates the run from the scenario and seed, then re-applies the log at the original ticks.
 - **Save files** are JSON snapshots of `SimState`, tagged with `"format": "artificial-life-save"` and a `version` (`SAVE_VERSION`). Typed arrays are base64-encoded, and NaN and ±Infinity are tagged.
-- **Loading** treats the file as untrusted. It enforces a size limit and checks the format and version, then validates every field. Damaged values are repaired, and unusable files are rejected with a readable message. The loader can list each repair (`deserializeState(json, { warnings })`), but the app does not show that list yet, so a repaired file loads like an intact one.
+- **Loading** treats the file as untrusted. It enforces a size limit and checks the format and version, then validates every field. Damaged values are repaired, and unusable files are rejected with a readable message. The loader lists each repair (`deserializeState(json, { warnings })`) and the app shows them in a warning toast (full list in the browser console), so a damaged file never loads silently.
 - **Save → load → continue** gives the same simulation as never saving: agents, tribes and the world evolve identically. This is covered by `tests/determinism.test.ts` and `tests/persistence.test.ts`. Some event-log messages can still differ after a load, because the bookkeeping behind them is not saved. Examples are an epidemic's final death and peak counts, and some alliance announcements.
 - **Caveat:** replays are bit-exact within the same build and JavaScript engine. World generation uses only IEEE-exact arithmetic, but the simulation calls `Math.sin`, `Math.exp` and similar functions, which may round differently in the last bit on another engine. A replay can therefore drift slightly across browsers.
 
@@ -250,7 +250,7 @@ Derived indexes (`agentById`, `tribeById`, `lineageById` and the spatial hash) l
 | `tests/perf.bench.test.ts` | about 1,000 agents for 500 ticks; prints mean/p50/p95 ms per tick and checks a generous budget |
 | `tests/balance.report.test.ts` | informational: a per-day table for each preset (population, births, deaths by cause, tribes, generation, hunger, food, gene means) |
 | `tests/spec-requirements.test.ts` | the required features and presets exist, every intervention is explained, the offline build is self-contained, selection visibly shifts a gene, and this README matches the code |
-| `tests/spec-docs-drift.test.ts` | what this README says about loading save files (repairs are made and listed by the loader, not shown by the app) still matches the code |
+| `tests/spec-docs-drift.test.ts` | what this README says about loading save files (repairs are made, listed and shown to the user) still matches the code |
 | `scripts/browser-smoke.mjs` | loads `dist/index.html` (or `--url`) in headless Chromium and fails on console or page errors, failed requests or a blank canvas; toggles play/pause, presses a few shortcuts and saves `docs/screenshot.png` |
 
 Vitest hides the console output of passing tests. Add `--silent=false` to see the reports:

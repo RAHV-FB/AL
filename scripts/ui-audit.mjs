@@ -811,13 +811,17 @@ try {
         }
         return { x: best.x, y: best.y, n: bn, next: s.nextAgentId, t: window.app.sim.tick, pop: s.agents.length };
       });
+      // Agents keep moving after the removal is applied (interventions run at tick start, movement later in
+      // the same tick), so judge by identity: every agent inside the brush when it fired must be gone.
+      // The sim is paused, so nothing moves between this snapshot and the tick that applies the click.
+      const inside = await ev((t) => window.__ui.agentsIn(t.x, t.y, 38).map((a) => a.id), t);
       await clickWorld(t.x, t.y, { zoom: 2 });
       await waitTick(t.t + 1);
       const r = await ev(
-        (t) => ({ left: window.__ui.agentsIn(t.x, t.y, 40).filter((a) => a.id < t.next).length, pre: window.app.sim.state.agents.filter((a) => a.id < t.next).length }),
-        t,
+        (q) => ({ left: q.inside.filter((id) => window.app.sim.getAgent(id)).length, pre: window.app.sim.state.agents.filter((a) => a.id < q.next).length }),
+        { inside, next: t.next },
       );
-      assert(r.left === 0, `${r.left} pre-existing agents left in the brush`);
+      assert(r.left === 0, `${r.left} of ${inside.length} agents inside the brush survived`);
       // newborns of this tick are appended at its end; count only agents that existed before the click
       assert(r.pre <= t.pop - t.n && r.pre >= t.pop - t.n - 10, `pre-existing agents ${t.pop} → ${r.pre} (expected −${t.n})`);
       return `removed ${t.n} agents`;
@@ -1136,11 +1140,13 @@ try {
   await section('view', async () => {
     // Frames are compared after rendering twice at the same fixed animation time, so only the
     // control under test can change pixels (paused sim, no hover, no brush).
+    // The minimap caches a thumbnail on its own frame counter (and the app's rAF renders run in between),
+    // so it is excluded from these pixel comparisons; it has dedicated checks of its own.
     const renderSnap = () =>
       ev(() => {
         const a = window.app;
         a.view.hoverId = -1;
-        a.renderer.render(a.sim, a.view, 987654);
+        a.renderer.render(a.sim, { ...a.view, showMinimap: false }, 987654);
         const c = a.renderer.canvas;
         window.__snap = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
         return true;
@@ -1149,7 +1155,7 @@ try {
       ev(() => {
         const a = window.app;
         a.view.hoverId = -1;
-        a.renderer.render(a.sim, a.view, 987654);
+        a.renderer.render(a.sim, { ...a.view, showMinimap: false }, 987654);
         const c = a.renderer.canvas;
         const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
         const p = window.__snap;

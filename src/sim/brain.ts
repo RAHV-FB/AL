@@ -62,6 +62,8 @@ const FOOD_MEMORY_TTL = 5000;
 const DANGER_MEMORY_TTL = 1500;
 const DANGER_RADIUS = 60;
 const ATTACK_INTERVAL = 15;
+/** Below this fraction of max health a fighter breaks off (actAttack), so think() does not choose to fight. */
+const FIGHT_MIN_HP = 0.35;
 const SOCIAL_INTERVAL = 10;
 const SHARE_RANGE = 8;
 const MATE_RANGE = 8;
@@ -147,6 +149,8 @@ const P = {
   hunger: 0,
   hp: 1,
   adult: true,
+  /** Healthy enough to fight (actAttack breaks off below FIGHT_MIN_HP). */
+  fit: true,
   matingReady: false,
   mateChecks: 0,
   surplus: 0,
@@ -593,7 +597,7 @@ function perceive(sim: Simulation, a: Agent, b: Agent, pw: number): void {
     // ratio below which I stand my ground when attacked
     const brave = 0.8 + 0.6 * Math.min(1.5, P.aggEff) + 0.3 * P.skCombat - 0.7 * (1 - P.hp);
     // fight back against whoever is attacking me — or a fresh enemy (deep grudge) close by
-    if ((attackingMe || (grudge && aff < SOCIAL_TUNING.grudge && prox > 0.5)) && P.adult && ratio < brave) {
+    if ((attackingMe || (grudge && aff < SOCIAL_TUNING.grudge && prox > 0.5)) && P.adult && P.fit && ratio < brave) {
       const sc = (attackingMe ? 1.5 : 0.8) * (0.5 + 0.5 * prox) * (brave - ratio + 0.2);
       if (sc > P.avengeScore) {
         P.avengeScore = sc;
@@ -806,6 +810,10 @@ export function think(sim: Simulation, a: Agent): void {
   P.hunger = hunger;
   P.hp = hp;
   P.adult = adult;
+  // the same test as actAttack's break-off: an agent too hurt to fight treats its attacker as a threat
+  // (choosing 'attack' here would be cancelled by act every tick, freezing the agent mid-fight)
+  const fit = !(a.health < tr.maxHealth * FIGHT_MIN_HP);
+  P.fit = fit;
   P.surplus = a.carried + Math.max(0, a.food - maxFood * 0.55);
   P.matingReady =
     adult && a.reproCooldown <= 0 && hunger < 0.6 && a.energy > 0.28 && hp > 0.35 && fertEff > 0.02 && sim.canSpawn();
@@ -852,7 +860,7 @@ export function think(sim: Simulation, a: Agent): void {
   let defended: Agent | null = null;
   let defendScore = 0;
   let defendChild = false;
-  if (adult) {
+  if (adult && fit) {
     for (let i = 0; i < aggressors.length; i++) {
       const h = aggressors[i];
       const ratio = combatPower(h) / P.myPow;
@@ -1009,7 +1017,7 @@ export function think(sim: Simulation, a: Agent): void {
   let rival: Agent | null = null;
   let rivalScore = 0;
   let rivalWhy = 0; // 3 war / feud, 4 rob / hunt, 5 territory, 6 contest a patch, 7 join a friend's fight
-  if (adult && cands.length) {
+  if (adult && fit && cands.length) {
     // the odds I accept: bold, skilled, healthy agents take on more — and the starving grow desperate
     const boldness =
       0.7 + 0.45 * Math.min(1.5, aggEff) + 0.25 * skCombat + (role === 'warrior' ? 0.1 : 0) - 0.6 * (1 - hp) + 0.5 * Math.max(0, hunger - 0.6);
@@ -1124,6 +1132,9 @@ export function think(sim: Simulation, a: Agent): void {
       const dy = et.homeY - a.y;
       const d = Math.sqrt(dx * dx + dy * dy);
       if (!(d < RAID_RANGE)) continue;
+      // nothing to plunder (raidStockpile takes > 0.5): a raider sent to an empty store re-chose the raid
+      // every tick on arrival and stood rooted in the enemy camp
+      if (!(et.stockpile > 0.5)) continue;
       const v = (-rel * (0.35 + 0.65 * clamp01(et.stockpile / 80))) / (1 + d / 400);
       if (v > rv) {
         rv = v;
@@ -1773,7 +1784,7 @@ function actAttack(sim: Simulation, a: Agent): void {
     return;
   }
   const tr = a.traits;
-  if (a.health < tr.maxHealth * 0.35 || a.actionTicks > 400) {
+  if (a.health < tr.maxHealth * FIGHT_MIN_HP || a.actionTicks > 400) {
     rethink(a); // badly hurt or a long fruitless chase: break off
     return;
   }

@@ -96,13 +96,35 @@ export function stepDir(sim: Simulation, a: Agent, dx: number, dy: number, facto
 
 /** Impassable samples in a row (half a tile apart) that make clearPath() report a blocked line. */
 const BLOCKED_RUN = 3;
+/** Impassable tiles among the 5×5 around a thin crossing that make it a wall or channel, not a rock to step round. */
+const WALL_TILES = 5;
+
+/** True when the obstacle at (x,y) extends well beyond one tile (≥ WALL_TILES impassable tiles in the 5×5 around it). */
+function wallLike(sim: Simulation, x: number, y: number): boolean {
+  const w = sim.state.world;
+  const ts = w.tileSize;
+  const tx0 = Math.floor(x / ts);
+  const ty0 = Math.floor(y / ts);
+  let n = 0;
+  for (let oy = -2; oy <= 2; oy++) {
+    const ty = ty0 + oy;
+    if (ty < 0 || ty >= w.height) continue;
+    for (let ox = -2; ox <= 2; ox++) {
+      const tx = tx0 + ox;
+      if (tx < 0 || tx >= w.width) continue;
+      if (!TERRAIN_INFO[w.terrain[ty * w.width + tx] as TerrainType].passable && ++n >= WALL_TILES) return true;
+    }
+  }
+  return false;
+}
 
 /**
  * True when the straight line (x0,y0)→(x1,y1) can be walked: it never crosses a stretch of impassable
- * terrain thicker than about a tile (deep water, walls) and ends on passable ground. Thin obstacles are
- * left to stepDir's wall-following, but a river or a painted wall between an agent and its goal would
- * otherwise pin it against the bank (see brain.ts: targets are chosen with this check). Samples every half
- * tile, so the cost is ≈ 2 × length / tileSize tile lookups; allocation-free.
+ * terrain thicker than about a tile (deep water, walls), nor a thin one that runs on to the sides (a wall
+ * painted with a one-tile brush), and ends on passable ground. Small obstacles (a rock, a short stub of
+ * wall) are left to stepDir's wall-following, but a river or a painted wall between an agent and its goal
+ * would otherwise pin it against the bank (see brain.ts: targets are chosen with this check). Samples every
+ * half tile, so the cost is ≈ 2 × length / tileSize tile lookups; allocation-free.
  */
 export function clearPath(sim: Simulation, x0: number, y0: number, x1: number, y1: number): boolean {
   if (!sim.passableAt(x1, y1)) return false;
@@ -114,8 +136,12 @@ export function clearPath(sim: Simulation, x0: number, y0: number, x1: number, y
   let run = 0;
   for (let i = 1; i < n; i++) {
     const t = i / n;
-    if (sim.passableAt(x0 + dx * t, y0 + dy * t)) run = 0;
-    else if (++run >= BLOCKED_RUN) return false;
+    const sx = x0 + dx * t;
+    const sy = y0 + dy * t;
+    if (sim.passableAt(sx, sy)) run = 0;
+    // two samples in a row: the line crosses the obstacle (not just a clipped corner) — blocked when it is
+    // wall-like there, since stepDir cannot get round a long one-tile wall
+    else if (++run >= BLOCKED_RUN || (run === 2 && wallLike(sim, sx, sy))) return false;
   }
   return true;
 }

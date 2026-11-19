@@ -466,6 +466,13 @@ export interface SimState {
    * Once non-zero, "restart & replay" can no longer reproduce the run exactly.
    */
   interventionLogDropped?: number;
+  /**
+   * "Restart & replay" entries not yet reached (absent = none). Kept in the state so a save taken during a
+   * replay continues it exactly. Control data, not simulation state: excluded from hash().
+   */
+  pendingReplay?: InterventionRecord[];
+  /** User interventions enqueued but not yet applied (absent = none); applied at the start of the next tick. */
+  pendingQueue?: Intervention[];
 }
 
 // ---------------------------------------------------------------- scenarios

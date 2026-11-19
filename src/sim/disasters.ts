@@ -8,7 +8,9 @@
  *    infections, danger memories, event log.
  *  - Ongoing effects while active: world.climateMod (per-tile regrowth multiplier
  *    read by ecology, smooth falloff at the edge of the radius, gradual recovery
- *    over the last ~15% of the duration) and env.tempOffset (cold snaps).
+ *    over the last ~15% of the duration) and temperature: GLOBAL cold snaps set
+ *    env.tempOffset (part of the world-wide env.temperature); LOCAL cold snaps only
+ *    chill their own area — read them with temperatureAt(sim, x, y).
  *
  * Determinism: randomness only via sim.rng. climateMod is a pure function of
  * (active disasters, tick quantised to CLIMATE_INTERVAL) and tempOffset of

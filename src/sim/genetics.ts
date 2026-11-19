@@ -2,6 +2,10 @@
 /**
  * Genetics & evolution: genome → phenotype, inheritance, mate choice, reproduction.
  *
+ * Density dependence: breeding needs good body condition (stomach, stamina, health ≥ 50 %) and
+ * a home range whose plants are not grazed down (REPRO.minRangeFood), so births slow as a growing
+ * population eats into its food supply — the population is food-limited without any global cap.
+ *
  * NOTHING IS FREE. Every gene that helps an agent either costs food every tick
  * (upkeep, see `basalBurn`, paid in lifecycle.updateVitals) or carries a built-in
  * drawback, so allele frequencies only move when the local environment rewards
@@ -16,8 +20,8 @@
  *  perception  vision 25–140 u (food & danger from afar)     small neural upkeep
  *  metabolism  faster healing & stamina recovery, body heat, multiplies ALL basal upkeep (0.6–1.5×)
  *              less tiring movement
- *  fertility   breeds when hungrier, shorter cooldown,       each child receives less food (weaker start)
- *              cheaper children (r- vs K-strategy)
+ *  fertility   breeds when hungrier and on poorer land,      each child receives less food (weaker start)
+ *              shorter cooldown, cheaper children (r- vs K-strategy)
  *  longevity   max age 3500–9000 ticks                       cellular-repair upkeep every tick
  *  immunity    disease resistance (disease.ts)               immune upkeep every tick
  *  efficiency  0.5–1.5 food gained per bite                  heavier specialised gut: digestive upkeep
@@ -218,7 +222,7 @@ export const REPRO = {
    */
   rangeTiles: 3,
   rangeStride: 1,
-  minRangeFood: 0.75,
+  minRangeFood: 0.72,
   rangeFertilityDrop: 0.4,
   /** Stamina each parent spends on a birth. */
   energyCost: 0.12,
@@ -269,7 +273,7 @@ export function areCloseKin(a: Agent, b: Agent): boolean {
 /**
  * Individual readiness to breed, ignoring the partner (cheap pre-filter for the brain):
  * alive adult, not senescent (age < 0.9·longevity), cooldown over, stomach above the
- * fertility-dependent threshold, energy > 0.25, health ≥ 30%.
+ * fertility-dependent threshold, energy > 0.25, health ≥ 50% (good body condition).
  */
 export function isFertile(a: Agent): boolean {
   const t = a.traits;
@@ -284,7 +288,11 @@ export function isFertile(a: Agent): boolean {
   );
 }
 
-/** Whether a and b can mate right now (both fertile, not close kin, genetically compatible, room to spawn). */
+/**
+ * Whether a and b can mate right now: both fertile, not close kin, genetically compatible, room to
+ * spawn, and the home range around the couple still lush enough for both parents
+ * (rangeFoodThreshold; checked last because it reads (2·rangeTiles+1)² tiles).
+ */
 export function canMate(sim: Simulation, a: Agent, b: Agent): boolean {
   if (a === b || a.id === b.id) return false;
   if (!isFertile(a) || !isFertile(b)) return false;
