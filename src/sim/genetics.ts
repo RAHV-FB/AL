@@ -217,11 +217,14 @@ export const REPRO = {
    * tiles within rangeTiles of the couple (ecology.localFoodFraction, sampled every rangeStride
    * tiles) must reach each parent's rangeFoodThreshold (minRangeFood at fertility 0, lowered by
    * rangeFertilityDrop × fertility: r-strategists breed on poorer land). As a growing population
-   * grazes its land down — first around its crowded camps — births stop well before the stock is
-   * exhausted (emergent density dependence; there is no global population check).
+   * grazes its land down, births stop well before the stock is exhausted (emergent density
+   * dependence; there is no global population check).
+   * The window is the land an agent forages over — ±6 tiles ≈ ±48 world units, sampled every 2nd
+   * tile (49 reads) — not just the camp it crowds into: with ±3 tiles a camp grazed down in the middle
+   * of lush land blocked 90–95 % of eden's fertile adults on days 2–4 and flattened its J-curve.
    */
-  rangeTiles: 3,
-  rangeStride: 1,
+  rangeTiles: 6,
+  rangeStride: 2,
   minRangeFood: 0.72,
   rangeFertilityDrop: 0.4,
   /** Stamina each parent spends on a birth. */
@@ -291,7 +294,7 @@ export function isFertile(a: Agent): boolean {
 /**
  * Whether a and b can mate right now: both fertile, not close kin, genetically compatible, room to
  * spawn, and the home range around the couple still lush enough for both parents
- * (rangeFoodThreshold; checked last because it reads (2·rangeTiles+1)² tiles).
+ * (rangeFoodThreshold; checked last because it reads (2·rangeTiles/rangeStride+1)² = 49 tiles).
  */
 export function canMate(sim: Simulation, a: Agent, b: Agent): boolean {
   if (a === b || a.id === b.id) return false;

@@ -186,12 +186,58 @@ interface Group {
   scarcity: number;
 }
 
+/** Set-like view over one of the saved state.diplomacy key lists. */
+interface KeySet {
+  has(k: number): boolean;
+  add(k: number): void;
+  delete(k: number): void;
+}
+
+type DiplomacyField = 'wars' | 'alliances' | 'feuds';
+
+/**
+ * The diplomacy log bookkeeping lives in SimState (saved), so a loaded run announces wars, alliances and
+ * first blood exactly as the original would. Older saves without it rebuild wars/alliances from relations.
+ */
+function diplomacyOf(sim: Simulation): NonNullable<Simulation['state']['diplomacy']> {
+  let d = sim.state.diplomacy;
+  if (d) return d;
+  d = { wars: [], alliances: [], feuds: [] };
+  const tribes = sim.state.tribes;
+  for (const t of tribes) {
+    if (t.extinctTick !== -1) continue;
+    for (const o of tribes) {
+      if (o.id <= t.id || o.extinctTick !== -1) continue;
+      const m = meanRelation(t, o);
+      if (m < K.warDeclare) d.wars.push(pairKey(t.id, o.id));
+      if (m > K.alliance) d.alliances.push(pairKey(t.id, o.id));
+    }
+  }
+  sim.state.diplomacy = d;
+  return d;
+}
+
+function keySet(sim: Simulation, field: DiplomacyField): KeySet {
+  return {
+    has: (k) => diplomacyOf(sim)[field].includes(k),
+    add: (k) => {
+      const arr = diplomacyOf(sim)[field];
+      if (!arr.includes(k)) arr.push(k);
+    },
+    delete: (k) => {
+      const arr = diplomacyOf(sim)[field];
+      const i = arr.indexOf(k);
+      if (i >= 0) arr.splice(i, 1);
+    },
+  };
+}
+
 interface SocialCache {
-  /** Pairs of tribes currently at war / allied (log hysteresis only). */
-  wars: Set<number>;
-  alliances: Set<number>;
-  /** Tribe pairs that already had a "first blood" kill logged. */
-  feuds: Set<number>;
+  /** Pairs of tribes currently at war / allied (log hysteresis only) — backed by state.diplomacy. */
+  wars: KeySet;
+  alliances: KeySet;
+  /** Tribe pairs that already had a "first blood" kill logged — backed by state.diplomacy. */
+  feuds: KeySet;
   /** Members per living tribe — rebuilt by every tribe pass and only used within it. */
   groups: Map<TribeId, Group>;
   meanForage: number;
@@ -226,9 +272,9 @@ function cacheOf(sim: Simulation): SocialCache {
     }
   }
   c = {
-    wars: new Set(),
-    alliances: new Set(),
-    feuds: new Set(),
+    wars: keySet(sim, 'wars'),
+    alliances: keySet(sim, 'alliances'),
+    feuds: keySet(sim, 'feuds'),
     groups: new Map(),
     meanForage: 0,
     meanCombat: 0,
@@ -246,17 +292,6 @@ function cacheOf(sim: Simulation): SocialCache {
     falloff,
   };
   caches.set(sim, c);
-  // Rebuild diplomacy state from the (possibly loaded) relations so events are not re-logged.
-  const tribes = sim.state.tribes;
-  for (const t of tribes) {
-    if (t.extinctTick !== -1) continue;
-    for (const o of tribes) {
-      if (o.id <= t.id || o.extinctTick !== -1) continue;
-      const m = meanRelation(t, o);
-      if (m < K.warDeclare) c.wars.add(pairKey(t.id, o.id));
-      if (m > K.alliance) c.alliances.add(pairKey(t.id, o.id));
-    }
-  }
   return c;
 }
 
@@ -282,6 +317,10 @@ function pairKey(a: number, b: number): number {
 }
 
 /** "the Varn-kin" — but scenario names such as "The Wolf Pack" are used as-is. */
+export function theTribe(t: Pick<Tribe, 'name'>): string {
+  return /^the\s/i.test(t.name) ? t.name : `the ${t.name}`;
+}
+
 function the(t: Tribe): string {
   return /^the\s/i.test(t.name) ? t.name : `the ${t.name}`;
 }
@@ -1183,6 +1222,7 @@ function markExtinct(sim: Simulation, t: Tribe, c: SocialCache): void {
     const key = pairKey(t.id, o.id);
     c.wars.delete(key);
     c.alliances.delete(key);
+    c.feuds.delete(key);
   }
   t.relations = {};
   c.groups.delete(t.id);

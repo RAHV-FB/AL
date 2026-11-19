@@ -46,6 +46,7 @@ import {
 } from './social';
 import { canMate, geneticDistance, reproduce } from './genetics';
 import { growthFactor, isAdult } from './lifecycle';
+import { temperatureAt } from './disasters';
 import { clearPath, escapeImpassable, halt, moveToward, stepDir } from './steering';
 
 /**
@@ -781,7 +782,8 @@ export function think(sim: Simulation, a: Agent): void {
   const daylight = cfg.dayNight ? clamp01(env.daylight) : 1;
   const night = 1 - daylight;
   const winter = cfg.seasons && env.season === 3 ? 1 : 0;
-  const cold = clamp01((8 - env.temperature) / 18);
+  // local cold snaps count too (lifecycle charges cold stress with the same temperatureAt)
+  const cold = clamp01((8 - temperatureAt(sim, a.x, a.y)) / 18);
   const chill = Math.max(winter, cold);
   const adult = isAdult(a);
   const aggBias = Number.isFinite(cfg.aggressionBias) ? clamp(cfg.aggressionBias, 0, 3) : 1;

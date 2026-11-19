@@ -473,6 +473,12 @@ export interface SimState {
   pendingReplay?: InterventionRecord[];
   /** User interventions enqueued but not yet applied (absent = none); applied at the start of the next tick. */
   pendingQueue?: Intervention[];
+  /**
+   * Diplomacy log bookkeeping (social.ts): tribe pairs (pair keys) currently logged as at war / allied, and
+   * pairs whose "first blood" was already announced. Saved so a loaded run logs exactly what the original
+   * would have; rebuilt from tribe relations when absent (older saves).
+   */
+  diplomacy?: { wars: number[]; alliances: number[]; feuds: number[] };
 }
 
 // ---------------------------------------------------------------- scenarios

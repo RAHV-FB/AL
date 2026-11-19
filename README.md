@@ -144,11 +144,12 @@ There are 12 genes, each in [0, 1]. `genetics.expressTraits` turns them into tra
 
 ### Social life and tribes
 - **Relationships:** each agent keeps up to 12. Each has an affinity, from −1 (enemy) to +1 (close friend), and a kinship flag (parent/child or sibling). Socializing and gifts raise affinity; fights lower it.
-- **Behavior biases:** the genes, together with the global `aggressionBias` and `cooperationBias`, set how likely agents are to fight, steal or share. Hungry, aggressive agents hunt others when plants are scarce.
+- **Behavior biases:** the genes, together with the global `aggressionBias` and `cooperationBias`, set how likely agents are to fight, steal or share.
+- **Competition and conflict (emergent, trait-driven):** each agent weighs every outsider it sees against four motives — food (rob a carried load, or contest a scarce patch someone is eating from), territory (outsiders on the tribe's land near camp), war or a personal grudge, and joining a friend's fight — then against the odds (its own strength and allies in reach versus the other side's band) and its boldness (aggression gene × bias, combat skill, health, desperation when starving). Hostility is weaker toward genetically similar agents and allied tribes. Timid agents keep clear of fierce strangers, and badly hurt fighters flee. Tribes at war raid each other's stockpiles. Escalation saturates, and enmity cools when the sides stop meeting. Peaceful presets (gentle genomes) stay peaceful; harsh ones fight.
 - **Tribes:**
   - Each tribe has a **camp** with a shared **stockpile**. Members deposit food there and withdraw it, and in cold weather the camp halves cold stress for members nearby.
   - Tribes also track **territory** (tiles controlled), **roles**, mean genes and **relations** with other tribes, from −1 (war) to +1 (alliance).
-  - Tribes can split (fission), and they go extinct when their last member dies.
+  - Tribes split (fission) when they grow past ~120 members or spread far from camp; daughter tribes start as friends of the parent. Small bands under 5 members merge into a liked neighbour. Tribes go extinct when their last member dies. Typical worlds hold roughly 5–15 living tribes per 1000 agents.
 
 ### Ecology, seasons and weather
 - **Terrain:** there are 8 terrain types, each with its own food capacity, regrowth rate and movement cost:

@@ -12,7 +12,7 @@ import { TERRAIN_INFO } from './constants';
 import { DISASTER_INFO, startDisaster } from './disasters';
 import { expressTraits, randomGenes } from './genetics';
 import { addHistory, createAgent } from './lifecycle';
-import { foundTribe, joinTribe } from './social';
+import { foundTribe, joinTribe, theTribe } from './social';
 import { defaultFertility, findPassableNear } from './world';
 import {
   DISASTER_KINDS,
@@ -387,11 +387,14 @@ function spawn(sim: Simulation, iv: SpawnSpec): void {
   for (const a of made) {
     const rec = sim.lineageById.get(a.id);
     if (rec) rec.tribeId = a.tribeId;
-    addHistory(sim, a, tribe ? (founded ? `Founded the ${tribe.name}` : `Arrived to join the ${tribe.name}`) : 'Arrived in the world');
+    addHistory(sim, a, tribe ? (founded ? `Founded ${theTribe(tribe)}` : `Arrived to join ${theTribe(tribe)}`) : 'Arrived in the world');
   }
 
   let msg = `Spawned ${plural(made.length, 'agent')}`;
-  if (tribe) msg += founded ? ` founding the ${tribe.name}` : revived ? ` reviving the extinct ${tribe.name}` : ` into the ${tribe.name}`;
+  if (tribe) {
+    const name = theTribe(tribe);
+    msg += founded ? ` founding ${name}` : revived ? ` reviving ${name.replace(/^the /i, 'the extinct ')}` : ` into ${name}`;
+  }
   if (made.length < count) msg += capped ? ' (population cap reached)' : ` (${count - made.length} found no room)`;
   sim.log('intervention', 'info', msg, { x: cx, y: cy, tribeId: tribe ? tribe.id : NONE });
 }

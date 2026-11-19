@@ -1042,7 +1042,7 @@ function sanitizeStats(raw: unknown, r: Repairs): StatsState {
 const STATE_KEYS = new Set([
   'version', 'scenarioId', 'config', 'tick', 'rngState', 'nextAgentId', 'nextTribeId', 'nextEventId', 'nextDisasterId',
   'world', 'env', 'agents', 'tribes', 'lineage', 'events', 'disasters', 'scheduled', 'interventionLog', 'stats',
-  'interventionLogDropped', 'pendingReplay', 'pendingQueue',
+  'interventionLogDropped', 'pendingReplay', 'pendingQueue', 'diplomacy',
 ]);
 
 /** Next free id: the saved counter when it is sane, but always above every id in use. */
@@ -1199,6 +1199,14 @@ function sanitizeState(raw: Obj, r: Repairs): SimState {
     }) as unknown as InterventionRecord[];
     pr.sort((p, q) => p.tick - q.tick);
     if (pr.length) state.pendingReplay = pr;
+  }
+  // optional: diplomacy log bookkeeping (pair keys); absent → social.ts rebuilds it from relations
+  if (raw.diplomacy !== undefined) {
+    if (isObj(raw.diplomacy)) {
+      const keys = (field: string, v: unknown): number[] =>
+        list(r, `diplomacy.${field}`, v, 20000, true, (k) => (isInt(k) && k >= 0 ? k : null)) as number[];
+      state.diplomacy = { wars: keys('wars', raw.diplomacy.wars), alliances: keys('alliances', raw.diplomacy.alliances), feuds: keys('feuds', raw.diplomacy.feuds) };
+    } else r.fix('diplomacy');
   }
   if (raw.pendingQueue !== undefined) {
     const pq = list(r, 'pendingQueue', raw.pendingQueue, 1000, true, (e) => sanitizeIntervention(e, refs, r)) as unknown as Intervention[];
