@@ -1055,6 +1055,8 @@ export interface SparklineOptions {
   minRange?: number;
   /** Flat translucent fill under the line (default false). */
   fill?: boolean;
+  /** Keep 0 inside the y range, so the line shows size as well as change (counts). */
+  zero?: boolean;
   /** Line width in CSS px (default 1.25). */
   width?: number;
 }
@@ -1120,6 +1122,10 @@ export class Sparkline {
         if (this.opts.max === undefined && v[i] > hi) hi = v[i];
       }
     }
+    if (this.opts.zero) {
+      if (lo > 0) lo = 0;
+      if (hi < 0) hi = 0;
+    }
     const minRange = this.opts.minRange ?? 0;
     if (hi - lo < minRange) {
       const c = (hi + lo) / 2;
@@ -1127,8 +1133,12 @@ export class Sparkline {
       hi = c + minRange / 2;
     }
     if (!(hi > lo)) {
-      lo -= 0.5;
-      hi = lo + 1;
+      // a flat series: at the bottom when it is all zeros (and zero is kept in range), else in the middle
+      if (this.opts.zero && lo === 0) hi = 1;
+      else {
+        lo -= 0.5;
+        hi = lo + 1;
+      }
     }
     const pad = 2.5;
     const X = (i: number) => (n === 1 ? w - pad : pad + (i / (n - 1)) * (w - pad * 2));

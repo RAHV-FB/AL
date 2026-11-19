@@ -47,7 +47,7 @@ export const DISASTER_COLOR: Record<DisasterKind, string> = {
   drought: '#cf9f55',
   blight: '#a3835c',
   bloom: '#8fb573',
-  plague: '#b4b35c',
+  plague: '#c2c066',
   meteor: '#cf5b45',
   coldsnap: '#a9c4d8',
 };
@@ -55,16 +55,16 @@ export const DISASTER_COLOR: Record<DisasterKind, string> = {
 /** Flat tint colour and its alpha inside a local disaster. */
 const TINT: Record<DisasterKind, [string, number]> = {
   drought: ['#d6a648', 0.1],
-  blight: ['#6e5a40', 0.16],
+  blight: ['#6e5a40', 0.13],
   bloom: ['#8fb573', 0.09],
-  plague: ['#b4b35c', 0.09],
+  plague: ['#b4b35c', 0.1],
   meteor: ['#2a1d16', 0.24],
   coldsnap: ['#d4e2ec', 0.12],
 };
 
 const DASH: Partial<Record<DisasterKind, [number, number]>> = {
   drought: [7, 4],
-  plague: [3, 3],
+  plague: [4, 3],
 };
 
 export class DisasterFx {
@@ -159,9 +159,9 @@ export class DisasterFx {
       // outline
       ctx.beginPath();
       ctx.arc(d.x, d.y, R, 0, TAU);
-      ctx.globalAlpha = A * 0.9;
+      ctx.globalAlpha = A * 0.95;
       ctx.strokeStyle = col;
-      ctx.lineWidth = 1.25 * px;
+      ctx.lineWidth = 1.4 * px;
       const dash = DASH[kind];
       if (dash) {
         this.dash[0] = dash[0] * px;
@@ -272,7 +272,7 @@ export class DisasterFx {
   /** Notes for whole-map disasters, at the top centre of the map (screen space, CSS px). */
   drawScreen(ctx: CanvasRenderingContext2D, time: number, viewW: number, viewH: number, insets: { top: number; right: number; bottom: number; left: number }): void {
     if (!this.tracked.size) return;
-    let y = insets.top + 12;
+    let y = insets.top + 48;
     const cx = (insets.left + viewW - insets.right) / 2;
     ctx.font = `500 12px ${FONT}`;
     ctx.textBaseline = 'middle';

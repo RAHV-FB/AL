@@ -311,7 +311,7 @@ export function tribeSummaries(sim: Simulation): TribeSummary[] {
 const DISASTER_NOUN: Record<DisasterKind, string> = {
   drought: 'a drought',
   blight: 'a blight',
-  bloom: 'a time of plenty',
+  bloom: 'a period of abundance',
   plague: 'a plague outbreak',
   meteor: 'a meteor strike',
   coldsnap: 'a cold snap',
@@ -325,6 +325,18 @@ function daysLeftText(d: Disaster, tick: number, dl: number): string {
 }
 
 const capFirst = (t: string): string => (t ? t[0].toUpperCase() + t.slice(1) : t);
+
+/**
+ * Text written by the simulation (thoughts, life stories, event messages), shown without dashes: a spaced dash
+ * between two clauses becomes a comma, a dash between numbers becomes "to".
+ */
+export function plainText(t: string): string {
+  if (!t || !/[\u2012-\u2015]/.test(t)) return t;
+  return t
+    .replace(/(\d)\s*[\u2012-\u2015]\s*(\d)/g, '$1 to $2')
+    .replace(/\s*[\u2012-\u2015]\s*/g, ', ')
+    .replace(/,\s*,/g, ',');
+}
 
 /**
  * Three to six short plain sentences about what is happening now, from the simulation's real state only:
@@ -460,7 +472,7 @@ export function describeNow(sim: Simulation): string[] {
     else if (latest.category === 'disaster' && said(5) && !/meteor/i.test(m)) latest = null;
   }
   if (latest && latest.message) {
-    const msg = latest.message.trim();
+    const msg = plainText(latest.message.trim());
     add(6, 6, `Day ${dayOfTick(sim, latest.tick)}: ${/[.!?]$/.test(msg) ? msg : `${msg}.`}`);
   }
 
@@ -517,7 +529,7 @@ const dayHover = (v: number) => {
   return `Day ${(Math.floor(v * k + 1e-6) / k).toFixed(v < 10 ? 2 : 1)}`;
 };
 const pctFmt = (v: number) => `${Math.round(v * 100)}%`;
-const rateFmt = (v: number) => (v < 10 ? v.toFixed(1) : formatNum(Math.round(v)));
+const rateFmt = (v: number) => (Number.isInteger(v) ? formatNum(v) : v < 10 ? v.toFixed(1) : formatNum(Math.round(v)));
 
 const RANGES: { label: string; days: number }[] = [
   { label: 'All', days: Infinity },
@@ -538,7 +550,6 @@ interface TribeRow {
   name: HTMLElement;
   count: HTMLElement;
   rel: HTMLElement;
-  stored: HTMLElement;
   pos: { x: number; y: number };
 }
 
@@ -573,7 +584,7 @@ export function createAnalyticsPanel(container: HTMLElement, opts: AnalyticsPane
     const value = h('span', 'an-key-value', '');
     root.append(h('span', 'an-key-label', label), value);
     keys.append(root);
-    const spark = new Sparkline(root, { color, height: 16 });
+    const spark = new Sparkline(root, { color, height: 16, zero: true });
     return { root, value, spark };
   };
   const kPop = keyRow('Population', 'Agents alive now, and the recent trend.');
@@ -612,13 +623,10 @@ export function createAnalyticsPanel(container: HTMLElement, opts: AnalyticsPane
     const name = h('span', 'an-tribe-name');
     const count = h('span', 'an-tribe-n');
     const rel = h('span', 'an-tribe-rel');
-    const stored = h('span', 'an-tribe-food');
     const top = h('span', 'an-tribe-top');
     top.append(sw, name, count);
-    const bottom = h('span', 'an-tribe-sub');
-    bottom.append(rel, stored);
-    el.append(top, bottom);
-    const row: TribeRow = { el, sw, name, count, rel, stored, pos: { x: NaN, y: NaN } };
+    el.append(top, rel);
+    const row: TribeRow = { el, sw, name, count, rel, pos: { x: NaN, y: NaN } };
     el.addEventListener('click', () => {
       if (opts.onJump && Number.isFinite(row.pos.x) && Number.isFinite(row.pos.y)) opts.onJump(row.pos.x, row.pos.y);
     });
@@ -847,10 +855,9 @@ export function createAnalyticsPanel(container: HTMLElement, opts: AnalyticsPane
       const c = tribeColor(t.hue);
       if (row.sw.style.background !== c) row.sw.style.background = c;
       setText(row.name, t.name);
-      setText(row.count, plural(t.members, 'member'));
+      setText(row.count, `${plural(t.members, 'member')}, ${fmtInt(t.stored)} food`);
       setText(row.rel, t.relations);
-      setText(row.stored, `${fmtInt(t.stored)} food stored`);
-      row.el.title = opts.onJump ? `Show the camp of ${t.name} on the map` : t.name;
+      row.el.title = `${t.name}: ${plural(t.members, 'member')}, ${fmtInt(t.stored)} food stored at the camp.${opts.onJump ? ' Click to show the camp on the map.' : ''}`;
       if (triList.children[i] !== row.el) triList.insertBefore(row.el, triList.children[i] ?? null);
     });
     for (const [id, row] of triRows) {

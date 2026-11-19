@@ -9,7 +9,7 @@
 import './analytics.css';
 import type { Simulation } from '../sim/simulation';
 import { GENES, NONE, type ActionKind, type Agent, type AgentId, type GeneName, type LineageRecord, type Relationship, type Traits } from '../sim/types';
-import { ACTION_LABELS, OPTION_LABELS, GENE_DESCRIPTIONS, GENE_LABELS, ROLE_LABELS, clockOfTick, dayOfTick, tribeColor } from './analytics';
+import { ACTION_LABELS, OPTION_LABELS, GENE_DESCRIPTIONS, GENE_LABELS, ROLE_LABELS, clockOfTick, dayOfTick, plainText, tribeColor } from './analytics';
 import { REPRO, mateFoodThreshold, rangeFoodThreshold } from '../sim/genetics';
 import { localFoodFraction } from '../sim/ecology';
 import { SOCIAL_TUNING, carryCapacity, theTribe } from '../sim/social';
@@ -319,8 +319,7 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
     const meta1 = h('div', 'insp-meta');
     const sw = h('i', 'insp-swatch');
     const tribeName = h('span', 'insp-tribe');
-    const roleEl = h('span', 'insp-role');
-    meta1.append(sw, tribeName, roleEl);
+    meta1.append(sw, tribeName);
     const meta2 = h('div', 'insp-meta insp-meta-2');
     head.append(nameLine, meta1, meta2);
     root.append(head);
@@ -374,9 +373,12 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
     // ---------------------------------------------------------------- why
     const whyB = block(root, 'Why');
     const whySec = whyB.parentElement as HTMLElement;
-    whyB.append(h('p', 'insp-explain', 'How much each option appealed to it at its last decision. It acts on the strongest.'));
+    whyB.append(h('p', 'insp-explain', 'How much each option appealed to it at its last decision.'));
     const utilList = h('div', 'insp-utils');
     whyB.append(utilList);
+    const utilNote = h('p', 'insp-explain insp-util-note', 'It has changed what it is doing since that decision.');
+    utilNote.hidden = true;
+    whyB.append(utilNote);
     const utilEmpty = h('p', 'insp-muted', 'No decision yet.');
     whyB.append(utilEmpty);
     const utilCache = new Map<string | number, HTMLElement>();
@@ -454,13 +456,13 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
       setText(tribeName, tribe ? tribe.name + (tribe.extinctTick !== -1 ? ' (died out)' : '') : 'No tribe');
       tribeName.title = tribe ? `${tribe.name}: ${tribe.members} members` : 'Not a member of any tribe';
       const role = a ? a.role : 'none';
-      roleEl.hidden = !a || role === 'none';
-      setText(roleEl, ROLE_LABELS[role]);
       const birth = a ? a.birthTick : rec ? rec.birthTick : 0;
       const deathTick = a ? a.deathTick : rec ? rec.deathTick : -1;
       const ageTicks = a ? a.age : (deathTick >= 0 ? deathTick : s2.state.tick) - birth;
       const adult = a ? a.age >= a.traits.maturityAge : true;
-      setText(meta2, `${days(ageTicks, dl)} old${a && !adult ? ', not yet adult' : ''}, generation ${gen}`);
+      const roleText = a && role !== 'none' ? `${ROLE_LABELS[role]}, ` : '';
+      const ageText = `${days(ageTicks, dl)} old${a && !adult ? ', not yet adult' : ''}, generation ${gen}`;
+      setText(meta2, roleText ? roleText + ageText : ageText[0].toUpperCase() + ageText.slice(1));
 
       // death line
       const cause = a ? a.deathCause : rec ? rec.deathCause : null;
@@ -479,7 +481,7 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
       if (a) {
         const tr = a.traits;
         setText(doing, alive ? describeAction(s2, a) : 'Dead.');
-        setText(thought, alive && a.thought ? a.thought : '');
+        setText(thought, alive && a.thought ? plainText(a.thought) : '');
         thought.hidden = !alive || !a.thought;
 
         setMeter(mHealth, a.health / tr.maxHealth, `${Math.round(a.health)} of ${Math.round(tr.maxHealth)}`);
@@ -567,7 +569,7 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
           (u) => {
             const row = h('div', 'insp-util');
             const lab = h('span', 'insp-util-name');
-            lab.append(h('span', '', OPTION_LABELS[u[0]] ?? u[0]), h('span', 'insp-chosen', 'chosen'));
+            lab.append(h('span', '', OPTION_LABELS[u[0]] ?? u[0]), h('span', 'insp-chosen', 'doing now'));
             const track = h('span', 'insp-track insp-track-thin');
             track.append(h('span', 'insp-fill'));
             row.append(lab, track, h('span', 'insp-util-val'));
@@ -580,6 +582,7 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
           },
         );
         utilEmpty.hidden = utils.length > 0;
+        utilNote.hidden = !alive || !utils.length || utils[0][0] === a.action;
 
         // relationships (rebuilt only when the people or their groups change)
         const rels = [...a.relationships];
@@ -612,7 +615,7 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
           (e) => `${e.tick}|${e.text}`,
           (e) => {
             const li = h('li');
-            li.append(h('span', 'insp-hist-t', clockOfTick(s2, e.tick)), h('span', 'insp-hist-x', e.text));
+            li.append(h('span', 'insp-hist-t', clockOfTick(s2, e.tick)), h('span', 'insp-hist-x', plainText(e.text)));
             return li;
           },
           () => {},
@@ -648,10 +651,15 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
       const parents = a ? a.parents : rec ? rec.parents : ([NONE, NONE] as [AgentId, AgentId]);
       const pRefs = parents.filter((p) => p !== NONE).map((p) => personRef(s2, p));
       const gRefs: PersonRef[] = [];
+      let parentsKnown = 0;
+      let parentsFounders = 0;
       for (const p of parents) {
         if (p === NONE) continue;
         const pp = parentsOf(s2, p);
-        if (pp) for (const g of pp) if (g !== NONE && !gRefs.some((r) => r.id === g)) gRefs.push(personRef(s2, g));
+        if (!pp) continue;
+        parentsKnown++;
+        if (pp[0] === NONE && pp[1] === NONE) parentsFounders++;
+        for (const g of pp) if (g !== NONE && !gRefs.some((r) => r.id === g)) gRefs.push(personRef(s2, g));
       }
       const idx = getChildIndex(s2);
       const sibIds: AgentId[] = [];
@@ -677,7 +685,8 @@ export function createInspector(container: HTMLElement, handlers: InspectorHandl
         famKey = key;
         const founder = parents[0] === NONE && parents[1] === NONE;
         nameRow(famParents, 'Parents', pRefs.map((ref) => ({ ref })), founder ? 'None, a founder' : 'Unknown');
-        nameRow(famGrand, 'Grandparents', gRefs.map((ref) => ({ ref })), founder ? 'None' : 'Unknown');
+        const noGrand = founder ? 'None' : parentsKnown > 0 && parentsFounders === parentsKnown ? 'None, the parents are founders' : 'Unknown';
+        nameRow(famGrand, 'Grandparents', gRefs.map((ref) => ({ ref })), noGrand);
         nameRow(famSibs, 'Siblings', sRefs.map((ref) => ({ ref })), 'None known');
         const unlisted = offspring > kRefs.length ? `${offspring - kRefs.length} earlier ones not listed` : '';
         nameRow(famKids, 'Children', kRefs.map((ref) => ({ ref })), 'None yet', unlisted, 8);

@@ -11,7 +11,7 @@ try {
   box.className = 'boot-error';
   const card = document.createElement('div');
   const h1 = document.createElement('h1');
-  h1.textContent = 'Artificial Life failed to start';
+  h1.textContent = 'Artificial Life could not start.';
   const pre = document.createElement('pre');
   pre.textContent = err instanceof Error ? `${err.message}\n\n${err.stack ?? ''}` : String(err);
   card.append(h1, pre);

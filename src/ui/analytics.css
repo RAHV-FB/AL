@@ -299,6 +299,11 @@ details[open] > .insp-sec-title::before {
   gap: 8px;
   min-width: 0;
 }
+.an-tribe-rel {
+  padding-left: 18px;
+  color: var(--_muted);
+  font-size: 12px;
+}
 .an-sw {
   flex: none;
   width: 10px;
@@ -315,20 +320,6 @@ details[open] > .insp-sec-title::before {
 }
 .an-tribe-n {
   color: var(--_muted);
-  white-space: nowrap;
-}
-.an-tribe-sub {
-  display: flex;
-  gap: 10px;
-  padding-left: 18px;
-  color: var(--_muted);
-  font-size: 12px;
-}
-.an-tribe-rel {
-  flex: 1;
-  min-width: 0;
-}
-.an-tribe-food {
   white-space: nowrap;
 }
 
@@ -529,9 +520,6 @@ details[open] > .insp-sec-title::before {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.insp-role[hidden] {
-  display: none;
 }
 .insp-meta-2 {
   display: block;
@@ -834,18 +822,21 @@ span.insp-person {
 }
 .ev-chips {
   display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
+  gap: 3px;
   padding-bottom: 4px;
 }
 .ev-chip {
+  flex: 1 1 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 28px;
+  min-width: 0;
   height: 26px;
-  padding: 0 6px;
+  padding: 0 2px;
   color: var(--_faint);
+}
+.ev-chip-all {
+  flex: 1.3 1 0;
 }
 .ev-chip[aria-pressed='true'] {
   color: var(--_text);

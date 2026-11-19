@@ -3,7 +3,7 @@
 import { DEFAULT_CONFIG } from '../sim/config';
 import { SCENARIOS } from '../sim/presets';
 import type { ScenarioDef } from '../sim/types';
-import { h, icon } from './dom';
+import { fill, h, icon } from './dom';
 
 export interface StartHandlers {
   /** The selection or seed changed: regenerate the preview (seed undefined = experiment default). */
@@ -117,7 +117,8 @@ export function buildStartScreen(handlers: StartHandlers): StartScreen {
   const paintDetail = () => {
     const sc = selected;
     const look = (sc.lookFor ?? []).slice(0, 4);
-    detail.replaceChildren(
+    fill(
+      detail,
       h('h2', { class: 'st-name' }, sc.name),
       sc.description ? h('p', { class: 'st-desc' }, sc.description) : null,
       look.length ? h('h3', null, 'What to watch for') : null,

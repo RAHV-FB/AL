@@ -22,6 +22,9 @@ export const ACTION_LABEL_ZOOM = 6;
 export const LABEL_MAX_AGENTS = 120;
 const MAX_LABELS = 160;
 
+/** Health fraction below which an agent gets a health arc at close zoom. */
+const HURT = 0.75;
+
 /** Colour of the thin ring around infected agents (muted yellow-green). */
 export const INFECTED_COLOR = '#b4b35c';
 
@@ -97,6 +100,19 @@ export class AgentPainter {
   private lname: string[] = [];
   private lact: (string | null)[] = [];
   private widths = new Map<string, number>();
+
+  /** Start a frame of labels: forget the boxes taken last frame. */
+  beginLabels(): void {
+    this.boxes.length = 0;
+    this.labelsDrawn = 0;
+  }
+
+  /** True if a label box (CSS px) is free; then it is taken. */
+  reserve(x0: number, y0: number, x1: number, y1: number): boolean {
+    if (overlaps(this.boxes, x0, y0, x1, y1)) return false;
+    this.boxes.push(x0, y0, x1, y1);
+    return true;
+  }
 
   private ensure(n: number): void {
     if (this.vis.length >= n) return;
@@ -282,7 +298,7 @@ export class AgentPainter {
         ctx.lineWidth = px;
         ctx.stroke();
       }
-      // health arcs while hurt: dark track, then the remaining health (light, ochre below half, rust below a quarter)
+      // health arcs while clearly hurt: dark track, then the remaining health (light, ochre below half, rust below a quarter)
       this.healthArcs(ctx, agents, zoom);
     }
 
@@ -315,7 +331,7 @@ export class AgentPainter {
     for (let k = 0; k < n; k++) {
       const a = agents[vis[k]];
       const mh = a.traits?.maxHealth || 100;
-      if (!(a.health < mh * 0.9)) continue;
+      if (!(a.health < mh * HURT)) continue;
       any = true;
       const r = rad[k] * 1.08 + 2.2 * px;
       ctx.moveTo(a.x + r, a.y);
@@ -323,8 +339,8 @@ export class AgentPainter {
     }
     if (!any) return;
     ctx.lineCap = 'butt';
-    ctx.strokeStyle = 'rgba(19,18,16,0.55)';
-    ctx.lineWidth = 2.6 * px;
+    ctx.strokeStyle = 'rgba(19,18,16,0.5)';
+    ctx.lineWidth = 2.4 * px;
     ctx.stroke();
     ctx.lineWidth = 1.4 * px;
     for (let level = 0; level < 3; level++) {
@@ -334,7 +350,7 @@ export class AgentPainter {
         const a = agents[vis[k]];
         const mh = a.traits?.maxHealth || 100;
         const f = a.health / mh;
-        if (!(f < 0.9)) continue;
+        if (!(f < HURT)) continue;
         const lv = f >= 0.5 ? 0 : f >= 0.25 ? 1 : 2;
         if (lv !== level) continue;
         const fr = f > 0 ? f : 0;
@@ -365,13 +381,12 @@ export class AgentPainter {
     vh: number,
     showLabels: boolean,
     selId: number,
+    night = 0,
   ): void {
     const agents = sim.state.agents;
     const hx = vw / 2;
     const hy = vh / 2;
     const boxes = this.boxes;
-    boxes.length = 0;
-    this.labelsDrawn = 0;
     ctx.lineJoin = 'round';
     ctx.lineCap = 'round';
     ctx.setLineDash([]);
@@ -388,7 +403,7 @@ export class AgentPainter {
     }
     const n = this.visN;
     if (!n || zoom < DETAIL_ZOOM) return;
-    if (n < 700) this.drawGlyphs(ctx, agents, zoom, camX, camY, vw, vh);
+    if (n < 700) this.drawGlyphs(ctx, agents, zoom, camX, camY, vw, vh, night < 0.5);
     const names = showLabels && (this.onScreen < LABEL_MAX_AGENTS || zoom >= ACTION_LABEL_ZOOM);
     if (!names) return;
     const withAction = zoom >= ACTION_LABEL_ZOOM;
@@ -472,8 +487,11 @@ export class AgentPainter {
     ctx.textBaseline = 'alphabetic';
   }
 
-  /** Small vector glyphs for eating, resting, attacking, fleeing and courting, batched per kind. */
-  private drawGlyphs(ctx: CanvasRenderingContext2D, agents: Agent[], zoom: number, camX: number, camY: number, vw: number, vh: number): void {
+  /**
+   * Small vector glyphs for eating, resting, attacking, fleeing and courting, batched per kind. Resting is
+   * marked by day only (at night nearly everyone sleeps, so the marks would only add clutter).
+   */
+  private drawGlyphs(ctx: CanvasRenderingContext2D, agents: Agent[], zoom: number, camX: number, camY: number, vw: number, vh: number, restMarks: boolean): void {
     const hx = vw / 2;
     const hy = vh / 2;
     const s = Math.min(8, 4.6 + zoom * 0.3);
@@ -485,7 +503,7 @@ export class AgentPainter {
     for (let k = 0; k < this.visN; k++) {
       const a = agents[this.vis[k]];
       const act = a.action;
-      if (act !== 'eat' && act !== 'rest' && act !== 'attack' && act !== 'flee' && act !== 'mate') continue;
+      if (act !== 'eat' && act !== 'attack' && act !== 'flee' && act !== 'mate' && !(act === 'rest' && restMarks)) continue;
       const sx = (a.x - camX) * zoom + hx;
       const sy = (a.y - camY) * zoom + hy;
       if (sx < -20 || sx > vw + 20 || sy < -20 || sy > vh + 20) continue;

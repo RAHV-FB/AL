@@ -6,7 +6,7 @@
 import './analytics.css';
 import type { Simulation } from '../sim/simulation';
 import type { EventCategory, SimEvent } from '../sim/types';
-import { clockOfTick } from './analytics';
+import { clockOfTick, plainText } from './analytics';
 import { icon } from './dom';
 
 export interface EventLogPanel {
@@ -137,7 +137,7 @@ export function createEventLog(container: HTMLElement, onJump: (x: number, y: nu
     ic.append(safeIcon(c.icon, 15));
     ic.title = c.label;
     const body = h('span', 'ev-body');
-    const msg = h('span', 'ev-msg', ev.message);
+    const msg = h('span', 'ev-msg', plainText(ev.message));
     const time = h('span', 'ev-time', clockOfTick(s, ev.tick));
     time.title = `Tick ${ev.tick}`;
     body.append(msg, time);

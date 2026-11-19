@@ -226,7 +226,7 @@ function detectEvents(sim: Simulation, prev: StatsSample[], cur: StatsSample): v
   // Extinction.
   if (cur.population === 0) {
     if (last.population > 0) {
-      sim.log('population', 'major', 'Extinction: the last agent has died. Spawn new agents to start again.');
+      sim.log('population', 'major', 'Extinction: the last agent has died. Add new agents to start again.');
     }
     return;
   }
@@ -291,6 +291,8 @@ function detectEvents(sim: Simulation, prev: StatsSample[], cur: StatsSample): v
     const to = cur.geneMeans[g];
     const pct = Math.round((Math.abs(d) / Math.max(0.05, from)) * 100);
     const days = (cur.tick - old.tick) / dayLength;
+    // the number as printed picks "day" or "days" (1.2 days prints as "1 day", never "1 days" or "1.0 days")
+    const span = days < 0.95 ? days.toFixed(1) : String(Math.round(days));
     const gene = GENES[g];
     const why =
       gene === 'hue'
@@ -301,7 +303,7 @@ function detectEvents(sim: Simulation, prev: StatsSample[], cur: StatsSample): v
     sim.log(
       'evolution',
       'info',
-      `Average ${gene} is ${d > 0 ? 'up' : 'down'} ${pct}% in ${days < 1 ? days.toFixed(1) : Math.round(days)} day${days === 1 ? '' : 's'}, from ${from.toFixed(2)} to ${to.toFixed(2)}.${why}`,
+      `Average ${gene} is ${d > 0 ? 'up' : 'down'} ${pct}% in ${span} day${span === '1' ? '' : 's'}, from ${from.toFixed(2)} to ${to.toFixed(2)}.${why}`,
     );
   }
 }

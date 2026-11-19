@@ -33,6 +33,12 @@ export function append(el: Element, children: (Child | Child[])[]): void {
   }
 }
 
+/** Replace an element's children (null, undefined and false are skipped). */
+export function fill(el: Element, ...children: (Child | Child[])[]): void {
+  el.replaceChildren();
+  append(el, children);
+}
+
 // ------------------------------------------------------------------ icons
 // One icon set for the whole app: 24-unit viewBox, 1.5 stroke, round caps and joins,
 // currentColor. Small filled dots only where a dot is part of the drawing.
@@ -337,7 +343,7 @@ export function toggle(o: { label: string; value: boolean; help?: string; onChan
   const input = h('input', { type: 'checkbox' });
   input.checked = o.value;
   input.addEventListener('change', () => o.onChange(input.checked));
-  const el = h('label', { class: 'ctl ctl-toggle', tip: o.help }, h('span', { class: 'ctl-label' }, o.label), input, h('span', { class: 'switch', 'aria-hidden': 'true' }));
+  const el = h('label', { class: 'ctl ctl-toggle', tip: o.help }, input, h('span', { class: 'box', 'aria-hidden': 'true' }), h('span', { class: 'ctl-label' }, o.label));
   return {
     el,
     input,

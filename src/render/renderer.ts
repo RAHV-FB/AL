@@ -10,7 +10,7 @@
  * The simulation is read-only here; every cache is renderer-side and rebuilt lazily.
  */
 import type { Simulation } from '../sim/simulation';
-import type { Agent, EnvState } from '../sim/types';
+import type { Agent, EnvState, Tribe } from '../sim/types';
 import { SOCIAL_TUNING } from '../sim/social';
 import { Camera } from './camera';
 import { TerrainLayer } from './terrainLayer';
@@ -82,6 +82,11 @@ const MAX_LINES = 600;
 /** Personal affinity from which two agents count as friends / enemies (the simulation's own thresholds). */
 const FRIEND = SOCIAL_TUNING.friend;
 const ENEMY = SOCIAL_TUNING.grudge;
+/** Stronger thresholds for the network of lines between other agents, which keep it readable in a crowd. */
+const STRONG_FRIEND = 0.5;
+const STRONG_ENEMY = -0.5;
+/** Lines between other agents longer than this (world units) are left out. */
+const MAX_LINE = 160;
 
 /** Kinds of ties between agents (index into TIE_COLOR). */
 const FAMILY = 0;
@@ -124,6 +129,7 @@ export class Renderer {
   private tieSeen = new Set<number>();
   // territory edges per tribe (reused segment lists)
   private edgeSegs = new Map<number, number[]>();
+  private campOrder: Tribe[] = [];
   // camera snapshot for screen-space helpers
   private camX = 0;
   private camY = 0;
@@ -250,7 +256,7 @@ export class Renderer {
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
     this.drawFrost(ctx, env, WW, WH);
-    this.drawNight(ctx, env, sim, WW, WH);
+    const night = this.drawNight(ctx, env, sim, WW, WH);
     ctx.strokeStyle = PAL.border2;
     ctx.lineWidth = px;
     ctx.strokeRect(0, 0, WW, WH);
@@ -276,12 +282,13 @@ export class Renderer {
     // ---- screen space (CSS px)
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.globalAlpha = 1;
+    this.painter.beginLabels();
     if (view.showCamps) this.drawCampLabels(ctx, sim, z, vw, vh);
     this.fx.drawLabels(ctx, time, this.toSX, this.toSY, z, vw, vh);
     const hov = view.hoverId >= 0 && view.hoverId !== view.selectedId ? sim.getAgent(view.hoverId) : undefined;
     if (hov) this.drawRing(ctx, hov, false);
     if (sel) this.drawRing(ctx, sel, true);
-    this.painter.drawScreen(ctx, sim, z, cam.x, cam.y, vw, vh, view.showLabels, sel ? sel.id : -1);
+    this.painter.drawScreen(ctx, sim, z, cam.x, cam.y, vw, vh, view.showLabels, sel ? sel.id : -1, night);
     this.stats.labels = this.painter.labelsDrawn;
     if (sel && this.tieAgents.length) this.drawTieMarkers(ctx, sel, vw, vh);
     const ins = view.insets ?? NO_INSETS;
@@ -399,27 +406,34 @@ export class Renderer {
     }
   }
 
-  /** Tribe name and stored food under each camp (screen space). */
+  /** Tribe name and stored food under each camp (screen space); bigger tribes first, overlapping labels skipped. */
   private drawCampLabels(ctx: CanvasRenderingContext2D, sim: Simulation, z: number, vw: number, vh: number): void {
     if (z < 0.33) return;
     const s = this.campSize(z) * z;
+    const order = this.campOrder;
+    order.length = 0;
+    for (const t of sim.state.tribes) if (t.extinctTick === -1) order.push(t);
+    order.sort((a, b) => (b.members || 0) - (a.members || 0) || a.id - b.id);
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
     ctx.lineJoin = 'round';
     ctx.strokeStyle = PAL.ink;
-    for (const t of sim.state.tribes) {
-      if (t.extinctTick !== -1) continue;
+    const second = z >= 0.9;
+    for (const t of order) {
       const sx = this.toSX(t.homeX);
       const sy = this.toSY(t.homeY) + s * 0.72 + 5;
       if (sx < -120 || sx > vw + 120 || sy < -40 || sy > vh + 20) continue;
       ctx.font = `600 12px ${FONT}`;
+      const w = ctx.measureText(t.name).width;
+      const stock = Math.round(Math.max(0, t.stockpile || 0));
+      const line = stock > 0 ? `${stock.toLocaleString('en-US')} food stored` : 'No food stored';
+      const half = Math.max(w, second ? line.length * 5.8 : 0) / 2 + 3;
+      if (!this.painter.reserve(sx - half, sy - 2, sx + half, sy + (second ? 29 : 16))) continue;
       ctx.lineWidth = 3.2;
       ctx.strokeText(t.name, sx, sy);
       ctx.fillStyle = PAL.text;
       ctx.fillText(t.name, sx, sy);
-      if (z >= 0.9) {
-        const stock = Math.round(Math.max(0, t.stockpile || 0));
-        const line = stock > 0 ? `${stock.toLocaleString('en-US')} food stored` : 'No food stored';
+      if (second) {
         ctx.font = `400 11px ${FONT}`;
         ctx.lineWidth = 3;
         ctx.strokeText(line, sx, sy + 15);
@@ -432,8 +446,8 @@ export class Renderer {
   }
 
   /**
-   * Territory edges of the visible tiles (close zoom, without the territory overlay): a thin dashed line in
-   * each tribe's colour on its own side of the border.
+   * Territory edges of the visible tiles (close zoom, without the territory overlay): a thin line in each
+   * tribe's colour on its own side of the border.
    */
   private drawTerritoryEdges(ctx: CanvasRenderingContext2D, sim: Simulation, z: number): void {
     const world = sim.state.world;
@@ -485,12 +499,11 @@ export class Renderer {
       }
     }
     if (!any) return;
+    // solid and faint, so they never read as the dashed enemy lines
     ctx.lineCap = 'butt';
-    ctx.lineWidth = 1.2 / z;
-    this.dash[0] = 5 / z;
-    this.dash[1] = 4 / z;
-    ctx.setLineDash(this.dash);
-    ctx.globalAlpha = 0.75;
+    ctx.lineWidth = 1 / z;
+    ctx.setLineDash(this.noDash);
+    ctx.globalAlpha = 0.55;
     for (const [id, v] of segs) {
       if (!v.length) continue;
       const tr = sim.getTribe(id);
@@ -511,8 +524,9 @@ export class Renderer {
 
   /**
    * Lines between agents with strong ties (world space, under the bodies). At close zoom: every mother and
-   * child, friends and enemies among the visible agents (capped). At every zoom: the selected agent's ties,
-   * drawn wider; the others are dimmed while an agent is selected. Returns the number of lines drawn.
+   * child, close friends and bitter enemies among the visible agents (nearby pairs only, capped). At every
+   * zoom: all of the selected agent's ties, drawn wider; the others are dimmed while an agent is selected.
+   * Returns the number of lines drawn.
    */
   private drawConnections(ctx: CanvasRenderingContext2D, sim: Simulation, view: ViewOptions, sel: Agent | undefined, z: number): number {
     this.tieAgents.length = 0;
@@ -533,12 +547,13 @@ export class Renderer {
       let nf = 0;
       let nr = 0;
       let ne = 0;
+      const L2 = MAX_LINE * MAX_LINE;
       for (let k = 0; k < n && count < MAX_LINES; k++) {
         const a = agents[vis[k]];
         const mid = a.parents ? a.parents[0] : -1;
         if (mid >= 0) {
           const m = sim.getAgent(mid);
-          if (m && m.x >= b.x0 && m.x <= b.x1 && m.y >= b.y0 && m.y <= b.y1) {
+          if (m && m.x >= b.x0 && m.x <= b.x1 && m.y >= b.y0 && m.y <= b.y1 && (m.x - a.x) ** 2 + (m.y - a.y) ** 2 <= L2) {
             fam.moveTo(a.x, a.y);
             fam.lineTo(m.x, m.y);
             nf++;
@@ -550,10 +565,11 @@ export class Renderer {
         for (let i = 0; i < rels.length; i++) {
           const r = rels[i];
           const aff = r.affinity;
-          const enemy = aff <= ENEMY;
-          if (!enemy && !(r.kin === 0 && aff >= FRIEND)) continue;
+          const enemy = aff <= STRONG_ENEMY;
+          if (!enemy && !(r.kin === 0 && aff >= STRONG_FRIEND)) continue;
           const o = sim.getAgent(r.id);
           if (!o || o.x < b.x0 || o.x > b.x1 || o.y < b.y0 || o.y > b.y1) continue;
+          if ((o.x - a.x) ** 2 + (o.y - a.y) ** 2 > L2) continue;
           // a pair both sides list is drawn once, from the lower id
           if (a.id > o.id && strongTie(o, a.id)) continue;
           if (enemy) {
@@ -568,7 +584,7 @@ export class Renderer {
           count++;
         }
       }
-      const dim = sel ? 0.45 : 1;
+      const dim = sel ? 0.35 : 1;
       if (nf) {
         ctx.globalAlpha = 0.8 * dim;
         ctx.strokeStyle = TIE.family;
@@ -927,14 +943,14 @@ export class Renderer {
   }
 }
 
-/** True when `o` counts `id` as a friend (not kin) or an enemy. */
+/** True when `o` counts `id` as a close friend (not kin) or a bitter enemy (the network thresholds). */
 function strongTie(o: Agent, id: number): boolean {
   const rels = o.relationships;
   if (!rels) return false;
   for (let i = 0; i < rels.length; i++) {
     const r = rels[i];
     if (r.id !== id) continue;
-    return r.affinity <= ENEMY || (r.kin === 0 && r.affinity >= FRIEND);
+    return r.affinity <= STRONG_ENEMY || (r.kin === 0 && r.affinity >= STRONG_FRIEND);
   }
   return false;
 }
